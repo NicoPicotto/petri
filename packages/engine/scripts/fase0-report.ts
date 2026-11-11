@@ -6,7 +6,7 @@
  */
 
 import { PHASE0_CONFIG } from '../src/index';
-import { KNOBS_A, KNOBS_B, MONTHS, SEEDS, burnInTail, runCapsule, slope, type RunSummary } from '../test/helpers/phase0Criteria';
+import { KNOBS_A, KNOBS_B, MONTHS, SEEDS, burnInGap, burnInSeries, runCapsule, type RunSummary } from '../test/helpers/phase0Criteria';
 
 const pct = (x: number, d = 2) => `${(x * 100).toFixed(d)}%`;
 
@@ -36,18 +36,14 @@ const runsB: RunSummary[] = SEEDS.map((seed) => runCapsule(seed, KNOBS_B));
 
 const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
 const burnIn = PHASE0_CONFIG.burnInTicks ?? 0;
-console.log(`Calentamiento: ${burnIn} meses. Últimos 24 meses por semilla:\n`);
-console.log('semilla | desempleo: media  pend. (pp/año) | margen precio/costo: media  pend. (/año)');
-const tails = SEEDS.map((seed) => burnInTail(seed));
-for (const t of tails) {
-  console.log(
-    `${String(t.seed).padStart(7)} | ${pct(mean(t.unemployment), 1).padStart(15)}  ${(slope(t.unemployment) * 1200).toFixed(2).padStart(14)} | ${mean(t.markup).toFixed(3).padStart(26)}  ${(slope(t.markup) * 12).toFixed(4).padStart(11)}`,
-  );
+console.log(`Calentamiento: ${burnIn} meses. Últimos 5 años del calentamiento contra el régimen (años 40 a 50 desde la creación):\n`);
+console.log('semilla | desempleo: brecha (pp) | margen precio/costo: brecha');
+const gaps = SEEDS.map((seed) => ({ seed, ...burnInGap(burnInSeries(seed), burnIn) }));
+for (const g of gaps) {
+  console.log(`${String(g.seed).padStart(7)} | ${(g.unemployment * 100).toFixed(2).padStart(22)} | ${g.markup.toFixed(4).padStart(27)}`);
 }
-const uS = tails.map((t) => slope(t.unemployment) * 12);
-const mS = tails.map((t) => slope(t.markup) * 12);
 console.log(
-  `  pendiente media: desempleo ${(mean(uS) * 100).toFixed(2)} pp/año (${uS.filter((x) => x < 0).length}/20 negativas) · margen ${mean(mS).toFixed(4)}/año (${mS.filter((x) => x < 0).length}/20 negativas)\n`,
+  `  brecha media: desempleo ${(mean(gaps.map((g) => g.unemployment)) * 100).toFixed(2)} pp · margen ${mean(gaps.map((g) => g.markup)).toFixed(4)}\n`,
 );
 
 console.log(`Fase 0 — ${SEEDS.length} semillas, ${MONTHS / 12} años visibles, tendencia medida desde el mes 0\n`);

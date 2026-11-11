@@ -35,6 +35,11 @@ export interface Firm extends Agent {
   wage: Cents;
   /** Producción deseada, en unidades (puede no ser entera). */
   plannedOutput: number;
+  /**
+   * Producción efectiva del último mes, en unidades. R1 ajusta la cantidad a
+   * partir de este valor, no de `plannedOutput` (ver docs/fase1-reglas.md).
+   */
+  lastOutput: number;
   /** Vacantes abiertas en el mes en curso. */
   vacancies: number;
   /** Stock disponible en el mes en curso (el bien es perecedero). */
@@ -125,17 +130,31 @@ export interface SimConfig {
   burnInKnobs?: Knobs;
 }
 
-/** Tamaño de la Fase 0 según el roadmap. */
 /**
- * Tamaño de la Fase 0 según el roadmap. Calentamiento de 240 meses: con 120 el
- * desempleo y el margen precio/costo todavía tenían tendencia en la mayoría de
- * las semillas; desde 180 ya no (ver docs/fase0-reglas.md, "Calentamiento").
+ * Tamaño de la Fase 0 según el roadmap. Calentamiento de 420 meses: después de
+ * corregir R1 y sacar el colchón de R7 (2026-11-11), el desempleo sigue bajando
+ * hasta el año ~30 desde la creación (ver docs/fase0-reglas.md, "Calentamiento").
  */
 export const PHASE0_CONFIG: SimConfig = {
   households: 500,
   firms: 30,
-  burnInTicks: 240,
+  burnInTicks: 420,
   burnInKnobs: { publicSpending: 5_000_000, structuralDeficitShare: 0 },
+};
+
+/**
+ * Tamaño de la Fase 1 (decisión de Nico, 2026-11-11): 2.000 hogares y 120
+ * empresas, con el gasto escalado en proporción (100 pesos por hogar por mes).
+ * Con este tamaño el ruido mes a mes cae a la mitad que con 500 hogares (paso
+ * 1a.1). Calentamiento de 420 meses: ver docs/fase1-reglas.md, paso 1a.1.
+ * PHASE0_CONFIG queda como referencia de la Fase 0 (sus tests y la app hasta el paso 1c.6).
+ */
+export const PHASE1_CONFIG: SimConfig = {
+  households: 2000,
+  firms: 120,
+  burnInTicks: 420,
+  burnInKnobs: { publicSpending: 20_000_000, structuralDeficitShare: 0 },
+  knobs: { publicSpending: 20_000_000, structuralDeficitShare: 0 },
 };
 
 /** Constante para separar el flujo de azar de la población del flujo de la simulación. */
@@ -183,6 +202,7 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
       price: p0,
       wage: w0,
       plannedOutput: 0,
+      lastOutput: 0,
       vacancies: 0,
       stock: 0,
       unitsSold: 0,
@@ -200,6 +220,7 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
     const firm = firms[i % f] as Firm;
     hh.employerId = firm.id;
     firm.plannedOutput += alpha;
+    firm.lastOutput += alpha;
   });
 
   const wageBill = w0 * employedCount;

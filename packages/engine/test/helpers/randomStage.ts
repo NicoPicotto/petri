@@ -31,7 +31,7 @@ export const randomTransactionsStage: Stage = (state, knobs, rng) => {
   const operations = 20;
 
   for (let n = 0; n < operations; n++) {
-    switch (rng.nextInt(7)) {
+    switch (rng.nextInt(8)) {
       case 0: {
         // Préstamo bancario: crea préstamo y depósito a la vez.
         const borrower = pick(privates, rng);
@@ -103,6 +103,21 @@ export const randomTransactionsStage: Stage = (state, knobs, rng) => {
           const a = amount(rng);
           issue('bonds', centralBank, treasury, a);
           issue('treasuryAccount', treasury, centralBank, a);
+        }
+        break;
+      }
+      case 7: {
+        // El BCRA le presta reservas al banco, o el banco le devuelve.
+        const owed = -bank.positions.centralBankCredit;
+        const max = Math.min(owed, bank.positions.reserves);
+        if (max > 0 && rng.nextInt(2) === 0) {
+          const a = amount(rng, max);
+          redeem('reserves', bank, centralBank, a);
+          redeem('centralBankCredit', centralBank, bank, a);
+        } else {
+          const a = amount(rng);
+          issue('centralBankCredit', centralBank, bank, a);
+          issue('reserves', bank, centralBank, a);
         }
         break;
       }

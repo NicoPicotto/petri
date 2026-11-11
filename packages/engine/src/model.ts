@@ -86,13 +86,19 @@ export const firmsPlan: Stage = (state, _knobs, rng) => {
       // R2: suba si quedaron vacantes sin cubrir; nunca baja.
       if (firm.unfilledVacancies) firm.wage = Math.round(firm.wage * (1 + uWage));
 
-      // R1: tabla de cuatro casos (Gaffeo et al., 2008).
+      // R1: tabla de cuatro casos (Gaffeo et al., 2008). La cantidad se ajusta
+      // sobre la producción EFECTIVA del mes anterior, no sobre la deseada: si
+      // la empresa no pudo producir lo que quería (por liquidez o por vacantes
+      // sin cubrir), la meta no se despega de lo que realmente hace. Fuente:
+      // Dawid, Delli Gatti, Fierro & Poledna (2024), CESifo WP 11411, ec. 14 y
+      // cuadro 1 (CATS: Y*_t = (1 + γ)·Y_{t−1}, y Y*_t = Y_{t−1} si ajusta precio).
+      firm.plannedOutput = firm.lastOutput;
       if (firm.soldOut) {
         if (firm.price < avgPrice) firm.price = Math.round(firm.price * (1 + uPrice));
-        else firm.plannedOutput *= 1 + uQty;
+        else firm.plannedOutput = firm.lastOutput * (1 + uQty);
       } else {
         if (firm.price >= avgPrice) firm.price = Math.round(firm.price * (1 - uPrice));
-        else firm.plannedOutput *= 1 - uQty;
+        else firm.plannedOutput = firm.lastOutput * (1 - uQty);
       }
     }
     // Piso de precio: costo unitario.
@@ -140,6 +146,7 @@ export const production: Stage = (state) => {
   state.firms.forEach((firm, i) => {
     const list = workers[i]!;
     firm.stock = PARAMS.laborProductivity * list.length;
+    firm.lastOutput = firm.stock;
     let taxes = 0;
     for (const hh of list) {
       const tax = withholding(firm.wage, f.taxRate);
@@ -198,19 +205,16 @@ export const goodsMarket: Stage = (state, _knobs, rng) => {
 };
 
 /**
- * R7: dividendos al dueño, con retención (R8).
- * PROVISORIO: solo se reparte lo que exceda un colchón de liquidez de
- * `liquidityBufferMonths` meses de masa salarial deseada. Revisar cuando entre
- * el crédito bancario (Fase 1).
+ * R7: dividendos al dueño, con retención (R8): ρ · ganancia, acotado por los
+ * depósitos de la empresa. El colchón de liquidez provisorio se eliminó el
+ * 2026-11-11: existía por el defecto de R1 (ver docs/fase0-reglas.md, R7).
  */
 export const profits: Stage = (state) => {
   const f = state.fiscal;
   for (const firm of state.firms) {
     const profit = firm.revenue - firm.wageBill;
     if (profit <= 0) continue;
-    const desiredWorkers = Math.ceil(firm.plannedOutput / PARAMS.laborProductivity - 1e-9);
-    const buffer = PARAMS.liquidityBufferMonths * firm.wage * desiredWorkers;
-    const dividend = Math.min(Math.floor(PARAMS.dividendPayout * profit), firm.positions.deposits - buffer);
+    const dividend = Math.min(Math.floor(PARAMS.dividendPayout * profit), firm.positions.deposits);
     if (dividend <= 0) continue;
     const owner = state.households[firm.ownerId]!;
     const tax = withholding(dividend, f.taxRate);

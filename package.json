@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "pnpm --filter @petri/app dev",
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "test:slow": "pnpm --filter @petri/engine test:slow"
   },
   "devDependencies": {
     "typescript": "~5.9.0"

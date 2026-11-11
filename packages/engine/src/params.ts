@@ -32,13 +32,6 @@ export const PARAMS = {
 
   /** R7: fracción de la ganancia positiva que se reparte como dividendo. Caiani et al. (2016). */
   dividendPayout: 0.9,
-  /**
-   * R7 (PROVISORIO): meses de masa salarial deseada que la empresa retiene antes
-   * de repartir dividendos. Supuesto explícito, sin fuente: evita que las
-   * empresas se queden sin capital de trabajo mientras no hay crédito. Revisar
-   * en la Fase 1, cuando entre el crédito bancario.
-   */
-  liquidityBufferMonths: 1,
 
   /** Indicador de pobreza: unidades del bien en la canasta mensual. Provisional hasta tener datos de la EPH. */
   basketUnits: 6,

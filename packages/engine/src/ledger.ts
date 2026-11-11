@@ -24,6 +24,7 @@ export const INSTRUMENTS = [
   'treasuryAccount', // cuenta del Tesoro en el BCRA
   'bonds', // títulos del Tesoro en pesos: activo de banco/BCRA
   'advances', // adelantos transitorios del BCRA al Tesoro (financiamiento monetario)
+  'centralBankCredit', // financiamiento del BCRA al banco (pases o redescuentos): le da reservas
 ] as const;
 
 export type Instrument = (typeof INSTRUMENTS)[number];
@@ -52,6 +53,7 @@ export const INSTRUMENT_RULES: Record<
   treasuryAccount: { holders: ['treasury'], issuers: ['centralBank'] },
   bonds: { holders: ['bank', 'centralBank'], issuers: ['treasury'] },
   advances: { holders: ['centralBank'], issuers: ['treasury'] },
+  centralBankCredit: { holders: ['centralBank'], issuers: ['bank'] },
 };
 
 export function emptyPositions(): Positions {
@@ -63,6 +65,7 @@ export function emptyPositions(): Positions {
     treasuryAccount: 0,
     bonds: 0,
     advances: 0,
+    centralBankCredit: 0,
   };
 }
 
@@ -121,6 +124,17 @@ export function redeem(instr: Instrument, holder: Agent, issuer: Agent, amount: 
   }
   holder.positions[instr] = subCents(holder.positions[instr], amount);
   issuer.positions[instr] = addCents(issuer.positions[instr], amount);
+}
+
+/**
+ * Patrimonio financiero neto de un agente: activos financieros − pasivos.
+ * Los activos reales (capital, inventarios) no entran. Para el banco es su
+ * patrimonio: préstamos + reservas − depósitos − financiamiento del BCRA.
+ */
+export function netFinancialWorth(agent: Agent): Cents {
+  let total = 0;
+  for (const instr of INSTRUMENTS) total = addCents(total, agent.positions[instr]);
+  return total;
 }
 
 export type SfcViolation =
