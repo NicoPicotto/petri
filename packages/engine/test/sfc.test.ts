@@ -21,7 +21,7 @@ describe('invariante SFC', () => {
 
   it('se mantiene durante 1000 ticks de transacciones al azar', () => {
     let state = createInitialState(42, PHASE0_CONFIG);
-    state = { ...state, knobs: { publicSpending: 50_000, monetaryFinancingShare: 0.5 } };
+    state = { ...state, knobs: { publicSpending: 50_000, structuralDeficitShare: 0.5 } };
     for (let t = 0; t < 1000; t++) {
       state = step(state, state.knobs, { stages, checkInvariants: false });
       expect(checkSfc(state)).toEqual([]);

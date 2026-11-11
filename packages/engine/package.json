@@ -9,11 +9,13 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "report:fase0": "vite-node scripts/fase0-report.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "~5.9.0",
-    "vitest": "^3.2.0"
+    "vitest": "^3.2.0",
+    "vite-node": "^3.2.0"
   }
 }

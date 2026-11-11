@@ -64,6 +64,9 @@ export interface Fiscal {
   taxRate: number;
   /** Base imponible (salarios + dividendos brutos) del mes anterior. */
   lastTaxBase: Cents;
+  /** Dividendos brutos del mes anterior (entran en la base de pleno empleo de R8). */
+  lastDividends: Cents;
+  dividendsThisMonth: Cents;
   taxBaseThisMonth: Cents;
   taxesThisMonth: Cents;
   spendingThisMonth: Cents;
@@ -84,12 +87,22 @@ export interface Stats {
   poverty: number;
   /** Unidades producidas en el mes. */
   output: number;
-  /** Fracción del gasto del mes cubierta con adelantos del BCRA. */
+  /** Adelantos del BCRA al Tesoro en el mes, en centavos (emisión). */
+  emission: Cents;
+  /**
+   * "Emisión efectiva": fracción del gasto del mes cubierta con adelantos del BCRA.
+   * Incluye el déficit estructural (perilla) y el cíclico (automático).
+   */
   effectiveEmissionShare: number;
 }
 
 export interface SimState {
+  /** Semilla con la que se creó la cápsula. */
+  seed: number;
+  /** Mes visible: arranca en 0 al terminar el calentamiento. Es el tick del log de perillas. */
   tick: number;
+  /** Meses transcurridos desde la creación, calentamiento incluido. No se reinicia. */
+  elapsedTicks: number;
   rng: RngState;
   knobs: Knobs;
   households: Household[];
@@ -104,11 +117,26 @@ export interface SimState {
 export interface SimConfig {
   households: number;
   firms: number;
+  /** Perillas iniciales (las que rigen desde el mes 0 visible). */
   knobs?: Knobs;
+  /** Meses de calentamiento antes del mes 0 visible (ver docs/fase0-reglas.md, "Calentamiento"). */
+  burnInTicks?: number;
+  /** Perillas fijas durante el calentamiento. Si falta, se usan `knobs`. */
+  burnInKnobs?: Knobs;
 }
 
 /** Tamaño de la Fase 0 según el roadmap. */
-export const PHASE0_CONFIG: SimConfig = { households: 500, firms: 30 };
+/**
+ * Tamaño de la Fase 0 según el roadmap. Calentamiento de 240 meses: con 120 el
+ * desempleo y el margen precio/costo todavía tenían tendencia en la mayoría de
+ * las semillas; desde 180 ya no (ver docs/fase0-reglas.md, "Calentamiento").
+ */
+export const PHASE0_CONFIG: SimConfig = {
+  households: 500,
+  firms: 30,
+  burnInTicks: 240,
+  burnInKnobs: { publicSpending: 5_000_000, structuralDeficitShare: 0 },
+};
 
 /** Constante para separar el flujo de azar de la población del flujo de la simulación. */
 const POPULATION_STREAM = 0x5bd1e995;
@@ -176,10 +204,14 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
 
   const wageBill = w0 * employedCount;
   const transferEach = Math.floor(knobs.publicSpending / h);
-  const taxRate = wageBill > 0 ? clamp01(((1 - knobs.monetaryFinancingShare) * knobs.publicSpending) / wageBill) : 0;
+  // R8 con la base de pleno empleo (sin dividendos todavía: no hubo un mes anterior).
+  const fullEmploymentBase = w0 * h;
+  const taxRate = clamp01(((1 - knobs.structuralDeficitShare) * knobs.publicSpending) / fullEmploymentBase);
 
   const state: SimState = {
+    seed,
     tick: 0,
+    elapsedTicks: 0,
     rng: createRngState(seed),
     knobs,
     households,
@@ -190,6 +222,8 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
     fiscal: {
       taxRate,
       lastTaxBase: wageBill,
+      lastDividends: 0,
+      dividendsThisMonth: 0,
       taxBaseThisMonth: 0,
       taxesThisMonth: 0,
       spendingThisMonth: 0,
@@ -202,6 +236,7 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
       realWage: w0 / p0,
       poverty: 0,
       output: alpha * employedCount,
+      emission: 0,
       effectiveEmissionShare: 0,
     },
   };
@@ -241,7 +276,9 @@ export function firmIndex(state: SimState, id: AgentId): number {
  */
 export function cloneState(state: SimState): SimState {
   return {
+    seed: state.seed,
     tick: state.tick,
+    elapsedTicks: state.elapsedTicks,
     rng: [...state.rng],
     knobs: { ...state.knobs },
     households: state.households.map((hh) => ({ ...hh, positions: { ...hh.positions } })),

@@ -28,6 +28,7 @@ export function step(state: SimState, knobs: Knobs, options: StepOptions = {}): 
   for (const stage of stages) stage(next, next.knobs, rng);
   next.rng = rng.toState();
   next.tick += 1;
+  next.elapsedTicks += 1;
   if (checkInvariants) assertSfc(next);
   return next;
 }

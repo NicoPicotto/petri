@@ -28,11 +28,29 @@ function workersByFirm(state: SimState): Household[][] {
   return lists;
 }
 
+/**
+ * Base imponible de pleno empleo (R8): todos los hogares cobrando el salario
+ * promedio de las empresas, más los dividendos del mes anterior.
+ */
+export function fullEmploymentTaxBase(state: SimState): Cents {
+  const avgWage = state.firms.reduce((acc, firm) => acc + firm.wage, 0) / state.firms.length;
+  return avgWage * state.households.length + state.fiscal.lastDividends;
+}
+
+/**
+ * R8: alícuota tal que, a pleno empleo, los impuestos cubran (1 − s) del gasto.
+ * s = déficit estructural financiado con emisión.
+ */
+export function structuralTaxRate(state: SimState, knobs: Readonly<Knobs>): number {
+  const base = fullEmploymentTaxBase(state);
+  return base > 0 ? clamp01(((1 - knobs.structuralDeficitShare) * knobs.publicSpending) / base) : 0;
+}
+
 /** Apertura del mes: R8 (alícuota) y reinicio de acumuladores. */
 export const openMonth: Stage = (state, knobs) => {
   const f = state.fiscal;
-  f.taxRate =
-    f.lastTaxBase > 0 ? clamp01(((1 - knobs.monetaryFinancingShare) * knobs.publicSpending) / f.lastTaxBase) : 0;
+  f.taxRate = structuralTaxRate(state, knobs);
+  f.dividendsThisMonth = 0;
   f.taxBaseThisMonth = 0;
   f.taxesThisMonth = 0;
   f.spendingThisMonth = 0;
@@ -55,7 +73,8 @@ export const firmsPlan: Stage = (state, _knobs, rng) => {
   const alpha = PARAMS.laborProductivity;
   const avgPrice = state.stats.priceIndex;
   const workers = workersByFirm(state);
-  const firstMonth = state.tick === 0;
+  // Primer mes de vida de la cápsula: todavía no hay señales del mes anterior.
+  const firstMonth = state.elapsedTicks === 0;
 
   state.firms.forEach((firm, i) => {
     // Un sorteo por cosa ajustable, siempre en el mismo orden (determinismo).
@@ -178,13 +197,20 @@ export const goodsMarket: Stage = (state, _knobs, rng) => {
   for (const firm of state.firms) firm.soldOut = firm.stock === 0;
 };
 
-/** R7: dividendos al dueño, con retención (R8). */
+/**
+ * R7: dividendos al dueño, con retención (R8).
+ * PROVISORIO: solo se reparte lo que exceda un colchón de liquidez de
+ * `liquidityBufferMonths` meses de masa salarial deseada. Revisar cuando entre
+ * el crédito bancario (Fase 1).
+ */
 export const profits: Stage = (state) => {
   const f = state.fiscal;
   for (const firm of state.firms) {
     const profit = firm.revenue - firm.wageBill;
     if (profit <= 0) continue;
-    const dividend = Math.floor(PARAMS.dividendPayout * profit);
+    const desiredWorkers = Math.ceil(firm.plannedOutput / PARAMS.laborProductivity - 1e-9);
+    const buffer = PARAMS.liquidityBufferMonths * firm.wage * desiredWorkers;
+    const dividend = Math.min(Math.floor(PARAMS.dividendPayout * profit), firm.positions.deposits - buffer);
     if (dividend <= 0) continue;
     const owner = state.households[firm.ownerId]!;
     const tax = withholding(dividend, f.taxRate);
@@ -192,6 +218,7 @@ export const profits: Stage = (state) => {
     payToTreasury(state, firm, tax);
     owner.incomeThisMonth += dividend - tax;
     f.taxBaseThisMonth += dividend;
+    f.dividendsThisMonth += dividend;
     f.taxesThisMonth += tax;
   }
 };
@@ -229,8 +256,10 @@ export const closeMonth: Stage = (state) => {
   s.realWage = employed > 0 ? wageSum / employed / priceIndex : 0;
   s.poverty = poor / n;
   s.output = state.firms.reduce((acc, firm) => acc + PARAMS.laborProductivity * (firm.wageBill / firm.wage), 0);
+  s.emission = f.advancesThisMonth;
   s.effectiveEmissionShare = f.spendingThisMonth > 0 ? f.advancesThisMonth / f.spendingThisMonth : 0;
   f.lastTaxBase = f.taxBaseThisMonth;
+  f.lastDividends = f.dividendsThisMonth;
 };
 
 /** Orden de las etapas en cada tick (docs/fase0-reglas.md, "Orden de cada tick"). */

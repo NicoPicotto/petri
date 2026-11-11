@@ -11,13 +11,18 @@ import { assertCents, type Cents } from './money';
 export interface Knobs {
   /** Gasto público por mes, en centavos: transferencias iguales a todos los hogares (R8). */
   publicSpending: Cents;
-  /** Fracción del gasto financiada con emisión del BCRA, en [0, 1]. El resto, con impuestos (R8). */
-  monetaryFinancingShare: number;
+  /**
+   * "Déficit estructural financiado con emisión", en [0, 1] (R8): la parte del
+   * gasto que los impuestos NO cubren a pleno empleo. El déficit cíclico (por
+   * debajo del pleno empleo) también se emite, automáticamente, porque en la
+   * Fase 0 no hay bonos.
+   */
+  structuralDeficitShare: number;
 }
 
 export type KnobName = keyof Knobs;
 
-export const KNOB_NAMES: readonly KnobName[] = ['publicSpending', 'monetaryFinancingShare'];
+export const KNOB_NAMES: readonly KnobName[] = ['publicSpending', 'structuralDeficitShare'];
 
 /**
  * Escenario por defecto: gasto de 50.000 pesos por mes (100 pesos por hogar,
@@ -25,7 +30,7 @@ export const KNOB_NAMES: readonly KnobName[] = ['publicSpending', 'monetaryFinan
  */
 export const DEFAULT_KNOBS: Knobs = {
   publicSpending: 5_000_000,
-  monetaryFinancingShare: 0,
+  structuralDeficitShare: 0,
 };
 
 export interface KnobChange {
@@ -43,9 +48,9 @@ export function validateKnobValue(knob: KnobName, value: number): void {
       assertCents(value, 'publicSpending');
       if (value < 0) throw new Error(`publicSpending no puede ser negativo, llegó ${value}`);
       return;
-    case 'monetaryFinancingShare':
+    case 'structuralDeficitShare':
       if (!Number.isFinite(value) || value < 0 || value > 1) {
-        throw new Error(`monetaryFinancingShare tiene que estar en [0, 1], llegó ${value}`);
+        throw new Error(`structuralDeficitShare tiene que estar en [0, 1], llegó ${value}`);
       }
       return;
   }

@@ -7,9 +7,9 @@ const TICKS = 500;
 
 const log: KnobLog = [
   { tick: 0, knob: 'publicSpending', from: 5_000_000, to: 20_000 },
-  { tick: 100, knob: 'monetaryFinancingShare', from: 0, to: 0.3 },
+  { tick: 100, knob: 'structuralDeficitShare', from: 0, to: 0.3 },
   { tick: 250, knob: 'publicSpending', from: 20_000, to: 500_000 },
-  { tick: 250, knob: 'monetaryFinancingShare', from: 0.3, to: 0.8 },
+  { tick: 250, knob: 'structuralDeficitShare', from: 0.3, to: 0.8 },
   { tick: 400, knob: 'publicSpending', from: 500_000, to: 0 },
 ];
 
@@ -48,6 +48,17 @@ describe('determinismo', () => {
     const before = JSON.stringify(initial);
     replay(7, initial, log, 50, { stages });
     expect(JSON.stringify(initial)).toBe(before);
+  });
+
+  it('con las reglas de la Fase 0: misma semilla + mismo log = misma corrida', () => {
+    const modelLog: KnobLog = [
+      { tick: 24, knob: 'structuralDeficitShare', from: 0, to: 0.5 },
+      { tick: 120, knob: 'publicSpending', from: 5_000_000, to: 8_000_000 },
+    ];
+    const a = replay(11, createInitialState(11, PHASE0_CONFIG), modelLog, 240);
+    const b = replay(11, createInitialState(11, PHASE0_CONFIG), modelLog, 240);
+    expect(a).toStrictEqual(b);
+    expect(a).not.toStrictEqual(replay(12, createInitialState(12, PHASE0_CONFIG), modelLog, 240));
   });
 
   it('rechaza un log que no corresponde a la corrida', () => {

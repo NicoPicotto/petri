@@ -1,52 +1,44 @@
-import { useEffect, useRef, useState } from 'react';
-import { PHASE0_CONFIG } from '@petri/engine';
-import type { MainToWorker, WorkerToMain } from './worker/protocol';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import { Coordinator } from './capsule/coordinator';
+import { Charts } from './components/Charts';
+import { CapsulePanel } from './components/CapsulePanel';
+import { RunControls } from './components/RunControls';
 
-const SEED = 20260101;
+const DEFAULT_SEED = 20260101;
 
-export function App() {
-  const workerRef = useRef<Worker | null>(null);
-  const [tick, setTick] = useState(0);
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const worker = new Worker(new URL('./worker/capsule.worker.ts', import.meta.url), { type: 'module' });
-    workerRef.current = worker;
-    worker.onmessage = (event: MessageEvent<WorkerToMain>) => {
-      const msg = event.data;
-      if (msg.type === 'snapshot') {
-        setTick(msg.snapshot.tick);
-        setRunning(msg.running);
-      } else {
-        setError(msg.message);
-        setRunning(false);
-      }
-    };
-    send({ type: 'init', seed: SEED, config: PHASE0_CONFIG });
-    return () => {
-      worker.terminate();
-      workerRef.current = null;
-    };
-  }, []);
-
-  function send(msg: MainToWorker) {
-    workerRef.current?.postMessage(msg);
-  }
-
-  function toggle() {
-    const next = !running;
-    setRunning(next);
-    send({ type: next ? 'play' : 'pause' });
-  }
+function Lab({ coordinator }: { coordinator: Coordinator }) {
+  const version = useSyncExternalStore(coordinator.subscribe, coordinator.getVersion);
+  const { A, B } = coordinator.views;
+  const v = coordinator.verification;
 
   return (
-    <main style={{ fontFamily: 'system-ui, sans-serif', padding: 24 }}>
-      <h1>Petri — cápsula A</h1>
-      <p>Semilla: {SEED}</p>
-      <p style={{ fontSize: 48, fontVariantNumeric: 'tabular-nums', margin: '16px 0' }}>Tick: {tick}</p>
-      <button onClick={toggle}>{running ? 'Pausa' : 'Play'}</button>
-      {error && <p style={{ color: 'crimson' }}>Error en el motor: {error}</p>}
+    <main>
+      <RunControls coordinator={coordinator} tick={A.tick} />
+      {coordinator.error && <p className="banner banner-error">Error en el motor: {coordinator.error}</p>}
+      {v?.kind === 'verified' && (
+        <p className="banner banner-ok">
+          Reproducción verificada ✓ — hash A {v.hashes.A} · B {v.hashes.B}
+        </p>
+      )}
+      {v?.kind === 'mismatch' && <p className="banner banner-error">La reproducción no coincide: {v.detail}</p>}
+      <div className="capsules">
+        <CapsulePanel view={A} coordinator={coordinator} />
+        <CapsulePanel view={B} coordinator={coordinator} />
+      </div>
+      <Charts a={A} b={B} version={version} />
     </main>
   );
+}
+
+export function App() {
+  const [coordinator, setCoordinator] = useState<Coordinator | null>(null);
+
+  useEffect(() => {
+    const c = new Coordinator(DEFAULT_SEED);
+    void c.reset();
+    setCoordinator(c);
+    return () => c.dispose();
+  }, []);
+
+  return coordinator ? <Lab coordinator={coordinator} /> : null;
 }

@@ -6,12 +6,16 @@
  */
 
 import { applyKnobChange, validateKnobLog, type KnobLog } from './knobs';
-import { createRngState } from './rng';
 import { cloneState, type SimState } from './state';
 import { step, type StepOptions } from './step';
 
+export interface ReplayOptions extends StepOptions {
+  /** Se llama después de cada tick (ej.: para armar series de indicadores). No puede modificar el estado. */
+  onTick?: (state: Readonly<SimState>) => void;
+}
+
 /**
- * Corre `ticks` pasos desde `initialState`, resembrando el PRNG con `seed`.
+ * Corre `ticks` pasos desde `initialState`. `seed` tiene que ser la semilla del estado inicial.
  * En cada tick t aplica primero los cambios del log con `tick === t` y después avanza.
  * Los cambios con tick ≥ tick final quedan sin aplicar.
  */
@@ -20,7 +24,7 @@ export function replay(
   initialState: SimState,
   log: KnobLog,
   ticks: number,
-  options: StepOptions = {},
+  options: ReplayOptions = {},
 ): SimState {
   if (!Number.isInteger(ticks) || ticks < 0) throw new Error(`ticks inválido: ${ticks}`);
   validateKnobLog(log);
@@ -29,7 +33,12 @@ export function replay(
     throw new Error(`El log tiene cambios en el tick ${first.tick}, anterior al estado inicial (${initialState.tick})`);
   }
 
-  let state: SimState = { ...cloneState(initialState), rng: createRngState(seed) };
+  if (initialState.seed !== seed) {
+    throw new Error(`La semilla ${seed} no coincide con la del estado inicial (${initialState.seed})`);
+  }
+  // El generador sigue desde donde quedó (por ejemplo, al final del calentamiento):
+  // resembrarlo repetiría la misma secuencia de números.
+  let state: SimState = cloneState(initialState);
   let knobs = state.knobs;
   let i = 0;
   const endTick = initialState.tick + ticks;
@@ -38,6 +47,7 @@ export function replay(
       knobs = applyKnobChange(knobs, entry);
     }
     state = step(state, knobs, options);
+    options.onTick?.(state);
   }
   return state;
 }

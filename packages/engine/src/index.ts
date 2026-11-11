@@ -8,4 +8,6 @@ export * from './flows';
 export * from './model';
 export * from './step';
 export * from './replay';
+export * from './warmup';
 export * from './snapshot';
+export * from './hash';
