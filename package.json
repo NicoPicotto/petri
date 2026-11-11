@@ -1,0 +1,16 @@
+{
+  "name": "petri",
+  "private": true,
+  "packageManager": "pnpm@10.11.0",
+  "scripts": {
+    "dev": "pnpm --filter @petri/app dev",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

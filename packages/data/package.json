@@ -1,0 +1,7 @@
+{
+  "name": "@petri/data",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Scripts que procesan la EPH y series históricas (Fase 3). Vacío por ahora."
+}
