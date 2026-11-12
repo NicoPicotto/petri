@@ -1,6 +1,7 @@
 {
   "name": "petri",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "packageManager": "pnpm@10.11.0",
   "scripts": {
     "dev": "pnpm --filter @petri/app dev",

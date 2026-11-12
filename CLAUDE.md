@@ -5,13 +5,17 @@
 - **Cambio de enfoque (decisión de Nico, 2026-11-12):** el modelo base pasa a ser **Caiani et al. (2016)**, portado fielmente y verificado contra su código (JMAB). Las particularidades argentinas entran como extensiones documentadas. Motivos, estado de cada regla, lo aprendido e infraestructura que se reutiliza: [docs/cambio-de-enfoque.md](docs/cambio-de-enfoque.md).
 - **Fase 0: cerrada** con sus reglas propias (CATS + SIM). La app la sigue usando hasta que el port de Caiani pase sus criterios. El criterio de salida de la Fase 0 se vuelve a correr con el port.
 - **Fase 1, tramo 1a (enfoque anterior): cerrado como registro.** El código está en `packages/engine/src/phase1.ts`. Por defecto: R10 apagada y la regla de cantidad original del sector de capital; con eso el criterio de la Fase 0 se cumple en 20/20. Todo el registro está en `docs/fase1-reglas.md`.
-- **Siguiente:** decidir con Nico las preguntas abiertas del port (duración del período, cantidad de bancos, bonos, gobierno, tamaño; ver `docs/cambio-de-enfoque.md`). Después, portar Caiani regla por regla, cada una con su ecuación al lado del código de JMAB y un test calculado a mano. El primer criterio es reproducir los resultados publicados de Caiani.
+- **Plan del port aprobado (Nico, 2026-11-12):** [docs/plan-port-caiani.md](docs/plan-port-caiani.md). Decisiones: período **trimestral** primero (mensual después, como extensión), **10 bancos**, **bonos ahora**, gobierno de Caiani como base, **8.000 hogares**, JDK para un oráculo con trazas, y el **`.jar` del paper como referencia canónica**.
+- **P0 en curso** (registro en [docs/caiani-referencia.md](docs/caiani-referencia.md)): V0 hecho (el fuente equivalente al `.jar` es `reference/jmab-2015`), paper leído, oráculo reproducible armado, lote de 25 réplicas del `.jar` corriendo. Falta: analizar el lote y acordar con Nico el objetivo y los umbrales de V4.
+- **Licencia:** GPL-3.0-or-later (decisión de Nico, 2026-11-12). `LICENSE`, `NOTICE`, y encabezado obligatorio en los archivos portados (plantilla en `docs/arquitectura.md`, "Licencia y avisos").
+- El código de Caiani (clones, `.jar` del paper, scripts de R) está en `reference/`, fuera de git. Ver `reference/README.md`.
 - Al arrancar una sesión, leer en este orden:
-  1. [docs/cambio-de-enfoque.md](docs/cambio-de-enfoque.md): por qué Caiani es el modelo base, estado de cada regla, lo aprendido, infraestructura reutilizable y preguntas abiertas del port.
-  2. [docs/pendientes.md](docs/pendientes.md): qué quedó abierto y qué extensiones argentinas están identificadas.
-  3. [docs/arquitectura.md](docs/arquitectura.md): cómo correr el proyecto, estructura del motor y de la app, convenciones (etapas, relojes, log, replay, determinismo), formato del archivo de corrida.
-  4. [docs/sfc.md](docs/sfc.md): matriz de balances y primitivas contables.
-  5. Registro histórico, cuando haga falta: [docs/fase1-reglas.md](docs/fase1-reglas.md) (tramo 1a con el enfoque anterior: mediciones, errores, revisión contra fuentes) y [docs/fase0-reglas.md](docs/fase0-reglas.md) (reglas R1–R8 de la Fase 0).
+  1. [docs/plan-port-caiani.md](docs/plan-port-caiani.md): plan del port, versiones del código de Caiani, mapa de reglas, verificación, decisiones, licencia. Junto con [docs/caiani-referencia.md](docs/caiani-referencia.md): qué código es la referencia, diferencias paper ↔ código, corridas y oráculo (P0).
+  2. [docs/cambio-de-enfoque.md](docs/cambio-de-enfoque.md): por qué Caiani es el modelo base, estado de cada regla del enfoque anterior, lo aprendido, infraestructura reutilizable.
+  3. [docs/pendientes.md](docs/pendientes.md): qué quedó abierto y qué extensiones argentinas están identificadas.
+  4. [docs/arquitectura.md](docs/arquitectura.md): cómo correr el proyecto, estructura del motor y de la app, convenciones (etapas, relojes, log, replay, determinismo), formato del archivo de corrida.
+  5. [docs/sfc.md](docs/sfc.md): matriz de balances y primitivas contables.
+  6. Registro histórico, cuando haga falta: [docs/fase1-reglas.md](docs/fase1-reglas.md) (tramo 1a con el enfoque anterior: mediciones, errores, revisión contra fuentes) y [docs/fase0-reglas.md](docs/fase0-reglas.md) (reglas R1–R8 de la Fase 0).
 - Comandos: `pnpm test`, `pnpm test:slow`, `pnpm typecheck`, `pnpm dev`, `pnpm --filter @petri/engine report:fase0`, `pnpm --filter @petri/engine report:fase1`. Requiere Node ≥ 22.12.
 
 ## Visión
@@ -105,7 +109,7 @@ Esto es un **requisito central**, no un extra. Varias cápsulas corren en simult
 ### Modelo base: Caiani et al. (2016)
 
 **El modelo de comportamiento es Caiani, Godin, Caverzasi, Gallegati, Kinsella & Stiglitz (2016)**, *Agent based-stock flow consistent macroeconomics: Towards a benchmark model*, Journal of Economic Dynamics and Control 69 (decisión de Nico, 2026-11-12; motivos en `docs/cambio-de-enfoque.md`).
-- **Se porta fielmente y se verifica contra su código publicado:** [`S120/benchmark`](https://github.com/S120/benchmark) (agentes, estrategias, `model/mainBaseline.xml`) y [`S120/jmab`](https://github.com/S120/jmab). Si el paper y el código difieren, manda el código, y la diferencia se documenta.
+- **Se porta fielmente y se verifica contra su código publicado:** [`S120/benchmark`](https://github.com/S120/benchmark) (agentes, estrategias) y [`S120/jmab`](https://github.com/S120/jmab). **Referencia canónica:** el `.jar` y el `Model/modelFile.xml` del archivo de lanzamiento del paper (`BenchamarkModel_Baseline_Sensitivity.rar`, dentro de `S120/benchmark`), copiados en `reference/paper-launcher/` (decisión de Nico, 2026-11-12). La configuración que estaba en git como `Model/modelBaseline.xml` se renombró a `Model/modelBenchmark_full.xml` en 2016; no usar la de HEAD. Si el paper y el código difieren, manda el código, y la diferencia se documenta.
 - **Toda diferencia con Caiani es una extensión documentada:** qué cambia, por qué (particularidad argentina, determinismo, período mensual, etc.), con fuente y con test. No se mezclan reglas de otros modelos en el núcleo sin pasar por esa vía.
 - **Proceso por regla:** en `docs/`, la ecuación de Caiani (y la línea de JMAB) al lado de la implementación, término por término; y un test con un caso calculado a mano (patrón de `test/rules-by-hand.test.ts`).
 - **Otros modelos como referencia, no como fuente de reglas del núcleo:** CATS (Delli Gatti et al.; Assenza et al., 2015), K+S (Dosi et al.), Mark-0 (Gualdi, Bouchaud et al.). Sirven para contrastar resultados, para candidatos a perillas de teoría (principio 2) y para extensiones, cada una documentada como tal.
@@ -162,6 +166,7 @@ Cada fase tiene un **criterio de salida**. **Ninguna fase arranca si la anterior
 
 ### Fase 1: Economía interna completa
 - **Base:** el port fiel de Caiani et al. (2016) (hogares, empresas de consumo y de capital, bancos, gobierno, banco central, crédito, inversión y quiebras), verificado contra JMAB. Primer criterio: reproducir sus resultados publicados. Lo que sigue son extensiones sobre esa base.
+  - Incluye lo que el modelo base trae (decisión de Nico, 2026-11-12): **10 bancos**, **bonos del gobierno** (que compran los bancos y el banco central), empleo público y seguro de desempleo, 8.000 hogares. Período **trimestral**; el paso a mensual es una extensión con su propia validación. Plan en `docs/plan-port-caiani.md`.
 - Sectores agro, industria, servicios y comercio.
 - Formalidad e informalidad.
 - Estratos con necesidades y nivel de vida.
@@ -175,7 +180,7 @@ Cada fase tiene un **criterio de salida**. **Ninguna fase arranca si la anterior
 - Resto del mundo, exportadores e importadores.
 - Regímenes cambiarios, aranceles, cupos, retenciones.
 - Ahorro en dólares, deuda externa, default o reestructuración.
-- Bonos del Tesoro (deuda interna) y perillas **monetarias**: tasa de interés del BCRA y encajes. En la Fase 1 la tasa y los encajes son parámetros fijos (decisión del 2026-11-11). Retenciones a las exportaciones también entran acá.
+- Perillas **monetarias**: tasa de interés del BCRA y encajes. En la Fase 1 son los parámetros fijos de Caiani (decisión del 2026-11-11). Los **bonos del Tesoro (deuda interna)** ya entran en la Fase 1 con el port de Caiani (decisión de Nico, 2026-11-12); acá se suman las perillas de deuda (emisión de bonos en pesos o en dólares, interna o externa). Retenciones a las exportaciones también entran acá.
 - Shocks mundiales.
 - **Criterio de salida**: con cepo **emerge la brecha** cambiaria sola, y con emisión fuerte **emerge la corrida al dólar**.
 

@@ -1,0 +1,38 @@
+Petri — simulador de economía política
+Copyright (C) 2026 Nicolas Picotto
+
+Este programa es software libre: se puede redistribuir y/o modificar bajo los
+términos de la GNU General Public License publicada por la Free Software
+Foundation, versión 3 de la licencia o (a elección) cualquier versión posterior.
+Ver el archivo LICENSE.
+
+------------------------------------------------------------------------------
+Obra derivada de JMAB y del modelo "Benchmark"
+------------------------------------------------------------------------------
+
+El motor de simulación (packages/engine) contiene una traducción a TypeScript,
+con modificaciones, del modelo de Caiani et al. (2016) tal como está
+implementado en:
+
+  JMAB - Java Macroeconomic Agent Based Modeling Toolkit
+  Copyright (C) 2013 Alessandro Caiani and Antoine Godin
+  https://github.com/S120/jmab
+
+  "Benchmark" model (Caiani, Godin, Caverzasi, Gallegati, Kinsella & Stiglitz)
+  Copyright (C) 2013 Alessandro Caiani and Antoine Godin
+  https://github.com/S120/benchmark
+
+Los archivos fuente de esos proyectos se distribuyen bajo la GNU General Public
+License, versión 3 o posterior; sus README además incluyen el texto de la
+licencia MIT (Copyright (c) 2016 Alessandro Caiani and Antoine Godin). Petri
+adopta la GPL-3.0-or-later, que cumple con ambas.
+
+Cada archivo de Petri que porta código de JMAB o del modelo Benchmark lleva un
+encabezado con el aviso de copyright original, la indicación de que fue
+modificado y la lista de clases de origen.
+
+Referencia del modelo:
+  Caiani, A., Godin, A., Caverzasi, E., Gallegati, M., Kinsella, S. &
+  Stiglitz, J. E. (2016). Agent based-stock flow consistent macroeconomics:
+  Towards a benchmark model. Journal of Economic Dynamics and Control, 69,
+  375-408.

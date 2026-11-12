@@ -1707,7 +1707,7 @@ Verificada en el código de los autores.
 
 | Término | Fuente | Implementación | |
 |---|---|---|---|
-| Disparador | Caiani 3.3: *"run out of liquidity or … net-wealth turns negative"* | patrimonio < 0 o 3 cuotas impagas | ✓ (3: **S**) |
+| Disparador | Caiani 3.3: *"run out of liquidity or … net-wealth turns negative"*. **Corrección (2026-11-12):** en el código de Caiani (`.jar` del paper y git 2016) las empresas quiebran solo por iliquidez: no pueden pagar salarios, el servicio de la deuda o los impuestos. `patrimonio < 0` es el disparador de los bancos. El paper coincide en la sec. 2.1 (*"firms may default when they run out of liquidity … while banks default if their net wealth turns negative"*); la frase de la 3.3 citada acá es la general (ver `caiani-referencia.md`) | patrimonio < 0 o 3 cuotas impagas | ~~✓~~ **D** con el código (3: **S**) |
 | Venta forzosa | Caiani: a los hogares, con descuento (*haircut* 0,5) | r_K = 0,3 (Ramey & Shapiro) | **A** |
 | Sin comprador | Caiani: en proporción a la riqueza | en proporción a los depósitos | ✓ |
 | Entrada | Assenza: reemplazo uno a uno; K+S: fracción del promedio | uno a uno, tamaño mediano, 3 meses de demora, capital de 1 mes de salarios | ✓ / **S** |

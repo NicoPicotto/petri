@@ -6,8 +6,9 @@
 
 - **Modelo base:** Caiani, Godin, Caverzasi, Gallegati, Kinsella & Stiglitz (2016), *Agent based-stock flow consistent macroeconomics: Towards a benchmark model*, Journal of Economic Dynamics and Control 69, 375–408.
 - **Código de referencia:**
-  - [`S120/benchmark`](https://github.com/S120/benchmark): el modelo (agentes, estrategias, `model/mainBaseline.xml` con los parámetros);
+  - [`S120/benchmark`](https://github.com/S120/benchmark): el modelo (agentes y estrategias). La configuración del escenario base era `Model/modelBaseline.xml`; el 2016-02-19 se renombró a `Model/modelBenchmark_full.xml` y en 2020 se volvió a cambiar. **La referencia canónica es el `.jar` y el `Model/modelFile.xml` del archivo de lanzamiento del paper** (decisión de Nico, 2026-11-12). Detalle de las tres versiones en [plan-port-caiani.md](plan-port-caiani.md), sección 0;
   - [`S120/jmab`](https://github.com/S120/jmab): la biblioteca (mercados, expectativas, estrategias genéricas).
+  - Copias locales (fuera de git): `reference/` (ver `reference/README.md`).
 - **Versión del autor del paper:** [PDF](https://business.columbia.edu/sites/default/files-efs/imce-uploads/Joseph_Stiglitz/Agent%20based-stock%20flow.pdf). Las ecuaciones no se leen bien en la extracción de texto, por eso la referencia operativa es el código.
 
 ## Por qué
@@ -81,7 +82,7 @@ La regla de cantidad de Assenza (ec. 6.2) es fiel a su fuente, pero combinada co
 | R9 crédito | Límite λ·Sᵉ, orden patrimonio/Sᵉ, 12 meses el capital de trabajo, 60 la inversión | Adaptación aprobada | Con las ventas del mes anterior, el límite tenía un estado absorbente en 0 |
 | R10 inversión | Caiani, verificada en el código | **Apagada por defecto** | Colapsa la economía combinada con nuestras reglas del sector de capital |
 | R11 capital | Leontief, depreciación δω, 100 empresas de consumo + 20 de capital, inventario al costo, venta forzosa | Interruptor en la regla de cantidad del sector de capital (por defecto, la que se aparta de Assenza) | Con la planta en el patrimonio casi no hay quiebras; sin tope de capacidad vuelve la espiral salarial |
-| R12 quiebras y entrada | Patrimonio < 0 o 3 cuotas impagas; venta forzosa r_K = 0,3; entrada uno a uno con Sᵉ = plan × precio | Fiel a Caiani en el disparador | La venta forzosa sin comprador es un impuesto implícito a los depositantes |
+| R12 quiebras y entrada | Patrimonio < 0 o 3 cuotas impagas; venta forzosa r_K = 0,3; entrada uno a uno con Sᵉ = plan × precio | **No es fiel a Caiani en el disparador** (corregido el 2026-11-12): en el código de Caiani las empresas quiebran por iliquidez (no pueden pagar salarios, servicio de la deuda o impuestos); `patrimonio < 0` es solo el disparador de los bancos. El paper coincide (sec. 2.1); la frase general de la sec. 3.3 ("liquidez o patrimonio negativo") es ambigua (ver `caiani-referencia.md`). La empresa quebrada no sale: los hogares pagan hasta el 50% del capital y sigue operando. Ver `plan-port-caiani.md` | La venta forzosa sin comprador es un impuesto implícito a los depositantes |
 | R13 banco | Logística de Assenza, tasa de no arbitraje a un mes, LGD con la planta, racionamiento por pérdida esperada, límite de Basilea | Adaptación aprobada. Dividendos 0,9 contra 0,6 de Caiani | Sin precio del riesgo el banco se fundía (20/20); con R13 queda solvente y su patrimonio se duplica en 50 años (revisar el margen) |
 
 El detalle de cada paso, con todas las tablas, está en [fase1-reglas.md](fase1-reglas.md) (registro histórico). Las reglas de la Fase 0 están en [fase0-reglas.md](fase0-reglas.md).
@@ -145,7 +146,9 @@ Ninguna de estas piezas depende de qué reglas de comportamiento se usen:
 
 **Se reemplaza:** las reglas de comportamiento de `model.ts` (Fase 0) y `phase1.ts` (tramo 1a), con sus parámetros (`PARAMS`, `CREDIT`, `CAPITAL`, `MARKET`, `PHASE1_INITIAL`). Quedan en el repositorio como referencia hasta que el port pase sus criterios: la Fase 0 sigue siendo el estado que usa la app.
 
-## Preguntas abiertas para el port (para decidir con Nico antes de escribir código)
+## Preguntas del port (decididas por Nico el 2026-11-12)
+
+**Respuestas:** trimestral primero (mensual después, como extensión); 10 bancos; bonos ahora (roadmap actualizado); el gobierno de Caiani es el base; 8.000 hogares; se instala un JDK para el oráculo; el `.jar` del paper es la referencia canónica. Plan completo en [plan-port-caiani.md](plan-port-caiani.md). Las preguntas quedan abajo como registro.
 
 1. **Duración del período.** Caiani es trimestral; Petri es mensual (la visual, el log y los indicadores INDEC son mensuales). ¿Se porta trimestral y se mira mensual, o se convierten los parámetros a mensuales (como se hizo con γ y λ_e)?
 2. **Cantidad de bancos.** Caiani tiene 10 bancos con mercado de depósitos y de crédito; Petri tiene 1. Varios bancos son parte de la dinámica (red de crédito), pero suman complejidad.

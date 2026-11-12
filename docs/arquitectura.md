@@ -82,6 +82,27 @@ Requiere **Node ≥ 22.12** (Vite 7 no anda con Node 18). Ojo: si pnpm está ins
 - La versión 1 (sin calentamiento) se rechaza: su hash ya no se puede verificar.
 - La app valida `phase: 0`. Cuando cambie la fase, hay que decidir qué hacer con los archivos de fases anteriores.
 
+## Licencia y avisos
+
+Petri es **GPL-3.0-or-later** (decisión de Nico, 2026-11-12; motivos en `plan-port-caiani.md`, sección 8). Texto en `LICENSE`; avisos de terceros en `NOTICE`.
+
+**Todo archivo que porte código de JMAB o del modelo Benchmark lleva este encabezado** (con las clases de origen que correspondan):
+
+```ts
+/*
+ * Petri — Copyright (C) 2026 Nicolas Picotto
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Traducción a TypeScript, MODIFICADA, de código de:
+ *   JMAB / modelo Benchmark — Copyright (C) 2013 Alessandro Caiani and Antoine Godin
+ *   (GNU GPL v3 o posterior). https://github.com/S120/jmab, https://github.com/S120/benchmark
+ * Clases de origen: jmab.strategies.AdaptiveMarkUpOnAC (referencia: benchmarkModel.jar del paper).
+ * Modificaciones: ver docs/ (cada diferencia con el original está documentada como adaptación).
+ */
+```
+
+Los archivos propios de Petri no necesitan encabezado (los cubre `LICENSE`).
+
 ## Cómo se verificó lo que no cubren los tests
 
 - **Entre motores JS**: se empaquetó el motor con esbuild y se corrió la misma corrida en Node (V8, el de Chrome) y en JavaScriptCore (el de Safari; en macOS está en `/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc`). Los hashes coincidieron, incluido un archivo exportado desde Chrome. Nico verificó en Safari la importación de un archivo v1 exportado en Chrome.

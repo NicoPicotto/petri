@@ -1,6 +1,14 @@
 # Pendientes
 
-> **2026-11-12: cambio de enfoque.** El modelo base pasa a ser Caiani et al. (2016) (ver [cambio-de-enfoque.md](cambio-de-enfoque.md)). Los pendientes sobre reglas del enfoque anterior (R1–R13) quedan como antecedente; las extensiones argentinas y los pendientes de calibración y validación siguen valiendo. Lo primero: decidir las preguntas abiertas del port.
+> **2026-11-12: cambio de enfoque.** El modelo base pasa a ser Caiani et al. (2016) (ver [cambio-de-enfoque.md](cambio-de-enfoque.md)). Los pendientes sobre reglas del enfoque anterior (R1–R13) quedan como antecedente; las extensiones argentinas y los pendientes de calibración y validación siguen valiendo. Las preguntas del port ya están decididas: ver [plan-port-caiani.md](plan-port-caiani.md).
+
+## Port de Caiani (plan en [plan-port-caiani.md](plan-port-caiani.md))
+
+- [x] **Licencia del proyecto:** GPL-3.0-or-later (Nico, 2026-11-12). `LICENSE` y `NOTICE` agregados; encabezado de los archivos portados en `arquitectura.md`.
+- [ ] **P0** (en curso; registro en [caiani-referencia.md](caiani-referencia.md)): falta analizar el lote de 25 réplicas y decidir el objetivo de V4 (¿la tabla publicada o la distribución del `.jar`?).
+- [ ] **Umbrales de V4** (reproducción estadística): acordarlos antes de mirar los resultados del port.
+- [ ] **Escala monetaria del ledger** (P1): proponer la unidad y verificar el techo de `MAX_SAFE_INTEGER`.
+- [ ] **Normal plegada determinista** (P1): proponer el método (tabla de la inversa o ziggurat con `expNeg`).
 
 Estado al 2026-11-11. Lista consolidada de lo que quedó abierto al terminar la Fase 0. Cada ítem dice de dónde viene. Ninguno se resuelve sin consultar a Nico (ver "Reglas de trabajo" en `CLAUDE.md`).
 
