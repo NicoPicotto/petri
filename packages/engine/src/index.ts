@@ -11,3 +11,6 @@ export * from './replay';
 export * from './warmup';
 export * from './snapshot';
 export * from './hash';
+export * from './phase1';
+export * from './detmath';
+export * from './creditRisk';

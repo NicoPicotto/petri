@@ -111,3 +111,31 @@ export function writeOffLoan(state: SimState, borrower: Agent, amount: Cents): v
   if (amount <= 0) return;
   redeem('loans', state.bank, borrower, amount);
 }
+
+/**
+ * El Tesoro le transfiere reservas al banco sin depósito del otro lado: el
+ * patrimonio del banco sube en `amount`. Se usa solo para el patrimonio
+ * inicial del banco (R13).
+ */
+export function payTreasuryToBank(state: SimState, amount: Cents): void {
+  if (amount <= 0) return;
+  redeem('treasuryAccount', state.treasury, state.centralBank, amount);
+  issue('reserves', state.bank, state.centralBank, amount);
+}
+
+/**
+ * El banco le paga al BCRA con reservas (ej.: intereses del financiamiento) y
+ * el BCRA le transfiere esa ganancia al Tesoro en el acto. Si al banco no le
+ * alcanzan las reservas, se las presta el BCRA.
+ */
+export function payBankToCentralBank(state: SimState, amount: Cents): void {
+  if (amount <= 0) return;
+  ensureBankReserves(state, amount);
+  redeem('reserves', state.bank, state.centralBank, amount);
+  issue('treasuryAccount', state.treasury, state.centralBank, amount);
+}
+
+/** El banco le paga al Tesoro (ej.: la retención sobre sus dividendos), con reservas. */
+export function payBankToTreasury(state: SimState, amount: Cents): void {
+  payBankToCentralBank(state, amount);
+}

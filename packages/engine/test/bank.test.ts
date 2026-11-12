@@ -147,10 +147,12 @@ describe('reservas y financiamiento del BCRA al banco', () => {
 describe('las reglas de la Fase 0 no usan el crédito', () => {
   it('después de 240 meses no hay préstamos ni financiamiento del BCRA al banco', () => {
     let s = createWarmState(3, { ...PHASE0_CONFIG, burnInTicks: 0 });
+    const initialEquity = netFinancialWorth(s.bank);
+    expect(initialEquity).toBeGreaterThan(0); // patrimonio inicial del banco (R13)
     for (let t = 0; t < 240; t++) s = step(s, s.knobs);
     expect(s.bank.positions.loans).toBe(0);
     expect(s.bank.positions.centralBankCredit).toBe(0);
-    // El banco sigue con reservas = depósitos (patrimonio cero).
-    expect(netFinancialWorth(s.bank)).toBe(0);
+    // Sin crédito, el patrimonio del banco no se mueve.
+    expect(netFinancialWorth(s.bank)).toBe(initialEquity);
   });
 });

@@ -234,6 +234,7 @@ export const closeMonth: Stage = (state) => {
   let revenue = 0;
   let units = 0;
   for (const firm of state.firms) {
+    if (firm.sector === 'capital') continue; // el índice es de bienes de consumo (R11)
     revenue += firm.revenue;
     units += firm.unitsSold;
   }
@@ -259,7 +260,8 @@ export const closeMonth: Stage = (state) => {
   s.unemployment = 1 - employed / n;
   s.realWage = employed > 0 ? wageSum / employed / priceIndex : 0;
   s.poverty = poor / n;
-  s.output = state.firms.reduce((acc, firm) => acc + PARAMS.laborProductivity * (firm.wageBill / firm.wage), 0);
+  // Producción de bienes de consumo (en la Fase 0, α·N; con capital, acotada por κ·K).
+  s.output = state.firms.reduce((acc, firm) => acc + (firm.sector === 'capital' || firm.wageBill === 0 ? 0 : firm.lastOutput), 0);
   s.emission = f.advancesThisMonth;
   s.effectiveEmissionShare = f.spendingThisMonth > 0 ? f.advancesThisMonth / f.spendingThisMonth : 0;
   f.lastTaxBase = f.taxBaseThisMonth;

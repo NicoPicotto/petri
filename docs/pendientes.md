@@ -1,0 +1,121 @@
+# Pendientes
+
+Estado al 2026-11-11. Lista consolidada de lo que quedó abierto al terminar la Fase 0. Cada ítem dice de dónde viene. Ninguno se resuelve sin consultar a Nico (ver "Reglas de trabajo" en `CLAUDE.md`).
+
+## Para cerrar la Fase 0
+
+- [ ] **Verificar en Safari un archivo de corrida v2** (exportado en Chrome, importado en Safari, tiene que decir "Reproducción verificada ✓"). La v1 ya se verificó; la v2 agregó el calentamiento.
+- [ ] **Que Nico dé la Fase 0 por cerrada.** El criterio de salida se cumple (ver "Resultados" en [fase0-reglas.md](fase0-reglas.md)).
+
+## Abierto en la Fase 1 (plan en [fase1-reglas.md](fase1-reglas.md))
+
+- [x] **Defecto de R1 (encontrado y corregido el 2026-11-11, paso 1a.0).**
+  - *Qué pasaba:* la producción deseada se ajustaba sobre sí misma y crecía sin límite (a miles de millones de puestos). Desde el mes ~120, todas las empresas contrataban todo lo que podían pagar.
+  - *Por qué afecta a R7:* el colchón es "1 mes de masa salarial deseada", así que creció con la meta y R7 dejó de pagar dividendos (semilla 1: ninguno desde el mes 137).
+  - *Corrección:* la cantidad se ajusta sobre la producción efectiva del mes anterior (fuente confirmada: Dawid, Delli Gatti, Fierro & Poledna, 2024, ec. 14).
+  - **Impacto:**
+    1. El criterio de la Fase 0 se sigue cumpliendo (A 0,21–0,55%, B 1,87–2,83%, B > A en 20/20).
+    2. El margen precio/costo pasa de ~1,19 a ~1,7.
+    3. La descripción del mecanismo y el análisis del calentamiento de `fase0-reglas.md` estaban basados en corridas con el defecto; se corrigieron.
+    4. Cambian los hashes: los archivos de corrida exportados antes no verifican.
+    5. Con G = 0 desde la creación, el desempleo pasa de 67% a 100%.
+- [x] **Calentamiento de 420 meses**, con un test por promedios de 5 años (decisión de Nico, 2026-11-11). Verificado con 500 y con 2.000 hogares.
+- [x] **Colchón de R7 eliminado** (decisión de Nico, 2026-11-11). Su razón de ser era el defecto de R1.
+- [ ] **Crédito al sector privado en Argentina:** es muy bajo en relación con el PBI comparado con otros países. Revisarlo en la Fase 3, al calibrar R9 y R13 (pedido de Nico, 2026-11-11).
+- [ ] **El margen precio/costo** era ~1,78 después de corregir R1 (alto contra la evidencia). Con la R7 revisada, el régimen de la Fase 1 da ~1,20. Revisarlo igual en la Fase 3 (validación).
+- [ ] **Magnitud del efecto de la emisión** (pedido de Nico, 2026-11-11): seguirla en cada punto de control.
+  - *Trayectoria de la inflación de B (s = 0,5):* ~3,3% anual en la Fase 0 original → **2,4%** con R1 corregida → **1,6%** con las reglas de la Fase 1 (protocolo correcto).
+  - *Por qué:* con las reglas de la Fase 1, ~45% de la emisión extra queda como saldos reales (la velocidad cae 1,1% por año). Hipótesis a verificar: se concentra en los dueños, por R7 anual.
+  - *Error mío:* el "0,7–1,5%" y el "18/20" anteriores venían de calentar B con s = 0,5. Ver `fase1-reglas.md`.
+- R8 (base de pleno empleo) **sigue siendo necesaria**: sin ella, A termina con 64–67% de desempleo.
+- [x] Paso 1a.2: balance del banco y flujos del crédito (solo contabilidad).
+- [ ] **Paso 1a.3:** R9 y R13 implementadas (versión corregida de Dosi, límite por capital del banco, λ = 3). **Con R9 y R13 solas, la economía colapsa**: el crédito saca el freno de liquidez, R2 sube los salarios sin parar y R1 (fiel a CATS) no traslada costos a precios. Ver `fase1-reglas.md`, "Paso 1a.3: implementación y hallazgo". Espera la decisión de Nico.
+- [ ] **Candidato a perilla de teoría (Fase 3): traslado de costos a precios.** CATS: nulo. CANVAS y K+S: total (Dawid et al., 2024).
+- [ ] **Punto de control 1a:** medir en A y B el crédito total, la tasa real y la proporción de empresas endeudadas (pedido de Nico).
+- [x] **Paso 1a.4 (fusionado con el 1a.3):** R12 implementada. Test contra zombis: ninguna empresa activa termina un mes con 3 o más cuotas impagas.
+- [ ] **El banco se funde y no hay regla de recapitalización**: el crédito se congela para siempre. Espera la decisión de Nico.
+- [ ] **Espiral salarial con crédito**: R2 sube salarios sin techo cuando la demanda de trabajo supera a los hogares, y R1 no traslada costos. Medida con dos variantes experimentales: es real, pero secundaria. Ver `fase1-reglas.md`, "Decisión de Nico y mediciones del 2026-11-11".
+- [x] **Condiciones iniciales calibradas** con el régimen (`PHASE1_INITIAL`): el transitorio macro desaparece, pero la ola de quiebras no.
+- [x] **R6 con fidelidad al proveedor** (CATS, β = 1): la volatilidad de las ventas baja a la mitad y las quiebras pasan de ~17% a 13,5% anual (el empírico es 5–10%). El banco sigue insolvente (año 25).
+- [x] **R13 revisada** (tasa según el riesgo, Assenza et al., 2015; racionamiento por umbral, Stiglitz & Weiss, 1981): banco solvente en 20/20, quiebras de 6,2% anual en régimen, la mitad de las empresas con deuda. Ver la tabla en `fase1-reglas.md`.
+- [ ] **Punto de control 1a:**
+  - mirar la semilla con 19% de desempleo en los últimos 10 años (R13 base);
+  - verificar por qué la inflación de B sube con el crédito (de 1,60% a 2,35%);
+  - tasa real ~9%: compararla con datos argentinos en la Fase 3.
+- [ ] **Punto de control 1a:** verificar la hipótesis de la velocidad. Medir en A y B cómo se reparten los depósitos entre dueños (de empresas y del banco) y trabajadores, y si la acumulación en los dueños explica la caída de V en B (pedido de Nico, 2026-11-11).
+- [ ] **Tramo 1c:** decidir si las perillas de gasto son **nominales, indexadas a precios o un % del PBI** (pedido de Nico, 2026-11-11). Con gasto nominal, la inflación lo licúa. Es un fenómeno real, pero tiene que ser una elección explícita; puede ser perilla de teoría o de política. Hoy es nominal (decisión de la Fase 0, R8). El error de protocolo del 2026-11-11 mostró cuánto pesa: con 35 años de emisión previa, el mismo gasto nominal es un déficit mucho menor.
+- [ ] **Fase 3, calibración de β (R6):** hipótesis de **volatilidad en forma de U según la tasa de cambios de proveedor** (pedido de Nico, 2026-11-11).
+  - *Con muy pocos cambios (β bajo):* la clientela queda muy despareja entre empresas (coef. var. 0,71 con β = 0,3) y no sigue a las que crecen, así que hay más volatilidad y quiebras.
+  - *Sin memoria (la R6 vieja):* la clientela se rearma al azar todos los meses, también con mucha volatilidad.
+  - *Mínimo:* en algún punto intermedio; con β = 1 y β = 3 la volatilidad es parecida.
+  - Verificarlo antes de calibrar β.
+- [ ] **β:** la dirección está verificada (más β ⇒ más cambios). Con β = 0,3 hay más volatilidad y quiebras, y la hipótesis es que los clientes quedan muy desparejos entre empresas (coef. var. 0,71 contra 0,46 con β = 3). Verificarlo antes de calibrar β (Fase 3).
+- [ ] **Fase 3:** verificar el dato de cierre de empresas del OEDE (~3–3,7%) en la fuente original, no en la nota de prensa: si es anual o trimestral, y qué cubre (empresas con al menos un empleo registrado). Pedido de Nico, 2026-11-11.
+- [ ] **Ola de quiebras al prender el crédito** (problema principal): 87 de 120 empresas quiebran en 5 años. Hipótesis verificada: R7 drena el patrimonio, porque reparte el 90% de los meses buenos y absorbe el 100% de los malos. Orden acordado: R7 → medir → R13 → medir → R12 si hace falta. **R7 implementada y medida**: la economía real mejora mucho (desempleo 2,2%, criterio de la Fase 0 20/20), pero el banco sigue quedando insolvente en 20/20 (castigos ~4 veces los intereses). Siguiente: proponer R13.
+- [ ] **Variantes experimentales en el código** (`Phase1Experiments`: `costPassThrough`, `wageCutWithUnemployment`): apagadas por defecto, no aprobadas. Borrarlas o convertirlas en reglas cuando se decida.
+- [x] Valuación del capital: **opción A aprobada** (costo histórico depreciado), con venta forzosa con descuento d y amortización dentro del piso de R1 (Nico, 2026-11-11). Ver `fase1-reglas.md`.
+- [ ] **Fase 2/3: ajuste por inflación contable.** Con costo histórico e inflación alta:
+  - el capital queda subvaluado y se adelantan las quiebras;
+  - la amortización queda subvaluada y **la ganancia contable se infla**;
+  - cuando entre Ganancias (tramo 1c), eso implica **impuesto sobre ganancias ficticias**.
+  
+  La opción C (reexpresión: RT 6 FACPCE, NIC 29, Ley 27.468) debe ser una **perilla**: con o sin ajuste por inflación contable (pedido de Nico, 2026-11-11).
+- [ ] **Fase 2/3: recupero de la venta forzosa (R11/R12).** Ramey & Shapiro (2001) miden el recupero (28 centavos) sobre el **costo de reposición**; nosotros aplicamos r_K sobre el **valor libro** (costo histórico). Con inflación alta, el valor libro queda por debajo del de reposición y el recupero queda subestimado. Revisarlo junto con la opción C (pedido de Nico, 2026-11-11).
+- [x] **Paso 1a.5: R11 implementada y medida** (2026-11-11): capital, depreciación según el uso, 20 empresas de capital, venta forzosa. Criterio de la Fase 0 20/20, banco solvente, empleo del sector de capital 8,1%. Ver "Medición de R11" en `fase1-reglas.md`.
+- [ ] **Después de R11, las quiebras casi desaparecen** (0,1% anual contra 5–10% empírico). Hipótesis no verificadas: el colchón del valor libro de la planta y/o el tope de capacidad, que protege a las empresas. Medir de nuevo con R10. Si sigue, revisar R12 con Nico (la ley argentina dispara la quiebra por cesación de pagos, no por patrimonio negativo).
+- [ ] **Después de R11, el desempleo sube a 7,3%** (hasta 18% en algunas semillas). Hipótesis: falta capital (61% de las empresas al tope de capacidad, sin inversión neta), y R1 no sube el precio al tope de capacidad. Medir de nuevo con R10.
+- [ ] **Magnitud del efecto de la emisión:** con R11, la inflación de B baja de 2,35% a 1,34% (B > A en 20/20).
+- [ ] **Punto de control 1a:** verificar que el calentamiento de 420 meses sigue alcanzando con R11 y R10. El test lento actual mide las reglas de la Fase 0.
+- [ ] **Candidato a perilla de teoría (Fase 3): inflación por restricción de capacidad.** En CATS (Assenza et al., 2015, ec. 5.1–5.2, verificado), una empresa al tope de su capacidad con exceso de demanda y precio ≥ promedio no sube el precio: el exceso de demanda queda como ahorro forzoso. Medido con una variante experimental (2026-11-11): explica menos del 10% del achicamiento del efecto de la emisión, y sube mucho el desempleo.
+- [ ] **Trampa sin caja (problema principal antes de R10):** entre 7 y 20 de las 100 empresas de consumo quedan activas sin producir durante 50 años. La cadena es R7 → racionamiento por φ → ventas 0 → límite de R9 en 0, y no quiebran. Opciones: (a) salida por cuota de mercado ~0, como en K+S; (b) racionar por φ·LGD; (c) límite de R9 con ventas esperadas; (d) depósitos precautorios de Caiani. Espera la decisión de Nico. Ver `fase1-reglas.md`.
+- [ ] **El tope de capacidad hoy frena la espiral salarial:** sin él (variante experimental), la espiral del paso 1a.3 vuelve y la economía colapsa. Con R10, la capacidad crece: revisar si la espiral reaparece.
+- [ ] **Ahorro forzoso con R11:** 17% del gasto deseado en A y 33% en B. Medirlo de nuevo con R10.
+- [ ] **Venta forzosa pagada entre todos = impuesto implícito a los depositantes** (no pasa por el Tesoro). Se cuenta en `credit.fireSalesPooled`. Revisar si se vuelve frecuente.
+- [ ] **Variantes experimentales nuevas** (`priceUpAtCapacity`, `noCapacityLimit`): apagadas, solo para medir. Borrarlas o convertirlas cuando se decida.
+- [ ] Tramo 1b: al repartir empresas por sector, reportar cuántas quedan en cada uno y si alguno queda con muy pocas (pedido de Nico).
+- [ ] La app sigue con `PHASE0_CONFIG` (500 hogares). Pasa a `PHASE1_CONFIG` en el paso 1c.6, escalando el gasto y las perillas.
+- [x] **Paso 1a.1 (escala):** tamaño de la Fase 1 = 2.000 hogares y 120 empresas (`PHASE1_CONFIG`, decisión de Nico).
+  - *Hallazgo:* el ruido mes a mes cae como 1/√N, pero las oscilaciones lentas (el nivel de desempleo, la inflación de 5 años) no bajan con el tamaño: son ciclos agregados.
+  - *Pendiente:* definir con datos qué volatilidad es "plausible" (Fase 3).
+- El contrafáctico G = 0 ya se volvió a correr (paso 1a.0). Después de corregir R1: 100% de desempleo desde la creación y 6–12% si se pasa a G = 0 después del calentamiento.
+
+## Obligatorios de la Fase 1 (criterio de salida en `CLAUDE.md`)
+
+- **Con G = 0 la economía privada se sostiene sola**, sin colapso de empleo. Hoy el gasto público es la única demanda autónoma (propiedad del SIM). Con G = 0 desde la creación, el desempleo llega a 100% (después de corregir R1). Requiere inversión y crédito.
+- **Volatilidad**: verificar que con más agentes la volatilidad mensual del desempleo y la inflación baja a niveles plausibles (ver "Limitaciones conocidas" en [fase0-reglas.md](fase0-reglas.md)). Medido en el paso 1a.1: el ruido mes a mes sí baja; las oscilaciones lentas no.
+- Lo que ya estaba en el roadmap: sectores (agro, industria, servicios, comercio), formalidad e informalidad, estratos con necesidades y nivel de vida, todas las perillas fiscales y de regulación, indicadores sociales con metodología INDEC.
+
+## Diferido explícitamente a la Fase 1
+
+- **Crédito bancario, quiebras y entrada de empresas** (decisión de la Fase 0). Hoy el banco es pasivo: no presta ni cobra interés.
+- **Revisar R7 (colchón de liquidez antes de los dividendos)** cuando entre el crédito. Es provisorio y no tiene fuente: existe porque, sin crédito, las empresas se quedaban sin capital de trabajo.
+
+## Supuestos simplificadores de la Fase 0 que la Fase 1 probablemente toque
+
+Están documentados en [fase0-reglas.md](fase0-reglas.md). Cambiarlos es una decisión de diseño: proponer con fuente y esperar el OK.
+
+- Un solo bien, perecedero. Producción solo con trabajo (sin capital).
+- No se usa efectivo (`cash` existe en el ledger pero no circula).
+- Un salario por empresa. Los ocupados no buscan otro trabajo. No hay salario de reserva.
+- Consumo nominal (forma de SIM). La versión real con expectativas de precios (Caiani et al., 2016) quedó para cuando haya expectativas.
+- Un dueño por empresa, elegido al azar.
+- El gasto público es solo transferencias universales; el impuesto es uno solo, proporcional sobre salarios y dividendos.
+- El gasto es nominal y no se indexa.
+- **Pobreza**: canasta provisional (6 unidades del bien, sin adulto equivalente). La Fase 1 pide metodología INDEC (CBA/CBT).
+- Margen precio/costo de equilibrio ~1,78 (ver arriba): alto contra la evidencia, revisar en la Fase 3.
+- Parámetros sin calibrar: α1 = 0,9 y α2 = 0,05 (consumo), topes de ajuste de precio, cantidad y salario (5%), tamaños de búsqueda (3 y 4), canasta.
+
+## Más adelante (no Fase 1)
+
+- **Indexación e inercia salarial como perilla de teoría** (anotado en R2). Encaja con las perillas de teoría de la Fase 3.
+- **Déficit cíclico financiado con bonos** en vez de emisión automática, cuando haya deuda (Fase 2). Hoy, incluso con s = 0, hay algo de emisión en las recesiones.
+
+## Opcionales
+
+- **Calibrar las condiciones iniciales** (margen ~1,2, más depósitos) para acortar el calentamiento de 240 meses. Nico decidió no hacerlo por ahora.
+
+## A tener en cuenta al cambiar reglas
+
+- **Los tests del criterio de la Fase 0 van a moverse.** `test/phase0-criteria.test.ts` fija umbrales (A < 1% anual, B > A en 20 semillas, calentamiento sin tendencia) medidos con las reglas de la Fase 0 y `PHASE0_CONFIG`. Si una regla nueva los rompe, no reajustar los umbrales en silencio: mostrar el reporte y consultar.
+- **Cambiar `SimState` cambia el hash** y obliga a subir la versión del archivo de corrida (ver [arquitectura.md](arquitectura.md)).
+- **El contrafáctico G = 0** de la sección de resultados se corrió antes del calentamiento. Si se cita en la Fase 1, conviene volver a correrlo.
