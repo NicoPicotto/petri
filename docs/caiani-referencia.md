@@ -83,7 +83,28 @@ Texto extraído en `reference/p0/paper-wp.txt` (`pdftotext -layout`). Secuencia 
   | Apalancamiento empresas C | 0,853 | 0,746 |
 
   Las cantidades reales coinciden muy de cerca. La inflación y el apalancamiento dan más altos; en las tablas de sensibilidad del propio paper, con parámetros vecinos al base, la inflación da 0,50–0,52 y el apalancamiento de los bancos 5,1–5,6. **Si las 25 réplicas confirman la diferencia, el objetivo de V4 tiene que ser la distribución del `.jar` y no la tabla publicada** (que pudo salir de otra versión o de las 100 réplicas del paper). Decisión de Nico.
-- **Lote de 25 réplicas:** en curso (`reference/p0/runs/baseline/`).
+- **Lote de 25 réplicas (2026-11-12):** `reference/tools/run-baseline.sh 25 4`, ~26 minutos por réplica con 4 en paralelo. **Ninguna colapsó.** Resumen en `reference/p0/runs/resumen-25.json`; la comparación sale de `reference/tools/compare_published.py`.
+
+  **Método de la comparación.** El filtro HP es lineal, así que el "Average Trend" publicado es la media, entre réplicas, del promedio de la tendencia de cada réplica en la ventana. Si la tabla publicada saliera del mismo `.jar`, publicado − nuestra media tendría esperanza 0 y desvío s·√(1/25 + 1/N_pub), con s el desvío entre nuestras réplicas. Se usa N_pub = 25 (el lanzador) y N_pub = 100 (lo que dice el paper), con la t de Student de 24 grados de libertad. Además se cuenta, sin supuestos, cuántas réplicas individuales quedan del lado del valor publicado.
+
+  | | Publicado | `.jar` (media de 25) | Desvío entre réplicas | Réplicas del lado del publicado | z (lote de 25 / de 100) | ¿Dentro del IP 95%? |
+  |---|---|---|---|---|---|---|
+  | PBI real | 36.760 | 36.949 | 68 | 0/25 | −9,8 / −12,5 | No |
+  | Desempleo | 7,84% | 7,51% | 0,10 | 0/25 por encima | +12,1 / +15,3 | No |
+  | Inversión real | 6.962 | 6.888 | 51 | 1/25 por encima | +5,1 / +6,5 | No |
+  | Consumo real | 29.790 | 30.061 | 85 | 0/25 | −11,3 / −14,2 | No |
+  | Inflación C | 0,4245 | 0,530 | 0,020 | 0/25 (mín 0,485) | −18,6 / −23,6 | No |
+  | Inflación K | 0,4607 | 0,566 | 0,020 | 0/25 (mín 0,521) | −18,6 / −23,5 | No |
+  | Crecimiento del ingreso neto | 0,4231 | 0,534 | 0,019 | 0/25 (mín 0,486) | −20,3 / −25,7 | No |
+  | Apalancamiento bancos | 5,049 | 5,42 | 0,73 | 9/25 | −1,8 / −2,3 | Sí con 25 (p = 0,09); justo afuera con 100 (p = 0,03) |
+  | Apalancamiento empresas C | 0,7456 | 0,834 | 0,014 | 0/25 (mín 0,809) | −22,3 / −28,2 | No |
+
+  **Conclusión:**
+  - **La tabla publicada no sale del `.jar` del lanzador.** Ocho de nueve indicadores quedan muy afuera, y en inflación y apalancamiento de las empresas ninguna réplica individual llega al valor publicado. No es ruido de muestreo.
+  - El apalancamiento de los bancos es la excepción porque varía mucho entre réplicas (de 3,9 a 7,0). No sirve para discriminar.
+  - Las cantidades reales difieren menos del 1%, pero la diferencia es sistemática. La inflación y el apalancamiento de las empresas difieren ~25% y ~12%.
+  - Origen probable: otra versión del código u otra configuración que la del `.jar` (no se investigó más). Coincide con que en las tablas de sensibilidad del propio paper, con parámetros vecinos al base, la inflación da 0,50–0,52.
+  - **Por decisión de Nico, el objetivo de V4 es la distribución del `.jar`** (`plan-port-caiani.md`, sec. 4). La tabla publicada queda como registro.
 
 ## Oráculo (V3): fuente 2015 instrumentado
 

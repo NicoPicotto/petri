@@ -5,10 +5,24 @@
 ## Port de Caiani (plan en [plan-port-caiani.md](plan-port-caiani.md))
 
 - [x] **Licencia del proyecto:** GPL-3.0-or-later (Nico, 2026-11-12). `LICENSE` y `NOTICE` agregados; encabezado de los archivos portados en `arquitectura.md`.
-- [ ] **P0** (en curso; registro en [caiani-referencia.md](caiani-referencia.md)): falta analizar el lote de 25 réplicas y decidir el objetivo de V4 (¿la tabla publicada o la distribución del `.jar`?).
-- [ ] **Umbrales de V4** (reproducción estadística): acordarlos antes de mirar los resultados del port.
-- [ ] **Escala monetaria del ledger** (P1): proponer la unidad y verificar el techo de `MAX_SAFE_INTEGER`.
-- [ ] **Normal plegada determinista** (P1): proponer el método (tabla de la inversa o ziggurat con `expNeg`).
+- [x] **Objetivo de V4:** la distribución del `.jar` (Nico, 2026-11-12). Las 25 réplicas confirmaron que la tabla publicada no sale del `.jar`; la diferencia está documentada en [caiani-referencia.md](caiani-referencia.md).
+- [x] **Criterio de V4** (Nico, 2026-11-12): Welch + Holm al 1% + tamaño < 0,5 desvíos, también para la dispersión y los momentos del ciclo. Escrito en `plan-port-caiani.md` (sec. 4) e implementado en `reference/tools/v4_compare.py`. **P0 cerrado.**
+- [ ] **Réplicas para V4:** con 25 por lado la condición de tamaño falla por azar (~6% de pasar con un port perfecto). Propuesta: 100 por lado (faltan 75 del `.jar`, ~8 horas de máquina). A confirmar por Nico.
+- [ ] **(Opcional) Origen de la tabla publicada:** no se sabe qué versión o configuración la generó. No bloquea el port.
+- [ ] **Escala monetaria del ledger** (P1; propuesta presentada el 2026-11-12, a decidir por Nico):
+  - **Propuesta:** saldos enteros con 1 unidad de Caiani = 10⁶ unidades del ledger.
+  - **Techo:** el saldo agregado más grande en 25 réplicas × 400 trimestres del `.jar` es 1,25 × 10⁶ unidades de Caiani, o sea 1,25 × 10¹² en el ledger. `MAX_SAFE_INTEGER` ≈ 9 × 10¹⁵, así que queda un margen de ~7.000×.
+  - **Resolución:** 10⁻⁶ de un salario de 5, un error despreciable frente a la tolerancia de V3.
+  - **Repartos proporcionales** (dividendos, quita de quiebras): restos mayores, desempate por id. Así la suma es exacta.
+  - **Límite a futuro:** con inflación argentina alta, el margen de ~7.000× son ~13 duplicaciones de precios (13 años al 100% anual). Para los escenarios históricos va a hacer falta una redenominación dentro de la corrida o `bigint`; `money.ts` ya está pensado para migrar.
+- [ ] **Normal plegada determinista** (P1; propuesta presentada el 2026-11-12, a decidir por Nico):
+  - **Propuesta:** inversa de la distribución, |N(0, σ)| = σ·Φ⁻¹((1 + u)/2), con una tabla de nodos que se genera al cargar el módulo con las cuatro operaciones y `expNeg`, más interpolación cúbica de Hermite (la derivada de Φ⁻¹ es 1/φ). Se corta en u = 1 − 2⁻³², ~6,2σ.
+  - **Por qué:**
+    - un uniforme por sorteo (el registro de V3 queda alineado);
+    - es monótona en u (números aleatorios comunes entre cápsulas);
+    - no usa `log` ni `sqrt`.
+  - **Tests:** momentos (media σ√(2/π), varianza σ²(1 − 2/π)) y Kolmogorov–Smirnov contra la normal.
+  - **Es una adaptación documentada:** Colt usa otro algoritmo. Para V3 da igual, porque se reproducen los resultados registrados, no el algoritmo.
 
 Estado al 2026-11-11. Lista consolidada de lo que quedó abierto al terminar la Fase 0. Cada ítem dice de dónde viene. Ninguno se resuelve sin consultar a Nico (ver "Reglas de trabajo" en `CLAUDE.md`).
 

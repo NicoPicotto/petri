@@ -71,21 +71,46 @@ Hay tres versiones distintas, y no son iguales:
 - **V1, condiciones iniciales.** Portar `SFCSSMacroAgentInitialiser`; el balance del período 0 igual al de Java salvo redondeo.
 - **V2, regla por regla.** Ecuación y línea de JMAB al lado del código; test calculado a mano (patrón de `test/rules-by-hand.test.ts`).
 - **V3, oráculo con trazas.** JMAB instrumentado con semilla fija vuelca el estado y la secuencia de números aleatorios consumidos. El port recibe ese estado y un `Rng` que devuelve esa secuencia, calcula el tick siguiente y se compara etapa por etapa (tolerancia relativa 1e-9 en `double`, redondeo en saldos). De a un tick, desde estados en t = 1, 50, 200 y 399 (en trayectorias largas es esperable que algún umbral se dé vuelta). Obliga a respetar el orden de eventos y de sorteos de JMAB.
-- **V4, reproducción estadística.** 25 réplicas × 400 trimestres; se descartan las que colapsan (desempleo > 80%, como su script); filtro HP λ = 1600; últimos 100 trimestres (`startRound = simRounds − 100` en `BaselineAnalysis.R`). Objetivo, tabla "Summary Baseline" de `Summary Tables Quasi-SS.xlsx`:
+- **V4, reproducción estadística.** 25 réplicas × 400 trimestres; se descartan las que colapsan (desempleo > 80%, como su script); filtro HP λ = 1600; últimos 100 trimestres (`startRound = simRounds − 100` en `BaselineAnalysis.R`).
 
-  | Indicador | Promedio de la tendencia |
-  |---|---|
-  | PBI real | 36.760 |
-  | Desempleo | 7,84% |
-  | Inversión real | 6.962 |
-  | Consumo real | 29.790 |
-  | Inflación de bienes de consumo | 0,4245% trimestral |
-  | Inflación de bienes de capital | 0,4607% trimestral |
-  | Crecimiento del ingreso neto | 0,4231% trimestral |
-  | Apalancamiento de los bancos | 5,049 |
-  | Apalancamiento de las empresas de consumo | 0,7456 |
+  **Objetivo: la distribución del `.jar` del paper** (decisión de Nico, 2026-11-12: si las réplicas confirmaban la diferencia con la tabla publicada, "manda el código"). Se confirmó con 25 réplicas (detalle en [caiani-referencia.md](caiani-referencia.md), "Lote de 25 réplicas"). Archivo de referencia: `reference/p0/runs/resumen-25.json` (promedio de la tendencia en la ventana, por réplica).
 
-  Más la volatilidad del ciclo (misma tabla) y las correlaciones de `Summary Correlation Analysis Baseline.xlsx`. El xlsx no trae la dispersión entre réplicas: la generamos corriendo el `.jar` con 25+ semillas. Criterio: medias por réplica indistinguibles; umbrales a acordar con Nico antes de mirar los resultados del port.
+  | Indicador | `.jar`: media de 25 réplicas (desvío entre réplicas) | Tabla publicada ("Summary Baseline", solo como registro) |
+  |---|---|---|
+  | PBI real | 36.949 (68) | 36.760 |
+  | Desempleo | 7,51% (0,10) | 7,84% |
+  | Inversión real | 6.888 (51) | 6.962 |
+  | Consumo real | 30.061 (85) | 29.790 |
+  | Inflación de bienes de consumo | 0,530% trimestral (0,020) | 0,4245% |
+  | Inflación de bienes de capital | 0,566% trimestral (0,020) | 0,4607% |
+  | Crecimiento del ingreso neto | 0,534% trimestral (0,019) | 0,4231% |
+  | Apalancamiento de los bancos | 5,42 (0,73) | 5,049 |
+  | Apalancamiento de las empresas de consumo | 0,834 (0,014) | 0,7456 |
+
+  Más la volatilidad del ciclo y las correlaciones, también calculadas sobre las réplicas del `.jar` (las de `Summary Correlation Analysis Baseline.xlsx` quedan como registro).
+
+  **Criterio de V4 (acordado con Nico el 2026-11-12, escrito antes de cualquier resultado del port).** Implementado en `reference/tools/v4_compare.py`; los estadísticos por réplica salen de `reference/tools/analyze_baseline.py`, con las mismas definiciones que `BaselineAnalysis.R`.
+  - **Unidad de comparación:** un valor por réplica y por estadístico. Las réplicas del port usan semillas distintas entre sí, con la misma regla de descarte (desempleo > 0,8). El `.jar` no tuvo ninguna caída en 25; cualquier caída del port se investiga.
+  - **Estadísticos (34 por réplica):**
+    - los 9 promedios de la tendencia en la ventana (tabla de arriba);
+    - los 9 desvíos del ciclo relativo a la tendencia en la ventana (`cycSD:`, lo que la fila "Standard Deviation Cycle" promedia);
+    - los momentos del ciclo de toda la corrida, como en el análisis de correlaciones de `BaselineAnalysis.R` (ciclo HP de log PBI, log inversión, log consumo y desempleo en nivel; estimadores de `acf`/`ccf` de R):
+      - volatilidad relativa al PBI de la inversión, el consumo y el desempleo;
+      - correlaciones cruzadas con el PBI en los rezagos −1, 0 y +1;
+      - autocorrelación de rezago 1 de las cuatro series.
+  - **Medias:** prueba t de **Welch** (varianzas distintas). Tamaño: |media del port − media del `.jar`| < **0,5 desvíos entre réplicas del `.jar`**.
+  - **Dispersión entre réplicas** (los 9 promedios de la tendencia): prueba de **Brown–Forsythe**, que es robusta a la falta de normalidad. Tamaño: |desvío del port − desvío del `.jar`| < 0,5 desvíos del `.jar`.
+  - **Comparaciones múltiples:** corrección de **Holm** sobre la familia completa (34 pruebas de medias + 9 de dispersión = 43), con nivel conjunto **1%**.
+  - **Un estadístico pasa** si Holm no rechaza **y** se cumple el tamaño.
+  - **Resultado:**
+    - 0 fallas: V4 cumplido;
+    - **1 falla aislada: se investiga antes de concluir que hay un error** (se mira la regla que más pesa en ese estadístico, con V3 si hace falta);
+    - 2 o más: hay una discrepancia, que se localiza con V3.
+  - **Calibración (2026-11-12).** La condición de tamaño se evalúa sobre la diferencia observada, así que depende del número de réplicas. Con n réplicas por lado, la diferencia de medias entre dos lotes del mismo modelo tiene un desvío de s·√(2/n).
+    - Con n = 25, cada estadístico falla por azar con probabilidad P(|Z| > 1,77) ≈ 8%: un port perfecto pasaría sin fallas solo ~6% de las veces.
+    - Prueba empírica (`v4_compare.py --split`, el `.jar` contra sí mismo, 12 réplicas contra 13): 13 fallas de 43, todas por tamaño; Holm no rechazó ninguna.
+    - Con **100 réplicas por lado** (las que dice el paper), la probabilidad de falla por azar en cada estadístico de medias es ~0,04%, y un port perfecto pasa ~99% de las veces.
+    - **Propuesta, a confirmar por Nico:** 100 réplicas del `.jar` (faltan 75, ~8 horas con 4 en paralelo) y 100 del port.
 - **V5, sensibilidades.** Los experimentos del paper (aversión al riesgo de los bancos, depósitos precautorios, pesos de la inversión) en la misma dirección y orden de magnitud.
 - **Después:** volver a correr el criterio de la Fase 0 (emisión ⇒ inflación) y el de G = 0 sobre el port.
 
