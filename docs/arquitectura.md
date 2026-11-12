@@ -34,7 +34,7 @@ Requiere **Node ≥ 22.12** (Vite 7 no anda con Node 18). Ojo: si pnpm está ins
 | `state.ts` | Tipos del estado, `createInitialState`, `cloneState` (copia escrita a mano, sin `structuredClone`), `PHASE0_CONFIG` (500 hogares, la usa la app hasta el paso 1c.6) y `PHASE1_CONFIG` (2.000 hogares y 120 empresas, decisión del 2026-11-11). |
 | `params.ts` | Parámetros del modelo, cada uno con su fuente o marcado como supuesto. |
 | `model.ts` | Las reglas de la Fase 0 como **etapas** (`Stage`) de un tick, en `PHASE0_STAGES`. |
-| `phase1.ts` | Reglas de la Fase 1, tramo 1a (R9 crédito, R13 banco, R12 quiebras y entrada, R11 capital), en `PHASE1_STAGES` y `makePhase1Stages(credit, experiments, dividends, market, capital)`. Reusa las etapas de la Fase 0 que no cambian. Necesita empresas de capital (`SimConfig.capitalFirms > 0`; van al final de la lista de empresas). |
+| `phase1.ts` | **Registro del enfoque anterior** (ver `cambio-de-enfoque.md`; se reemplaza por el port de Caiani). Reglas de la Fase 1, tramo 1a (R9 crédito, R13 banco, R12 quiebras y entrada, R11 capital), en `PHASE1_STAGES` y `makePhase1Stages(credit, experiments, dividends, market, capital)`. Reusa las etapas de la Fase 0 que no cambian. Necesita empresas de capital (`SimConfig.capitalFirms > 0`; van al final de la lista de empresas). |
 | `step.ts` | `step(state, knobs, options)`: puro, clona, corre las etapas, avanza el reloj y verifica SFC. |
 | `warmup.ts` | `createWarmState`: estado inicial + calentamiento. |
 | `knobs.ts` | Perillas, log (`KnobChange`), validación. |

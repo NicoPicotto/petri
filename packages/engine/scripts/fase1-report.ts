@@ -5,6 +5,10 @@
  * Uso: pnpm --filter @petri/engine report:fase1 [g0|escala|variantes]
  *   g0:        diagnóstico con G = 0 (paso 1a.0).
  *   escala:    volatilidad según el tamaño de la cápsula (paso 1a.1).
+ *   r11k: corrección de la regla de cantidad de las empresas de capital (Assenza ec. 6.2), con R10 apagada y prendida (~7 min).
+ *   r10: R10 (inversión, Caiani et al., 2016), γ base · ×0,5 · ×2 (~6 min).
+ *   r9: R9 con ventas esperadas, λ_e = 0,0914 · 0,25 · 0,5; empresas nuevas y zombis (~6 min).
+ *   perdida: R13 con racionamiento por pérdida esperada (LGD por empresa), θ = 0,024 · 0,012 · 0,048 (~6 min).
  *   capacidad: ¿cuánto del achicamiento del efecto de la emisión explica que R1 no suba el precio al tope de capacidad? (~4 min).
  *   r11: R11 (capital, sector de bienes de capital, venta forzosa), r_K = 0,3 · 0,15 · 0,5 (~6 min).
  *   r13: R13 revisada (tasa según el riesgo y racionamiento), umbral φ = 0,03 · 0,015 · 0,06 (~6 min).
@@ -74,6 +78,10 @@ if (run_('emision')) emissionSection();
 if (run_('r13')) r13Section();
 if (run_('r11')) r11Section();
 if (run_('capacidad')) capacitySection();
+if (run_('perdida')) expectedLossSection();
+if (run_('r9')) expectedSalesSection();
+if (run_('r10')) investmentSection(true);
+if (run_('r11k')) capitalRuleSection();
 
 function g0Section(): void {
 table('baseline', 'Referencia: Fase 0 tal como está (G = 50.000, s = 0)');
@@ -387,7 +395,7 @@ function r13Section(): void {
   const firms = PHASE1_CONFIG.firms;
   console.log('\nR13 revisada — reglas aprobadas, iniciales calibradas, 20 semillas, 2.000 hogares, calentamiento de 420 meses desde la creación (A y B igual), 50 años visibles. mín · mediana · máx\n');
   for (const threshold of [0.03, 0.015, 0.06]) {
-    const credit = { ...CREDIT, maxDefaultProbability: threshold };
+    const credit = { ...CREDIT, maxExpectedLoss: threshold * 0.8 }; // (histórico: umbral de φ; hoy el de pérdida esperada)
     const a = seeds.map((seed) => runVariant(seed, A, {}, 'cold', undefined, PHASE1_CONFIG, undefined, credit));
     const b = seeds.map((seed) => runVariant(seed, B, {}, 'cold', undefined, PHASE1_CONFIG, undefined, credit));
     const insolvent = a.filter((r) => r.bankInsolventAt !== null);
@@ -469,5 +477,135 @@ function capacitySection(): void {
     console.log(`  al tope de capacidad: A ${q(a.map((r) => r.lateAtCapacityShare), p1)} · B ${q(b.map((r) => r.lateAtCapacityShare), p1)} · utilización A ${q(a.map((r) => r.lateUtilization), p1)}`);
     console.log(`  desempleo (últ. 10 años): A ${q(a.map((r) => r.lateUnemployment), p1)} · B ${q(b.map((r) => r.lateUnemployment), p1)} · margen A ${q(a.map((r) => r.lateMarkup), (x) => x.toFixed(2))} · B ${q(b.map((r) => r.lateMarkup), (x) => x.toFixed(2))}`);
     console.log(`  quiebras por año (consumo): A ${q(a.map((r) => r.bankruptciesConsumptionPerYear / nC), p1)} · salario nominal anual A ${q(a.map((r) => r.wageTrend), p2)} · B ${q(b.map((r) => r.wageTrend), p2)}`);
+  }
+}
+
+/** R13 con racionamiento por pérdida esperada (aprobada el 2026-11-11): θ base y sensibilidad. */
+function expectedLossSection(): void {
+  const seeds = Array.from({ length: 20 }, (_, i) => i + 1);
+  const A = PHASE1_CONFIG.knobs!;
+  const B = { ...A, structuralDeficitShare: 0.5 };
+  const q = (xs: number[], f: (x: number) => string) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return `${f(s[0]!)} · ${f(s[Math.floor(s.length / 2)]!)} · ${f(s[s.length - 1]!)}`;
+  };
+  const p1 = (x: number) => `${(x * 100).toFixed(1)}%`;
+  const p2 = (x: number) => `${(x * 100).toFixed(2)}%`;
+  const nC = PHASE1_CONFIG.firms - (PHASE1_CONFIG.capitalFirms ?? 0);
+  const nK = PHASE1_CONFIG.capitalFirms ?? 0;
+  console.log('\nR13 con racionamiento por pérdida esperada — 20 semillas, 2.000 hogares, 100 + 20 empresas, calentamiento de 420 meses (A y B igual), 50 años visibles. mín · mediana · máx\n');
+  for (const theta of [0.024, 0.012, 0.048]) {
+    const credit = { ...CREDIT, maxExpectedLoss: theta };
+    const run = (knobs: typeof A) => seeds.map((seed) => runVariant(seed, knobs, {}, 'cold', undefined, PHASE1_CONFIG, undefined, credit));
+    const a = run(A);
+    const b = run(B);
+    const insolvent = a.filter((r) => r.bankInsolventAt !== null);
+    console.log(`θ = ${theta}${theta === 0.024 ? ' (base)' : ' (sensibilidad)'}`);
+    console.log(`  empresas paradas ≥ 12 meses (promedio, últ. 10 años): ${q(a.map((r) => r.lateIdleFirms), (x) => x.toFixed(1))} · máx. meses seguidos parada ${q(a.map((r) => r.maxIdleMonths), (x) => x.toFixed(0))}`);
+    console.log(`  quiebras por año: consumo ${q(a.map((r) => r.bankruptciesConsumptionPerYear / nC), p1)} · capital ${q(a.map((r) => r.bankruptciesCapitalPerYear / nK), p1)} (empírico 5–10%) · ventas forzosas con comprador ${q(a.map((r) => r.fireSales), (x) => x.toFixed(0))} · entre todos ${q(a.map((r) => r.fireSalesPooled), (x) => x.toFixed(0))}`);
+    console.log(`  desempleo (últ. 10 años): A ${q(a.map((r) => r.lateUnemployment), p1)} · B ${q(b.map((r) => r.lateUnemployment), p1)} · ahorro forzoso A ${q(a.map((r) => r.lateForcedSavingShare), p1)} · B ${q(b.map((r) => r.lateForcedSavingShare), p1)}`);
+    console.log(`  banco: insolvente ${insolvent.length}/20${insolvent.length ? ` (año ${q(insolvent.map((r) => r.bankInsolventAt! / 12), (x) => x.toFixed(0))})` : ''} · castigos / intereses ${q(a.map((r) => r.totalWriteOffs / Math.max(1, r.totalInterest)), (x) => x.toFixed(2))} · patrimonio final / inicial ${q(a.map((r) => r.bankEquityRatio), (x) => x.toFixed(2))}`);
+    console.log(`  crédito: rechazados por riesgo ${q(a.map((r) => r.rationedByRisk), (x) => x.toFixed(0))} · tasa anual ${q(a.map((r) => r.avgNewLoanRateAnnual), p1)} · endeudadas ${q(a.map((r) => r.lateIndebtedShare), p1)} · deuda/masa salarial ${q(a.map((r) => r.lateDebtToWageBill), (x) => x.toFixed(2))}`);
+    console.log(`  capital: al tope ${q(a.map((r) => r.lateAtCapacityShare), p1)} · utilización ${q(a.map((r) => r.lateUtilization), p1)} · empleo sector capital ${q(a.map((r) => r.lateCapitalEmploymentShare), p1)}`);
+    console.log(`  criterio Fase 0: inflación A ${q(a.map((r) => r.priceTrend), p2)} · B ${q(b.map((r) => r.priceTrend), p2)} · B − A ${q(a.map((r, i) => b[i]!.priceTrend - r.priceTrend), p2)} · A < 1% en ${a.filter((r) => Math.abs(r.priceTrend) < 0.01).length}/20 · B > A en ${a.filter((r, i) => b[i]!.priceTrend > r.priceTrend).length}/20`);
+  }
+}
+
+/** R9 con ventas esperadas (aprobada el 2026-11-11): λ_e base y sensibilidad; empresas nuevas y zombis. */
+function expectedSalesSection(): void {
+  const seeds = Array.from({ length: 20 }, (_, i) => i + 1);
+  const A = PHASE1_CONFIG.knobs!;
+  const B = { ...A, structuralDeficitShare: 0.5 };
+  const q = (xs: number[], f: (x: number) => string) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return `${f(s[0]!)} · ${f(s[Math.floor(s.length / 2)]!)} · ${f(s[s.length - 1]!)}`;
+  };
+  const p1 = (x: number) => `${(x * 100).toFixed(1)}%`;
+  const p2 = (x: number) => `${(x * 100).toFixed(2)}%`;
+  const nC = PHASE1_CONFIG.firms - (PHASE1_CONFIG.capitalFirms ?? 0);
+  const nK = PHASE1_CONFIG.capitalFirms ?? 0;
+  const sum = (xs: number[]) => xs.reduce((x, y) => x + y, 0);
+  console.log('\nR9 con ventas esperadas — 20 semillas, 2.000 hogares, 100 + 20 empresas, calentamiento de 420 meses (A y B igual), 50 años visibles. mín · mediana · máx\n');
+  for (const weight of [0.0914, 0.25, 0.5]) {
+    const credit = { ...CREDIT, salesExpectationWeight: weight };
+    const run = (knobs: typeof A) => seeds.map((seed) => runVariant(seed, knobs, {}, 'cold', undefined, PHASE1_CONFIG, undefined, credit));
+    const a = run(A);
+    const b = run(B);
+    const insolvent = a.filter((r) => r.bankInsolventAt !== null);
+    console.log(`λ_e = ${weight}${weight === 0.0914 ? ' (base: 0,25 trimestral de Caiani)' : ' (sensibilidad)'}`);
+    console.log(`  empresas paradas ≥ 12 meses (promedio, últ. 10 años): ${q(a.map((r) => r.lateIdleFirms), (x) => x.toFixed(1))} · máx. meses seguidos parada ${q(a.map((r) => r.maxIdleMonths), (x) => x.toFixed(0))}`);
+    const ent = sum(a.map((r) => r.entrants));
+    console.log(`  empresas nuevas (20 semillas, 50 años): ${ent} · con algún mes sin producir en el 1er año ${sum(a.map((r) => r.entrantsWithIdleMonth))} · paradas ≥ 6 meses en el 1er año ${sum(a.map((r) => r.entrantsTrapped))} · quebraron en el 1er año ${sum(a.map((r) => r.entrantsBankruptFirstYear))}`);
+    console.log(`  zombis (deuda 24 meses seguidos y ventas esperadas en baja, promedio por mes, últ. 10 años): ${q(a.map((r) => r.lateZombies), (x) => x.toFixed(1))} · máx. ${q(a.map((r) => r.maxZombies), (x) => x.toFixed(0))}`);
+    console.log(`  quiebras por año: consumo ${q(a.map((r) => r.bankruptciesConsumptionPerYear / nC), p1)} · capital ${q(a.map((r) => r.bankruptciesCapitalPerYear / nK), p1)} (empírico 5–10%) · ventas forzosas con comprador ${q(a.map((r) => r.fireSales), (x) => x.toFixed(0))} · entre todos ${q(a.map((r) => r.fireSalesPooled), (x) => x.toFixed(0))}`);
+    console.log(`  desempleo (últ. 10 años): A ${q(a.map((r) => r.lateUnemployment), p1)} · B ${q(b.map((r) => r.lateUnemployment), p1)} · ahorro forzoso A ${q(a.map((r) => r.lateForcedSavingShare), p1)} · B ${q(b.map((r) => r.lateForcedSavingShare), p1)}`);
+    console.log(`  banco: insolvente ${insolvent.length}/20${insolvent.length ? ` (año ${q(insolvent.map((r) => r.bankInsolventAt! / 12), (x) => x.toFixed(0))})` : ''} · castigos / intereses ${q(a.map((r) => r.totalWriteOffs / Math.max(1, r.totalInterest)), (x) => x.toFixed(2))} · patrimonio final / inicial ${q(a.map((r) => r.bankEquityRatio), (x) => x.toFixed(2))}`);
+    console.log(`  crédito: rechazados por riesgo ${q(a.map((r) => r.rationedByRisk), (x) => x.toFixed(0))} · tasa anual ${q(a.map((r) => r.avgNewLoanRateAnnual), p1)} · endeudadas ${q(a.map((r) => r.lateIndebtedShare), p1)} · deuda/masa salarial ${q(a.map((r) => r.lateDebtToWageBill), (x) => x.toFixed(2))}`);
+    console.log(`  capital: al tope ${q(a.map((r) => r.lateAtCapacityShare), p1)} · utilización ${q(a.map((r) => r.lateUtilization), p1)} · empleo sector capital ${q(a.map((r) => r.lateCapitalEmploymentShare), p1)}`);
+    console.log(`  criterio Fase 0: inflación A ${q(a.map((r) => r.priceTrend), p2)} · B ${q(b.map((r) => r.priceTrend), p2)} · B − A ${q(a.map((r, i) => b[i]!.priceTrend - r.priceTrend), p2)} · A < 1% en ${a.filter((r) => Math.abs(r.priceTrend) < 0.01).length}/20 · B > A en ${a.filter((r, i) => b[i]!.priceTrend > r.priceTrend).length}/20`);
+  }
+}
+
+/** R10 (aprobada el 2026-11-11): inversión de Caiani et al. (2016), γ base y sensibilidad. */
+function investmentSection(on = true): void {
+  const seeds = Array.from({ length: 20 }, (_, i) => i + 1);
+  const A = PHASE1_CONFIG.knobs!;
+  const B = { ...A, structuralDeficitShare: 0.5 };
+  const q = (xs: number[], f: (x: number) => string) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return `${f(s[0]!)} · ${f(s[Math.floor(s.length / 2)]!)} · ${f(s[s.length - 1]!)}`;
+  };
+  const p1 = (x: number) => `${(x * 100).toFixed(1)}%`;
+  const p2 = (x: number) => `${(x * 100).toFixed(2)}%`;
+  const nC = PHASE1_CONFIG.firms - (PHASE1_CONFIG.capitalFirms ?? 0);
+  const nK = PHASE1_CONFIG.capitalFirms ?? 0;
+  const sum = (xs: number[]) => xs.reduce((x, y) => x + y, 0);
+  console.log('\nR10 — 20 semillas, 2.000 hogares, 100 + 20 empresas, calentamiento de 420 meses (A y B igual), 50 años visibles. mín · mediana · máx\n');
+  for (const k of [1, 0.5, 2]) {
+    const capital = { ...CAPITAL, netInvestment: on ? 1 : 0, profitRateWeight: CAPITAL.profitRateWeight * k, utilizationWeight: CAPITAL.utilizationWeight * k };
+    const run = (knobs: typeof A) => seeds.map((seed) => runVariant(seed, knobs, {}, 'cold', undefined, PHASE1_CONFIG, undefined, CREDIT, capital));
+    const a = run(A);
+    const b = run(B);
+    const insolvent = a.filter((r) => r.bankInsolventAt !== null);
+    console.log(`γ × ${k}${k === 1 ? ' (base: Caiani / 3)' : ' (sensibilidad)'}`);
+    console.log(`  capital: tendencia anual ${q(a.map((r) => r.capitalTrend), p2)} · utilización ${q(a.map((r) => r.lateUtilization), p1)} (ū 85%) · al tope ${q(a.map((r) => r.lateAtCapacityShare), p1)} · inversión / ventas de consumo ${q(a.map((r) => r.lateInvestmentShare), p1)} · empleo sector capital ${q(a.map((r) => r.lateCapitalEmploymentShare), p1)} · precio capital/consumo ${q(a.map((r) => r.lateCapitalPriceRatio), (x) => x.toFixed(2))}`);
+    console.log(`  desempleo (últ. 10 años): A ${q(a.map((r) => r.lateUnemployment), p1)} · B ${q(b.map((r) => r.lateUnemployment), p1)} · ahorro forzoso A ${q(a.map((r) => r.lateForcedSavingShare), p1)} · B ${q(b.map((r) => r.lateForcedSavingShare), p1)} · salario nominal anual A ${q(a.map((r) => r.wageTrend), p2)}`);
+    console.log(`  quiebras por año: consumo ${q(a.map((r) => r.bankruptciesConsumptionPerYear / nC), p1)} · capital ${q(a.map((r) => r.bankruptciesCapitalPerYear / nK), p1)} (empírico 5–10%) · zombis ${q(a.map((r) => r.lateZombies), (x) => x.toFixed(1))} · paradas ${q(a.map((r) => r.lateIdleFirms), (x) => x.toFixed(1))} · nuevas ${sum(a.map((r) => r.entrants))} (paradas ≥6m 1er año ${sum(a.map((r) => r.entrantsTrapped))}, quebradas 1er año ${sum(a.map((r) => r.entrantsBankruptFirstYear))})`);
+    console.log(`  banco: insolvente ${insolvent.length}/20${insolvent.length ? ` (año ${q(insolvent.map((r) => r.bankInsolventAt! / 12), (x) => x.toFixed(0))})` : ''} · castigos / intereses ${q(a.map((r) => r.totalWriteOffs / Math.max(1, r.totalInterest)), (x) => x.toFixed(2))} · patrimonio final / inicial ${q(a.map((r) => r.bankEquityRatio), (x) => x.toFixed(2))} · tasa anual ${q(a.map((r) => r.avgNewLoanRateAnnual), p1)} · endeudadas ${q(a.map((r) => r.lateIndebtedShare), p1)} · deuda/masa salarial ${q(a.map((r) => r.lateDebtToWageBill), (x) => x.toFixed(2))}`);
+    console.log(`  criterio Fase 0: inflación A ${q(a.map((r) => r.priceTrend), p2)} · B ${q(b.map((r) => r.priceTrend), p2)} · B − A ${q(a.map((r, i) => b[i]!.priceTrend - r.priceTrend), p2)} · A < 1% en ${a.filter((r) => Math.abs(r.priceTrend) < 0.01).length}/20 · B > A en ${a.filter((r, i) => b[i]!.priceTrend > r.priceTrend).length}/20 · margen A ${q(a.map((r) => r.lateMarkup), (x) => x.toFixed(2))}`);
+  }
+}
+
+/** Corrección de la regla de cantidad de las empresas de capital (Assenza et al., 2015, ec. 6.2; aprobada el 2026-11-11). */
+function capitalRuleSection(): void {
+  const seeds = Array.from({ length: 20 }, (_, i) => i + 1);
+  const A = PHASE1_CONFIG.knobs!;
+  const B = { ...A, structuralDeficitShare: 0.5 };
+  const q = (xs: number[], f: (x: number) => string) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return `${f(s[0]!)} · ${f(s[Math.floor(s.length / 2)]!)} · ${f(s[s.length - 1]!)}`;
+  };
+  const p1 = (x: number) => `${(x * 100).toFixed(1)}%`;
+  const p2 = (x: number) => `${(x * 100).toFixed(2)}%`;
+  const nC = PHASE1_CONFIG.firms - (PHASE1_CONFIG.capitalFirms ?? 0);
+  const nK = PHASE1_CONFIG.capitalFirms ?? 0;
+  const sum = (xs: number[]) => xs.reduce((x, y) => x + y, 0);
+  console.log('\nRegla de cantidad de las empresas de capital según Assenza (ec. 6.2) — 20 semillas, 50 años visibles. mín · mediana · máx\n');
+  for (const [name, capital] of [
+    ['Regla de Assenza, R10 apagada', { ...CAPITAL, capitalQuantityRule: 1, netInvestment: 0 }],
+    ['Regla de Assenza, R10 prendida, γ base', { ...CAPITAL, capitalQuantityRule: 1, netInvestment: 1 }],
+    ['Regla de Assenza, R10 prendida, γ × 0,5', { ...CAPITAL, capitalQuantityRule: 1, netInvestment: 1, profitRateWeight: CAPITAL.profitRateWeight / 2, utilizationWeight: CAPITAL.utilizationWeight / 2 }],
+  ] as const) {
+    const run = (knobs: typeof A) => seeds.map((seed) => runVariant(seed, knobs, {}, 'cold', undefined, PHASE1_CONFIG, undefined, CREDIT, capital));
+    const a = run(A);
+    const b = run(B);
+    const insolvent = a.filter((r) => r.bankInsolventAt !== null);
+    console.log(name);
+    console.log(`  doble conteo: demanda registrada / unidades pedidas ${q(a.map((r) => r.capitalDemandOvercount), (x) => x.toFixed(3))} · pedidos cumplidos ${q(a.map((r) => r.capitalFillRate), p1)}`);
+    console.log(`  capital: tendencia anual ${q(a.map((r) => r.capitalTrend), p2)} · utilización ${q(a.map((r) => r.lateUtilization), p1)} · al tope ${q(a.map((r) => r.lateAtCapacityShare), p1)} · inversión/ventas consumo ${q(a.map((r) => r.lateInvestmentShare), p1)} · empleo sector capital ${q(a.map((r) => r.lateCapitalEmploymentShare), p1)} · precio capital/consumo ${q(a.map((r) => r.lateCapitalPriceRatio), (x) => x.toFixed(2))}`);
+    console.log(`  desempleo: A ${q(a.map((r) => r.lateUnemployment), p1)} · B ${q(b.map((r) => r.lateUnemployment), p1)} · ahorro forzoso A ${q(a.map((r) => r.lateForcedSavingShare), p1)} · B ${q(b.map((r) => r.lateForcedSavingShare), p1)}`);
+    console.log(`  quiebras por año: consumo ${q(a.map((r) => r.bankruptciesConsumptionPerYear / nC), p1)} · capital ${q(a.map((r) => r.bankruptciesCapitalPerYear / nK), p1)} · zombis ${q(a.map((r) => r.lateZombies), (x) => x.toFixed(1))} · paradas ${q(a.map((r) => r.lateIdleFirms), (x) => x.toFixed(1))} · nuevas ${sum(a.map((r) => r.entrants))} (paradas 1er año ${sum(a.map((r) => r.entrantsTrapped))})`);
+    console.log(`  banco: insolvente ${insolvent.length}/20 · castigos/intereses ${q(a.map((r) => r.totalWriteOffs / Math.max(1, r.totalInterest)), (x) => x.toFixed(2))} · patrimonio final/inicial ${q(a.map((r) => r.bankEquityRatio), (x) => x.toFixed(2))} · deuda/masa salarial ${q(a.map((r) => r.lateDebtToWageBill), (x) => x.toFixed(2))}`);
+    console.log(`  criterio Fase 0: inflación A ${q(a.map((r) => r.priceTrend), p2)} · B ${q(b.map((r) => r.priceTrend), p2)} · B − A ${q(a.map((r, i) => b[i]!.priceTrend - r.priceTrend), p2)} · A < 1% en ${a.filter((r) => Math.abs(r.priceTrend) < 0.01).length}/20 · B > A en ${a.filter((r, i) => b[i]!.priceTrend > r.priceTrend).length}/20 · margen A ${q(a.map((r) => r.lateMarkup), (x) => x.toFixed(2))}`);
   }
 }

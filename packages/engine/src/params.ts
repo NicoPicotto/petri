@@ -91,11 +91,28 @@ export const CREDIT = {
   /** Tramos gruesos del fallback (frecuencias por tramo) si la logística es degenerada. Supuesto. */
   riskCoarseBands: 5,
   /**
-   * Racionamiento (Stiglitz & Weiss, 1981, AER 71(3)): si φ supera este umbral
-   * mensual, el banco rechaza el préstamo en vez de cobrar una tasa absurda.
-   * Valor: SUPUESTO, con sensibilidad.
+   * Racionamiento por pérdida esperada (aprobado el 2026-11-11): el banco
+   * rechaza si φ_i·LGD_i supera este umbral mensual por peso prestado
+   * (Stiglitz & Weiss, 1981; pérdida esperada de Assenza et al., 2015, ec. 8.11;
+   * garantía de la planta como en Caiani et al., 2016). Valor: el umbral
+   * anterior de φ (0,03) por la LGD observada antes de R11 (~0,8). SUPUESTO,
+   * con sensibilidad.
    */
-  maxDefaultProbability: 0.03,
+  maxExpectedLoss: 0.024,
+  /**
+   * λ_e: peso de las ventas del mes en las ventas esperadas,
+   * Sᵉ ← Sᵉ + λ_e·(S − Sᵉ) (aprobado el 2026-11-11). Caiani et al. (2016), cuadro 3:
+   * 0,25 por trimestre ("Adaptive expectations parameter"); forma verificada en el
+   * código de los autores (SimpleAdaptiveExpectation.java). Mensual equivalente:
+   * 1 − 0,75^(1/3) ≈ 0,0914 (calculado fuera del motor: el motor no usa potencias).
+   */
+  salesExpectationWeight: 0.0914,
+  /**
+   * R10: plazo de los préstamos que financian compras de capital, en meses
+   * (Caiani et al., 2016, cuadro 3: 20 trimestres). Aprobado el 2026-11-11.
+   * El capital de trabajo sigue a `loanTermMonths`.
+   */
+  investmentLoanTermMonths: 60,
 } as const;
 
 /**
@@ -120,10 +137,46 @@ export const CAPITAL = {
   depreciationRate: 0.06 / (12 * 0.85),
   /** α_K: unidades de bien de capital por trabajador por mes. Normalización (igual a α). */
   capitalGoodsLaborProductivity: 10,
+  /**
+   * ρ: ajuste de la cantidad de las empresas de capital a la demanda insatisfecha
+   * o al exceso de producción (Assenza et al., 2015, ec. 6.2; cuadro 2, "Quantity
+   * adjustment parameter" = 0,9). Corrección de R11 aprobada el 2026-11-11.
+   */
+  capitalQuantityAdjustment: 0.9,
+  /**
+   * Regla de cantidad de las empresas de capital: 0 = la de R11 original (paso al
+   * azar de R1 sobre las ventas del mes anterior; se APARTA de Assenza), 1 = Assenza
+   * et al. (2015), ec. 6.2. Por defecto 0 (2026-11-11): con 1, la economía colapsa
+   * incluso sin R10 (ver docs/fase1-reglas.md). Pendiente de decisión de Nico.
+   */
+  capitalQuantityRule: 0,
   /** ν: memoria del capital usado para la reposición (Assenza et al., 2015, cuadro 2). */
   replacementMemory: 0.5,
   /** r_K: recupero de la venta forzosa sobre el valor libro. Ramey & Shapiro (2001): 28 centavos por dólar. */
   fireSaleRecovery: 0.3,
+  /**
+   * R10 (inversión, aprobada el 2026-11-11): tasa de crecimiento deseada de la
+   * capacidad g = γ1·(r − r̄)/r̄ + γ2·(u − ū)/ū, acotada abajo en −1 (Caiani et
+   * al., 2016, ec. 3.10; forma verificada en el código de los autores,
+   * InvestmentCapacityOperatingCashFlowExpected.java). ū = normalUtilization.
+   * γ1 y γ2: cuadro 3 de Caiani (0,01 y 0,02 por trimestre), divididos por 3
+   * para un mes (supuesto).
+   */
+  profitRateWeight: 0.01 / 3,
+  utilizationWeight: 0.02 / 3,
+  /**
+   * r̄: tasa objetivo de flujo de caja operativo / valor libro del capital,
+   * mensual. Como en Caiani ("SS-given"), sale del régimen del propio modelo:
+   * mediana de 20 semillas, años 40–50 desde la creación, con R11, R13 por
+   * pérdida esperada, R9 con ventas esperadas y Sᵉ inicial (2026-11-11).
+   */
+  targetCashFlowRate: 0.00825,
+  /**
+   * R10 encendida (1) o apagada (0). APAGADA por defecto (decisión de Nico,
+   * 2026-11-11) hasta medirla con la corrección de la regla de cantidad de las
+   * empresas de capital: con la regla anterior colapsaba la economía.
+   */
+  netInvestment: 0,
 } as const;
 
 export const INITIAL = {

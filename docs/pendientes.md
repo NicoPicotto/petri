@@ -1,5 +1,7 @@
 # Pendientes
 
+> **2026-11-12: cambio de enfoque.** El modelo base pasa a ser Caiani et al. (2016) (ver [cambio-de-enfoque.md](cambio-de-enfoque.md)). Los pendientes sobre reglas del enfoque anterior (R1–R13) quedan como antecedente; las extensiones argentinas y los pendientes de calibración y validación siguen valiendo. Lo primero: decidir las preguntas abiertas del port.
+
 Estado al 2026-11-11. Lista consolidada de lo que quedó abierto al terminar la Fase 0. Cada ítem dice de dónde viene. Ninguno se resuelve sin consultar a Nico (ver "Reglas de trabajo" en `CLAUDE.md`).
 
 ## Para cerrar la Fase 0
@@ -67,11 +69,24 @@ Estado al 2026-11-11. Lista consolidada de lo que quedó abierto al terminar la 
 - [ ] **Magnitud del efecto de la emisión:** con R11, la inflación de B baja de 2,35% a 1,34% (B > A en 20/20).
 - [ ] **Punto de control 1a:** verificar que el calentamiento de 420 meses sigue alcanzando con R11 y R10. El test lento actual mide las reglas de la Fase 0.
 - [ ] **Candidato a perilla de teoría (Fase 3): inflación por restricción de capacidad.** En CATS (Assenza et al., 2015, ec. 5.1–5.2, verificado), una empresa al tope de su capacidad con exceso de demanda y precio ≥ promedio no sube el precio: el exceso de demanda queda como ahorro forzoso. Medido con una variante experimental (2026-11-11): explica menos del 10% del achicamiento del efecto de la emisión, y sube mucho el desempleo.
+- [x] **R13 con racionamiento por pérdida esperada** (2026-11-11): las empresas paradas bajan de 13 a 5 y el desempleo de A de 7,3% a 5,2%; criterio de la Fase 0 20/20; banco solvente. La trampa persiste por el estado absorbente de R9. Propuesta de R9 con ventas esperadas escrita, espera el OK.
+- [x] **R9 con ventas esperadas** (2026-11-11): empresas paradas 5 → 1, desempleo de A 2,9%, criterio de la Fase 0 20/20. Queda la trampa de las empresas nuevas (5 de 199 en 20 semillas). Propuesta de Sᵉ inicial escrita, espera el OK.
+- [ ] **Zombis con R9 suave:** ~5 de 100 empresas con deuda 24 meses seguidos, ventas en baja y sin quebrar. Las quiebras bajan a 0,1% anual (empírico 5–10%). Seguirlo en el punto de control 1a.
+- [ ] **Punto de control 1a: el patrimonio del banco se duplica en 50 años** (×2,2–2,3, castigos ≈ 0). Revisar si su margen es razonable (pedido de Nico, 2026-11-11). Comparar el margen financiero y el ROE con datos del BCRA en la Fase 3.
+- [ ] **Empresas nuevas sin clientes:** con la fidelidad de R6 (β = 1) y el precio promedio, la que entra no vende el primer mes. En K+S las que entran son más chicas que las que ya están. Revisar en la calibración (Fase 3).
 - [ ] **Trampa sin caja (problema principal antes de R10):** entre 7 y 20 de las 100 empresas de consumo quedan activas sin producir durante 50 años. La cadena es R7 → racionamiento por φ → ventas 0 → límite de R9 en 0, y no quiebran. Opciones: (a) salida por cuota de mercado ~0, como en K+S; (b) racionar por φ·LGD; (c) límite de R9 con ventas esperadas; (d) depósitos precautorios de Caiani. Espera la decisión de Nico. Ver `fase1-reglas.md`.
 - [ ] **El tope de capacidad hoy frena la espiral salarial:** sin él (variante experimental), la espiral del paso 1a.3 vuelve y la economía colapsa. Con R10, la capacidad crece: revisar si la espiral reaparece.
 - [ ] **Ahorro forzoso con R11:** 17% del gasto deseado en A y 33% en B. Medirlo de nuevo con R10.
 - [ ] **Venta forzosa pagada entre todos = impuesto implícito a los depositantes** (no pasa por el Tesoro). Se cuenta en `credit.fireSalesPooled`. Revisar si se vuelve frecuente.
 - [ ] **Variantes experimentales nuevas** (`priceUpAtCapacity`, `noCapacityLimit`): apagadas, solo para medir. Borrarlas o convertirlas cuando se decida.
+- [x] **Sᵉ inicial = plan × precio** (2026-11-11): la trampa sin caja queda resuelta (0 empresas paradas); criterio de la Fase 0 20/20.
+- [ ] **R10 implementada, pero la economía colapsa** (desempleo 84%, criterio de la Fase 0 0/20). Causa: la regla de cantidad de las empresas de capital en R11 se apartó de Assenza (ec. 6.2): paso al azar sobre ventas censuradas, en vez de ρ·(demanda insatisfecha). Propuesta de corrección escrita, espera el OK. **Hasta corregirla, el estado del código no cumple el criterio de la Fase 0.**
+- [ ] **Diferencia entre versiones de CATS:** la R1 de las empresas de consumo (Gaffeo et al., 2008) usa un paso de cantidad al azar; Assenza et al. (2015) usa ρ·(−Δ). Revisar en el punto de control 1a o en la Fase 3.
+- [ ] **Regla de cantidad de las empresas de capital** (Assenza ec. 6.2) implementada con un interruptor: con 1 (Assenza) la economía se desestabiliza incluso sin R10 (desempleo 54%, criterio de la Fase 0 0/20). Por defecto está en 0 (la regla original, que se aparta de la fuente). Espera la decisión de Nico. El doble conteo es despreciable (0,99).
+- [x] **R10 apagada por defecto** (`CAPITAL.netInvestment = 0`), decisión de Nico.
+- [ ] **Métrica de zombis:** con préstamos de inversión a 60 meses (activos aunque R10 esté apagada) deja de servir. Redefinirla para el punto de control 1a.
+- [ ] **Revisión de reglas contra fuentes (2026-11-11), diferencias para decidir:** R2 sin ecuación verificada (prioridad); dividendos del banco 0,9 contra 0,6 de Caiani; paso de precio de R1 0,05 contra 0,1 de Assenza; el piso de R1 sin costo financiero; R5 es SIMEX (corregir la documentación); R10 techo contra piso con arrastre. Ver "Revisión de las reglas contra sus fuentes" en `fase1-reglas.md`.
+- [ ] **Proceso (pedido de Nico, 2026-11-11):** cada regla nueva lleva su ecuación de la fuente al lado de la implementación, término por término, y un test calculado a mano en `test/rules-by-hand.test.ts`.
 - [ ] Tramo 1b: al repartir empresas por sector, reportar cuántas quedan en cada uno y si alguno queda con muy pocas (pedido de Nico).
 - [ ] La app sigue con `PHASE0_CONFIG` (500 hogares). Pasa a `PHASE1_CONFIG` en el paso 1c.6, escalando el gasto y las perillas.
 - [x] **Paso 1a.1 (escala):** tamaño de la Fase 1 = 2.000 hogares y 120 empresas (`PHASE1_CONFIG`, decisión de Nico).

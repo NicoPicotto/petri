@@ -53,8 +53,14 @@ export interface Firm extends Agent {
   /** Señales del mes anterior que usan las reglas R1 y R2. */
   soldOut: boolean;
   unfilledVacancies: boolean;
-  /** Ventas (en pesos) del mes anterior. Las usa el límite de deuda de R9. */
+  /** Ventas (en pesos) del mes anterior. */
   lastRevenue: Cents;
+  /**
+   * Ventas esperadas Sᵉ (expectativas adaptativas, Caiani et al., 2016; aprobado
+   * el 2026-11-11). Las usan el límite de deuda de R9, el orden de atención del
+   * banco y la capacidad de deuda usada de R7. En centavos, no necesariamente entero.
+   */
+  expectedSales: number;
   /**
    * Préstamos vigentes (R9), cada uno con su saldo y su cuota de capital.
    * La suma de los saldos es siempre igual a −positions.loans.
@@ -100,12 +106,28 @@ export interface Firm extends Agent {
   inventory: number;
   /** Valor del inventario al abrir el mes (para la variación que entra en la ganancia). */
   inventoryValueAtOpen: Cents;
-  /** Unidades vendidas el mes anterior (empresas de capital: base de R1). */
+  /** Unidades vendidas el mes anterior (empresas de capital). */
   lastUnitsSold: number;
+  /**
+   * Demanda de bienes de capital recibida en el mes y en el mes anterior (empresas
+   * de capital): lo que pidió cada comprador que la visitó, lo haya podido vender o
+   * no (Assenza et al., 2015, ec. 6.2: Δ = producción − demanda).
+   */
+  demandUnits: number;
+  lastDemand: number;
   /** Hogar que compró la planta en la venta forzosa y capitaliza la entrada (R12), o null. */
   pendingOwnerId: AgentId | null;
   /** Ganancia contable del mes (R7), para los tests de consistencia. */
   profitThisMonth: Cents;
+  /** Cuotas de capital pagadas en el mes (para el flujo de caja operativo de R10). */
+  principalPaidThisMonth: Cents;
+  /**
+   * Tasa de flujo de caja operativo del mes: (ganancia + amortización − cuotas de
+   * capital pagadas) / valor libro del capital (Caiani et al., 2016, sección 3.1.3).
+   */
+  cashFlowRate: number;
+  /** Producción deseada por R1 ANTES del tope de capacidad: la señal de utilización de R10. */
+  desiredOutput: number;
 }
 
 export type FirmSector = 'consumption' | 'capital';
@@ -167,6 +189,8 @@ export interface CreditStats {
   /** Unidades de bien de capital pedidas y compradas en el mes. */
   capitalOrdered: number;
   capitalBought: number;
+  /** Suma de la demanda registrada por las empresas de capital (con el doble conteo de las colas). */
+  capitalDemandRegistered: number;
 }
 
 export interface Treasury extends Agent {
@@ -376,6 +400,7 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
       soldOut: false,
       unfilledVacancies: false,
       lastRevenue: 0,
+      expectedSales: 0,
       loanBook: [],
       interestThisMonth: 0,
       arrearsMonths: 0,
@@ -394,8 +419,14 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
       inventory: 0,
       inventoryValueAtOpen: 0,
       lastUnitsSold: 0,
+      demandUnits: 0,
+      lastDemand: 0,
       pendingOwnerId: null,
       profitThisMonth: 0,
+      principalPaidThisMonth: 0,
+      // Sin historia, R10 arranca con la rentabilidad objetivo (supuesto: neutral).
+      cashFlowRate: CAPITAL.targetCashFlowRate,
+      desiredOutput: 0,
     });
   }
 
@@ -422,6 +453,7 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
       if (firm.sector === 'capital') {
         firm.price = pK0;
         firm.lastUnitsSold = firm.lastOutput;
+        firm.lastDemand = firm.lastOutput;
       } else {
         // Capital inicial a la utilización normal, valuado al precio inicial del capital.
         firm.capital = firm.lastOutput / (wBar * kappa);
@@ -491,7 +523,10 @@ export function createInitialState(seed: number, config: SimConfig): SimState {
   firms.forEach((firm, i) => payFromTreasury(state, firm, firmDeposits[i] as Cents));
   // Ventas del "mes anterior" para el límite de deuda de R9: lo que se habría
   // vendido al precio inicial (con las reglas de la Fase 0 no se usa).
-  firms.forEach((firm) => (firm.lastRevenue = Math.round(firm.lastOutput * firm.price)));
+  firms.forEach((firm) => {
+    firm.lastRevenue = Math.round(firm.lastOutput * firm.price);
+    firm.expectedSales = firm.lastRevenue;
+  });
 
   // Patrimonio inicial del banco (R13): misma historia que el resto de la
   // riqueza inicial, deuda pasada del Tesoro con el BCRA. El Tesoro le da
@@ -525,6 +560,7 @@ export function emptyCreditStats(): CreditStats {
     fireSaleProceeds: 0,
     capitalOrdered: 0,
     capitalBought: 0,
+    capitalDemandRegistered: 0,
   };
 }
 

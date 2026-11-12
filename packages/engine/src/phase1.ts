@@ -89,6 +89,28 @@ function desiredWorkers(firm: Firm): number {
   return Math.ceil(firm.plannedOutput / productivityOf(firm) - 1e-9);
 }
 
+/** Costo estimado del pedido de capital del mes, al precio promedio del mes anterior. */
+function investmentCostOf(firm: Firm, state: SimState): Cents {
+  return firm.sector === 'consumption' ? Math.ceil(firm.capitalOrder * state.stats.capitalPriceIndex) : 0;
+}
+
+/**
+ * R10 (aprobada el 2026-11-11): tasa de crecimiento deseada de la capacidad,
+ * g = γ1·(r − r̄)/r̄ + γ2·(u − ū)/ū, acotada abajo en −1 (Caiani et al., 2016,
+ * ec. 3.10, verificada en el código de los autores). r = flujo de caja operativo
+ * / valor libro del capital del mes anterior; u = producción deseada (sin tope) /
+ * capacidad. Sin capital, 0 (en Caiani, −1: no invierte).
+ */
+export function desiredCapacityGrowth(firm: Firm, capital: CapitalParams = CAPITAL): number {
+  const capacity = capital.capitalProductivity * firm.capital;
+  if (capacity <= 0) return 0;
+  const rBar = capital.targetCashFlowRate;
+  const uBar = capital.normalUtilization;
+  const u = firm.desiredOutput / capacity;
+  const g = (capital.profitRateWeight * (firm.cashFlowRate - rBar)) / rBar + (capital.utilizationWeight * (u - uBar)) / uBar;
+  return Math.max(-1, g);
+}
+
 /** Capacidad de producción de una empresa de consumo: κ·K, en unidades enteras (R11, Leontief). */
 export function capacityOf(firm: Firm, kappa: number = CAPITAL.capitalProductivity): number {
   return Math.floor(kappa * firm.capital + 1e-9);
@@ -178,7 +200,7 @@ export function bankLendingCapacity(state: SimState, credit: CreditParams): Cent
  *
  * - Pedido: lo que falta para pagar la masa salarial deseada (pecking order:
  *   primero los depósitos). Acotado por el límite de deuda, deuda ≤ λ · ventas
- *   del mes anterior (Dosi et al., 2013, ec. 3).
+ *   esperadas (forma de Dosi et al., 2013, ec. 3; ventas esperadas de Caiani et al., 2016).
  * - El banco atiende por patrimonio neto / ventas, de mayor a menor (Dosi et
  *   al., 2013), hasta su límite de capital (R13).
  */
@@ -193,15 +215,24 @@ export function leverageOf(debt: Cents, netWorth: Cents): number {
  * R9 (pedido y otorgamiento) y R13 revisada (tasa según el riesgo).
  *
  * - Pedido: lo que falta para pagar la masa salarial deseada, acotado por el
- *   límite de deuda (deuda ≤ λ_R9 · ventas del mes anterior; Dosi et al., 2013).
+ *   límite de deuda (deuda ≤ λ_R9 · ventas esperadas Sᵉ; Dosi et al., 2013; Caiani et al., 2016).
  * - Orden: patrimonio neto / ventas, de mayor a menor (Dosi et al., 2013).
  * - Riesgo: φ = probabilidad mensual de quiebra estimada para el apalancamiento
  *   que tendría la empresa con el préstamo (Assenza et al., 2015).
- *   Si φ > umbral, el banco rechaza (racionamiento, Stiglitz & Weiss, 1981).
- *   Si no, cobra r = (r0 + φ·LGD) / (1 − φ) (no arbitraje).
+ * - Pérdida dada la quiebra de cada empresa (aprobada el 2026-11-11; Caiani et
+ *   al., 2016, sección 3.2): LGD_i = max(0, 1 − r_K·V / (L + ΔL)); la garantía es
+ *   la planta al precio de la venta forzosa. Empresas de capital: LGD = 1.
+ * - Si φ·LGD_i > umbral, el banco rechaza (racionamiento por pérdida esperada,
+ *   Stiglitz & Weiss, 1981; Assenza et al., 2015, ec. 8.11).
+ *   Si no, cobra r = (r0 + φ·LGD_i) / (1 − φ) (no arbitraje).
  * - El banco presta hasta su límite de capital (R13).
  */
-function allocateCredit(state: SimState, credit: CreditParams, baseMonthlyRate: number): void {
+export function lossGivenDefaultOf(firm: Firm, exposure: Cents, fireSaleRecovery: number): number {
+  if (firm.sector === 'capital' || exposure <= 0) return 1;
+  return Math.max(0, 1 - (fireSaleRecovery * firm.capitalValue) / exposure);
+}
+
+export function allocateCredit(state: SimState, credit: CreditParams, baseMonthlyRate: number, fireSaleRecovery: number): void {
   const c = state.credit;
   const risk = estimateRisk(
     state.bank.riskWindow.slice(0, -1), // el mes en curso todavía no tiene resultados
@@ -216,14 +247,16 @@ function allocateCredit(state: SimState, credit: CreditParams, baseMonthlyRate: 
   for (const firm of state.firms) {
     if (!firm.active) continue;
     // R11: la compra de capital (reposición) se financia igual que los salarios.
-    const investment = firm.sector === 'consumption' ? Math.ceil(firm.capitalOrder * state.stats.capitalPriceIndex) : 0;
+    const investment = investmentCostOf(firm, state);
     const need = Math.max(0, firm.wage * desiredWorkers(firm) + investment - firm.positions.deposits);
     if (need <= 0) continue;
-    const room = Math.max(0, Math.floor(credit.debtToSalesMax * firm.lastRevenue) - firmDebt(firm));
+    // Límite de deuda con las ventas ESPERADAS (aprobado el 2026-11-11): un mes sin
+    // ventas ya no deja el límite en 0 para siempre.
+    const room = Math.max(0, Math.floor(credit.debtToSalesMax * firm.expectedSales) - firmDebt(firm));
     const amount = Math.min(need, room);
     c.cappedByDebtLimit += need - amount;
     if (amount <= 0) continue;
-    requests.push({ firm, amount, rank: firmNetWorth(firm) / firm.lastRevenue });
+    requests.push({ firm, amount, rank: firmNetWorth(firm) / firm.expectedSales });
   }
   // Mayor patrimonio sobre ventas primero; desempate por ID (determinismo).
   requests.sort((a, b) => b.rank - a.rank || a.firm.id - b.firm.id);
@@ -233,7 +266,8 @@ function allocateCredit(state: SimState, credit: CreditParams, baseMonthlyRate: 
     // Pedir un préstamo no cambia el patrimonio (depósitos y deuda suben juntos).
     const leverage = leverageOf(firmDebt(firm) + amount, firmNetWorth(firm));
     const phi = defaultProbability(risk, leverage);
-    if (phi > credit.maxDefaultProbability) {
+    const lgd = lossGivenDefaultOf(firm, firmDebt(firm) + amount, fireSaleRecovery);
+    if (phi * lgd > credit.maxExpectedLoss) {
       c.rationedByRisk += 1;
       c.rationedByRiskAmount += amount;
       continue;
@@ -241,9 +275,19 @@ function allocateCredit(state: SimState, credit: CreditParams, baseMonthlyRate: 
     const granted = Math.min(amount, capacity);
     c.rationedByBank += amount - granted;
     if (granted <= 0) continue;
-    const rate = riskAdjustedRate(baseMonthlyRate, phi, risk.lossGivenDefault);
+    const rate = riskAdjustedRate(baseMonthlyRate, phi, lgd);
     lend(state, firm, granted);
-    firm.loanBook.push({ remaining: granted, installment: Math.ceil(granted / credit.loanTermMonths), rate });
+    // R10: la parte que financia la compra de capital va a `investmentLoanTermMonths`
+    // (Caiani et al., 2016). Los depósitos cubren primero los salarios, que se
+    // pagan antes, así que el préstamo financia primero la inversión.
+    const investmentPart = Math.min(granted, investmentCostOf(firm, state));
+    const workingPart = granted - investmentPart;
+    if (investmentPart > 0) {
+      firm.loanBook.push({ remaining: investmentPart, installment: Math.ceil(investmentPart / credit.investmentLoanTermMonths), rate });
+    }
+    if (workingPart > 0) {
+      firm.loanBook.push({ remaining: workingPart, installment: Math.ceil(workingPart / credit.loanTermMonths), rate });
+    }
     c.newLoans += granted;
     rateWeighted += rate * granted;
     capacity -= granted;
@@ -266,8 +310,8 @@ function allocateCredit(state: SimState, credit: CreditParams, baseMonthlyRate: 
  *   'monthly': lo mismo, todos los meses (solo para comparar).
  *   'none': R7 anterior, ρ de la ganancia de cada mes con ganancia.
  * - `leverage`: parte 2, reparto según el endeudamiento (pecking order, Myers
- *   & Majluf, 1984): ρ = ρ_max · (1 − ℓ), con ℓ = deuda / (λ · ventas del mes
- *   anterior) acotado a [0, 1]. Forma lineal: supuesto.
+ *   & Majluf, 1984): ρ = ρ_max · (1 − ℓ), con ℓ = deuda / (λ · ventas
+ *   esperadas) acotado a [0, 1]. Forma lineal: supuesto.
  */
 export interface DividendPolicy {
   accumulated: 'none' | 'annual' | 'monthly';
@@ -301,7 +345,7 @@ export function switchProbability(beta: number, previousPrice: number, newPrice:
 export function debtCapacityUsed(firm: Firm, credit: CreditParams): number {
   const debt = firmDebt(firm);
   if (debt <= 0) return 0;
-  const capacity = credit.debtToSalesMax * firm.lastRevenue;
+  const capacity = credit.debtToSalesMax * firm.expectedSales;
   return capacity <= 0 ? 1 : Math.min(1, debt / capacity);
 }
 
@@ -329,6 +373,8 @@ export function makePhase1Stages(
       firm.inventoryValueAtOpen = inventoryValue(firm);
       firm.amortizationThisMonth = 0;
       firm.profitThisMonth = 0;
+      firm.principalPaidThisMonth = 0;
+      firm.demandUnits = 0;
     }
     state.credit = emptyCreditStats();
     // Historia del banco (R13): un registro por mes, los últimos riskWindowMonths
@@ -379,21 +425,39 @@ export function makePhase1Stages(
             else firm.plannedOutput = firm.lastOutput * (1 - uQty);
           }
         } else {
-          // R1 de las empresas de capital (Assenza et al., 2015, ec. 6.1–6.2): la
-          // misma tabla de cuatro casos, con las ventas del mes anterior como
-          // demanda esperada y producción deseada = demanda esperada − inventario.
-          // "soldOut" = quedaron pedidos sin atender. Supuesto: nunca espera vender
-          // menos de lo que produce un trabajador, para poder volver a crecer.
+          // R1 de las empresas de capital (Assenza et al., 2015, ec. 6.1–6.2;
+          // corregida el 2026-11-11). Δ = producción − demanda del mes anterior.
+          //   Δ ≤ 0 y P < P̄: sube el precio;   Δ ≤ 0 y P ≥ P̄: Y* = Y + ρ·(−Δ)
+          //   Δ > 0 y P ≥ P̄: baja el precio;   Δ > 0 y P < P̄: Y* = Y − ρ·Δ
+          // y producción deseada = Y* − inventario. Si cambia el precio, Y* = Y.
+          // Empates P = P̄: como en R1 (cantidad si Δ ≤ 0, precio si Δ > 0).
+          // Supuesto (como R1): Y* nunca menos que lo que produce un trabajador.
           const avgK = state.stats.capitalPriceIndex;
-          let expected = Math.max(firm.lastUnitsSold, alphaK);
-          if (firm.soldOut) {
-            if (firm.price < avgK) firm.price = Math.round(firm.price * (1 + uPrice));
-            else expected = expected * (1 + uQty);
+          if (capital.capitalQuantityRule === 1) {
+            const rho = capital.capitalQuantityAdjustment;
+            const forecastError = firm.lastOutput - firm.lastDemand;
+            let expected = firm.lastOutput;
+            if (forecastError <= 0) {
+              if (firm.price < avgK) firm.price = Math.round(firm.price * (1 + uPrice));
+              else expected = firm.lastOutput + rho * -forecastError;
+            } else {
+              if (firm.price >= avgK) firm.price = Math.round(firm.price * (1 - uPrice));
+              else expected = firm.lastOutput - rho * forecastError;
+            }
+            firm.plannedOutput = Math.max(0, Math.max(expected, alphaK) - firm.inventory);
           } else {
-            if (firm.price >= avgK) firm.price = Math.round(firm.price * (1 - uPrice));
-            else expected = expected * (1 - uQty);
+            // Regla de R11 original (por defecto): tabla de R1 con paso al azar sobre
+            // las ventas del mes anterior. "soldOut" = quedaron pedidos sin atender.
+            let expected = Math.max(firm.lastUnitsSold, alphaK);
+            if (firm.soldOut) {
+              if (firm.price < avgK) firm.price = Math.round(firm.price * (1 + uPrice));
+              else expected = expected * (1 + uQty);
+            } else {
+              if (firm.price >= avgK) firm.price = Math.round(firm.price * (1 - uPrice));
+              else expected = expected * (1 - uQty);
+            }
+            firm.plannedOutput = Math.max(0, expected - firm.inventory);
           }
-          firm.plannedOutput = Math.max(0, expected - firm.inventory);
         }
       }
       // Piso de precio: costo unitario, con la amortización (R11).
@@ -401,20 +465,30 @@ export function makePhase1Stages(
       if (firm.sector === 'consumption') {
         // Supuesto de la Fase 0: nunca desea menos de un trabajador. R11: nunca más que la capacidad.
         firm.plannedOutput = Math.max(firm.plannedOutput, alpha);
+        // R10: la producción deseada SIN tope es la señal de utilización (Assenza
+        // et al., 2015, ec. 5.2; Caiani et al., 2016). Para contratar se acota.
+        firm.desiredOutput = firm.plannedOutput;
         if (!experiments.noCapacityLimit) firm.plannedOutput = Math.min(firm.plannedOutput, capacityOf(firm, kappa));
-        // Reposición (Assenza et al., 2015, ec. 5.6): I = δ·K̄, con K̄ el promedio
-        // móvil del capital usado. Es lo que se gastó en promedio. R10 sumará la
-        // inversión neta.
+        // Reposición (Assenza et al., 2015, ec. 5.6): δ·K̄, con K̄ el promedio
+        // móvil del capital usado. R10 (Caiani et al., 2016): más g·K, la inversión
+        // neta para llegar a la capacidad deseada (1 + g)·capacidad.
         const nu = capital.replacementMemory;
         firm.utilizedCapitalAvg = nu * firm.utilizedCapitalAvg + (1 - nu) * (firm.lastOutput / kappa);
-        firm.replacementDue += delta * firm.utilizedCapitalAvg;
-        firm.capitalOrder = Math.floor(firm.replacementDue);
-        firm.replacementDue -= firm.capitalOrder; // lo que no se consiga no se arrastra
+        const g = capital.netInvestment === 1 ? desiredCapacityGrowth(firm, capital) : 0;
+        firm.replacementDue += delta * firm.utilizedCapitalAvg + g * firm.capital;
+        if (firm.replacementDue <= 0) {
+          // El capital es irreversible: no se vende ni se arrastra un pedido negativo.
+          firm.capitalOrder = 0;
+          firm.replacementDue = 0;
+        } else {
+          firm.capitalOrder = Math.floor(firm.replacementDue);
+          firm.replacementDue -= firm.capitalOrder; // lo que no se consiga no se arrastra
+        }
       }
     }
 
     // Pasada 2: R9.
-    allocateCredit(state, credit, monthlyLoanRate);
+    allocateCredit(state, credit, monthlyLoanRate, capital.fireSaleRecovery);
 
     // Pasada 3: R3, con los depósitos ya incluyendo el crédito.
     const workers = workersByFirm(state);
@@ -496,9 +570,17 @@ export function makePhase1Stages(
       let remaining = firm.capitalOrder;
       for (const seller of order) {
         if (remaining <= 0) break;
-        // Pedido sin atender por falta de inventario: señal de exceso de demanda (R1).
-        if (seller.inventory < remaining) seller.soldOut = true;
-        const units = Math.min(remaining, seller.inventory, Math.floor(firm.positions.deposits / seller.price));
+        // Demanda recibida (Assenza, ec. 6.2): lo que este comprador compraría a ESTE
+        // precio con sus fondos, min(lo que le falta, lo que puede pagar). Un pedido
+        // que no puede pagar no es demanda (corregido el 2026-11-11). Si no lo
+        // consigue todo acá y completa en otra, cuenta en las dos (cola).
+        const asked = Math.min(remaining, Math.floor(firm.positions.deposits / seller.price));
+        seller.demandUnits += asked;
+        c.capitalDemandRegistered += asked;
+        // Señal de exceso de demanda: con la regla original, pedido sin atender
+        // (aunque no se pueda pagar); con la de Assenza, demanda efectiva sin atender.
+        if (seller.inventory < (capital.capitalQuantityRule === 1 ? asked : remaining)) seller.soldOut = true;
+        const units = Math.min(asked, seller.inventory);
         if (units <= 0) continue;
         const cost = units * seller.price;
         payDeposits(firm, seller, cost);
@@ -549,6 +631,7 @@ export function makePhase1Stages(
         const pay = Math.min(due, firm.positions.deposits);
         repayLoan(state, firm, pay);
         loan.remaining -= pay;
+        firm.principalPaidThisMonth += pay;
         if (pay < due) {
           missed = true;
           c.principalArrears += due - pay;
@@ -577,6 +660,11 @@ export function makePhase1Stages(
         firm.amortizationThisMonth +
         (inventoryValue(firm) - firm.inventoryValueAtOpen);
       firm.profitThisMonth = profit;
+      // Flujo de caja operativo (Caiani et al., 2016, sección 3.1.3): ganancia +
+      // amortización − cuotas de capital (sin inventario: el bien de consumo es
+      // perecedero; sin impuesto a las ganancias en la Fase 1). Lo usa R10.
+      const operatingCashFlow = profit + firm.amortizationThisMonth - firm.principalPaidThisMonth;
+      firm.cashFlowRate = firm.capitalValue > 0 ? operatingCashFlow / firm.capitalValue : 0;
       let base: Cents;
       if (dividends.accumulated === 'none') {
         base = Math.max(0, profit);
@@ -637,9 +725,13 @@ export function makePhase1Stages(
     let kUnits = 0;
     for (const firm of state.firms) {
       firm.lastRevenue = firm.revenue;
+      // Expectativas adaptativas (Caiani et al., 2016). Solo las activas (la que
+      // entra arranca con su plan × precio, ver la entrada).
+      if (firm.active) firm.expectedSales += credit.salesExpectationWeight * (firm.revenue - firm.expectedSales);
       if (!firm.active) firm.inactiveMonths += 1;
       if (firm.sector === 'capital') {
         firm.lastUnitsSold = firm.unitsSold;
+        firm.lastDemand = firm.demandUnits;
         kRevenue += firm.revenue;
         kUnits += firm.unitsSold;
       }
@@ -776,20 +868,28 @@ export function makePhase1Stages(
       firm.active = true;
       firm.inactiveMonths = 0;
       firm.wage = wage;
-      firm.lastRevenue = 0; // sin ventas todavía: no puede pedir crédito hasta vender (R9)
+      firm.lastRevenue = 0;
       firm.retainedEarnings = 0; // el capital aportado no es resultado distribuible (R7)
       if (firm.sector === 'consumption') {
         firm.price = Math.max(Math.round(state.stats.priceIndex), Math.ceil(unitCostFloor(firm, capital) - 1e-9), 1);
         firm.plannedOutput = Math.min(productivity * size, capacityOf(firm, kappa));
         firm.utilizedCapitalAvg = firm.plannedOutput / kappa;
+        firm.desiredOutput = firm.plannedOutput;
+        firm.cashFlowRate = capital.targetCashFlowRate; // sin historia: neutral (supuesto)
         firm.replacementDue = 0;
       } else {
         firm.price = Math.max(Math.round(state.stats.capitalPriceIndex), Math.ceil(wage / productivity), 1);
         firm.plannedOutput = productivity * size;
         firm.lastUnitsSold = firm.plannedOutput;
+        firm.lastDemand = firm.plannedOutput;
         firm.inventory = 0;
       }
       firm.lastOutput = firm.plannedOutput;
+      // Sᵉ inicial = producción planeada × precio (aprobado el 2026-11-11): la
+      // demanda esperada es el plan de producción (Assenza et al., 2015, sección
+      // 5.1); con tamaño mediano y precio promedio, es la de una empresa mediana
+      // del sector (K+S: las entrantes se inicializan con las de las incumbentes).
+      firm.expectedSales = firm.plannedOutput * firm.price;
       state.credit.entries += 1;
     }
   };

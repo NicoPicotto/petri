@@ -1,5 +1,7 @@
 # Fase 1: reglas y estado
 
+> **Registro histórico (2026-11-12).** Este documento registra el tramo 1a con el enfoque anterior (reglas combinadas de varios modelos). Desde el 2026-11-12 el modelo base es Caiani et al. (2016): ver [cambio-de-enfoque.md](cambio-de-enfoque.md). Las mediciones, los errores y la revisión contra fuentes de acá siguen valiendo como antecedente.
+
 > El plan aprobado por Nico el 2026-11-11 está resumido en la sección "Plan". Los valores numéricos son **supuestos a calibrar**.
 > Las reglas de la Fase 0 (R1–R8) siguen en [fase0-reglas.md](fase0-reglas.md); este archivo solo trae lo nuevo o lo que cambia.
 
@@ -1230,3 +1232,507 @@ R1 (salvo guardar la producción deseada), R9, R12, R13 y la valuación.
 ### Orden sugerido
 
 Primero resolver la **trampa sin caja** (opciones arriba), porque contamina cualquier medición de R10: las empresas trabadas no invierten ni salen. Después R10.
+
+## Decisión de Nico sobre la trampa sin caja (2026-11-11)
+
+- **(a) no:** saca a las empresas después de caer pero no evita que caigan, y subiría las quiebras de forma artificial.
+- **Orden, midiendo después de cada paso** (empresas paradas, quiebras, desempleo, banco, criterio de la Fase 0):
+  1. **(b) R13:** racionar por pérdida esperada (φ × pérdida dada la quiebra), no solo por φ.
+  2. **(c) R9:** solo si la trampa persiste. El límite con las ventas del mes anterior tiene un estado absorbente en 0; reemplazarlo por ventas promedio o esperadas, con fuente.
+  3. (a) y (d) quedan en reserva.
+- **R10 aprobada,** con la producción deseada sin tope como señal y préstamos de inversión a 60 meses (Caiani). Se implementa después de resolver la trampa.
+
+## Propuesta: R13 con racionamiento por pérdida esperada (espera el OK de Nico)
+
+### Fuentes verificadas contra el texto
+
+- **Assenza, Delli Gatti & Grazzini (2015)**, CESifo WP 4765, sección 8.2:
+  - *"We assume that the bank's risk manager aims at limiting the maximum loss deriving from commercial loans … The expected loss from lending to the f-th firm … is φ_f(ΔL_{f,t} + L_{f,t−1})"*, con la condición `φ_f·(ΔL + L) ≤ ζ·E_banco` (ec. 8.11). De ahí sale el préstamo máximo (ec. 8.12): `ΔL ≤ (ζ·E_banco − φ·L)/φ`.
+  - El racionamiento depende de la **pérdida esperada**, pero Assenza supone pérdida total en la quiebra: *"if the firm goes bankrupt, the whole stock of credit is lost"* (sección 8.1). Es decir, LGD = 1.
+- **Caiani et al. (2016)**, sección 3.2:
+  - *"consumption firms' collateral is identified with their stock of real capital. In the case of a default by a consumption firm, each bank then expects to be able to recover [a share] of outstanding loans … through fire sales of its capital. [That share] is equal to ratio between capital discounted value … and firm's outstanding debt"*. Para las empresas de capital es 0, *"since capital firms have no collateral"*.
+  - *"Banks are willing to satisfy agents' demand for credit whenever the expected return is greater or equal than zero. Otherwise, the bank may still be willing to provide some credit, if there exist an amount for which the expected return is non-negative"*.
+- **Basilea II** (BCBS, 2006): la pérdida esperada es `PD × LGD × EAD`. Es la misma descomposición; falta verificar el párrafo exacto.
+
+### Propuesta
+
+1. **Pérdida dada la quiebra por empresa (Caiani):**
+   - `LGD_i = max(0, 1 − r_K·V_i / (L_i + ΔL))`, donde la garantía es la planta al precio de la venta forzosa (r_K·V, la misma que usa R12);
+   - empresas de capital: `LGD_i = 1` (sin garantía);
+   - reemplaza a la LGD promedio de la historia del banco, que hoy da 0 porque las ventas forzosas y los depósitos cubren la deuda.
+2. **Racionamiento por pérdida esperada por peso prestado:** rechazar si `φ_i·LGD_i > θ`.
+   - Sigue siendo racionamiento por umbral (Stiglitz & Weiss, 1981, ya aprobado), pero mide lo que Assenza mide (pérdida esperada) con la garantía que usa Caiani.
+   - **Umbral θ = 0,024**: es el umbral actual de φ (0,03) por la LGD que se observaba antes de R11 (~0,8). Así, para un deudor sin garantía la regla es casi la misma que hoy, y solo cambia para los préstamos cubiertos por la planta. Sensibilidad con dos valores más.
+   - **Un préstamo cubierto por la planta (LGD_i = 0) no se raciona nunca por riesgo.**
+3. **La tasa usa la misma LGD_i:** `r = (r0 + φ·LGD_i)/(1 − φ)` (la fórmula aprobada, con la pérdida de cada empresa). Un préstamo cubierto paga la tasa sin riesgo.
+4. **No se usa el límite por préstamo de Assenza** (`φ·(L+ΔL) ≤ ζ·E_banco`, ζ = 0,002). Sería un cambio de estructura además del de métrica. Queda como opción.
+
+### Qué no cambia
+
+La estimación de φ (logística sobre el apalancamiento, ventana de 120 meses), el límite total del banco (8%), R9, R12 y R7.
+
+### Lo que se espera (sin garantía)
+
+- **Debería evitar que las empresas caigan en la trampa.** En el caso estudiado (semilla 15, mes 172) el préstamo pedido era ~16.000 pesos y la garantía, 0,3 × 63.855 ≈ 19.000 pesos: LGD_i = 0, así que se habría prestado.
+- **No saca a las que ya cayeron:** con ventas del mes anterior en 0, el límite de R9 sigue en 0. Eso es lo que atacaría (c), si hace falta.
+- **Riesgo:** con garantía, el banco presta más a empresas frágiles. Si la venta forzosa recupera menos de lo esperado, el banco pierde. Hay que vigilar la solvencia del banco y la sensibilidad a r_K.
+
+### Tests
+
+- Préstamo totalmente cubierto ⇒ se otorga aunque φ supere el umbral viejo.
+- Sin garantía ⇒ igual que hoy con θ/0,8.
+- Empresa de capital ⇒ LGD = 1.
+- La tasa de un préstamo cubierto es r0.
+- SFC y determinismo.
+
+## R13 con racionamiento por pérdida esperada: implementación y medición (2026-11-11)
+
+**Código:**
+- `lossGivenDefaultOf(firm, exposure, r_K)` y `allocateCredit` en `src/phase1.ts`.
+- `CREDIT.maxExpectedLoss = 0,024` reemplaza a `maxDefaultProbability`.
+- La tasa usa la pérdida de cada empresa (`LGD_i`).
+
+**Corrección a la propuesta:** dije que un préstamo cubierto "paga la tasa sin riesgo". Con la fórmula aprobada paga `r0/(1 − φ)`, apenas más que r0: si el deudor quiebra, el banco recupera el capital pero pierde el interés del mes.
+
+**Tests nuevos (2):**
+- la pérdida por empresa: 0 si la planta cubre, 0,5 si cubre la mitad, 1 en las empresas de capital;
+- con umbral 0, solo se prestan créditos totalmente cubiertos por la planta.
+
+Resultado: 99 tests pasan.
+
+**Medición** (`report:fase1 perdida`, ~6 min; 20 semillas; medianas, mín–máx):
+
+| | Antes (racionar por φ) | **θ = 0,024 (base)** | θ = 0,012 | θ = 0,048 |
+|---|---|---|---|---|
+| Empresas paradas ≥ 12 meses (de 100) | 13 (7–20) | **5 (1–8)** | 6 (2–8) | 4 (2–6) |
+| Máx. meses seguidos parada | 600 | 600 | 600 | 600 |
+| Quiebras anuales, consumo (empírico 5–10%) | 0,1% | **1,0%** (0,4–1,9%) | 0,6% | 1,3% |
+| Quiebras anuales, capital | 0% | 0% | 0% | 0% |
+| Ventas forzosas en 50 años: con comprador · entre todos | 5 · 0 | **45 · 3** (máx. 9) | 29 · 1 | 62 · 3 |
+| Desempleo A, últimos 10 años | 7,3% (2,9–18%) | **5,2%** (2,9–7,0%) | 5,0% | 4,1% |
+| Desempleo B, últimos 10 años | 7,3% | 2,4% | 2,7% | 2,2% |
+| Ahorro forzoso A · B | 17% · 33% | 14% · 30% | 14% · 31% | 13% · 30% |
+| Banco insolvente · castigos/intereses · patrimonio final/inicial | 0/20 · 0,00 · 1,33 | **0/20 · 0,00 · 2,17** | 0/20 · 0,00 · 2,05 | 0/20 · 0,04 · 2,28 |
+| Rechazados por riesgo (por corrida) | 267 | 303 | 366 | 185 |
+| Tasa anual · empresas endeudadas | 4,5% · 15% | 4,8% · **81%** | 4,6% · 80% | 5,2% · 84% |
+| Al tope de capacidad · utilización | 61% · 87% | 68% · 94% | 67% · 93% | 67% · 95% |
+| Inflación A · B · B − A | 0,23% · 1,34% · 1,11 pp | **0,21% · 1,37% · 1,17 pp** | 0,21% · 1,30% · 1,09 pp | 0,19% · 1,41% · 1,22 pp |
+| Criterio de la Fase 0 | 20/20 | **20/20** | 20/20 | 20/20 |
+
+**Lectura:**
+- (b) reduce la trampa a menos de la mitad (13 → 5 empresas paradas), baja el desempleo de A y su dispersión (máximo 18% → 7%), y sube un poco las quiebras (0,1% → 1,0%).
+- El banco sigue solvente y duplica su patrimonio. Ahora el 81% de las empresas tiene deuda.
+- La venta "entre todos" (el impuesto implícito) se usa más: mediana 3, máximo 9 en 50 años.
+- **La trampa persiste:** sigue habiendo empresas paradas los 50 años completos.
+
+### Por qué persiste (verificado, 10 semillas, desde la creación)
+
+Se clasificó cada vez que una empresa de consumo activa deja de producir, según su situación al planificar:
+
+| Causa | Casos |
+|---|---|
+| **Límite de R9 agotado** (deuda ≥ 3 × ventas del mes anterior) | **1.472** |
+| Sin caja después del crédito (racionada por riesgo: la planta no cubre todo el préstamo) | 243 |
+| Ventas del mes anterior = 0 (ya estaba trabada) | 81 |
+
+**Cómo se traba:**
+1. Una empresa endeudada choca con el límite de R9 y no puede pagar salarios ese mes.
+2. Sus ventas del mes pasan a 0, y el límite queda en `3 × 0 − deuda < 0` para siempre: es el **estado absorbente** que señaló Nico.
+3. Si tiene deuda, quiebra por mora a los 3 meses (de ahí sale la mayoría de las quiebras de la tabla). Si no tiene, queda parada para siempre.
+
+## Propuesta: R9 con ventas esperadas en el límite de deuda (espera el OK de Nico)
+
+### Fuentes
+
+- **Dosi et al. (2013), JEDC 37, ec. 3** (la forma ya aprobada): deuda ≤ λ · ventas **del período anterior**. Con un solo mes sin ventas, el límite queda en 0 y no hay forma de salir.
+- **Caiani et al. (2016), expectativas adaptativas.** Las variables esperadas siguen `x^e_t = x^e_{t−1} + λ_e·(x_{t−1} − x^e_{t−1})`, con λ_e = 0,25 por trimestre (cuadro 3, *"Adaptive expectations parameter"* = 0,25). Forma **verificada en el código de los autores** (`S120/jmab`, `SimpleAdaptiveExpectation.java`): `expectation = adaptiveParam·valor_pasado + (1 − adaptiveParam)·expectativa_pasada`.
+- **Assenza et al. (2015), ec. 5.2:** la demanda esperada también es un promedio con pesos que decaen exponencialmente (*"expected future demand is a weighted average of current and past quantities with exponentially decaying weights"*). Ya verificado.
+
+### Propuesta
+
+1. **Ventas esperadas por empresa:** `S^e_t = S^e_{t−1} + λ_e·(S_{t−1} − S^e_{t−1})`, en centavos, actualizada al cierre de cada mes.
+   - λ_e mensual = 0,09, equivalente al 0,25 trimestral de Caiani: `1 − 0,75^(1/3) ≈ 0,0914`. Se calcula fuera del motor y se escribe como constante, porque el motor no usa potencias.
+   - Sensibilidad: λ_e = 0,25 (el valor de Caiani aplicado por mes) y 0,5.
+2. **Límite de deuda de R9:** deuda ≤ λ_R9 · `S^e` (en lugar de las ventas del mes anterior). Un mes sin ventas baja el límite ~9%, no a 0. La empresa puede pedir prestado para pagar salarios, volver a producir y vender.
+3. **Lo mismo en los otros dos usos de las ventas del mes anterior,** para que "capacidad de deuda" signifique lo mismo en todo el modelo:
+   - el orden de atención del banco (patrimonio / ventas), que además hoy divide por 0 si las ventas son 0;
+   - la fracción de capacidad de deuda usada que modula los dividendos (R7, parte 2).
+4. **Empresa que entra:** `S^e = 0`, como hoy (no puede pedir crédito hasta vender). Arranca con su capital inicial.
+5. **Condiciones iniciales:** `S^e` = las ventas iniciales.
+
+### Qué no cambia
+
+λ_R9 = 3, el plazo de 12 meses, R13 (pérdida esperada), R12 y R7, salvo el punto 3.
+
+### Lo que se espera (sin garantía)
+
+- Debería eliminar el estado absorbente: una empresa con planta y sin caja puede volver a pedir crédito.
+- **Riesgo:** las empresas que pierden ventas siguen endeudándose más tiempo (el límite baja despacio). Más deuda impaga y más quiebras por mora, o empresas que sobreviven endeudadas. Hay que mirar las quiebras, los castigos del banco y la deuda.
+
+### Tests
+
+- Un mes sin ventas no deja el límite en 0.
+- `S^e` sigue la ecuación (convergencia a ventas constantes).
+- Entrante con `S^e = 0`.
+- SFC y determinismo.
+
+## R9 con ventas esperadas: implementación y medición (aprobada el 2026-11-11)
+
+**Código:**
+- `Firm.expectedSales` (Sᵉ) y `CREDIT.salesExpectationWeight = 0,0914`.
+- Se actualiza en el cierre del mes, solo para las empresas activas.
+- La usan el límite de R9, el orden de atención del banco y la capacidad de deuda usada de R7.
+- La empresa que entra arranca con Sᵉ = 0; las condiciones iniciales usan las ventas iniciales.
+
+**Tests:**
+- 2 nuevos: un mes sin ventas baja Sᵉ en λ_e y no deja el límite en 0; Sᵉ converge a ventas constantes.
+- 2 ajustados porque el test suponía mal:
+  - "con umbral 0 solo se prestan créditos cubiertos" ahora mira solo los meses con estimación logística, porque sin historia φ = 0 y el banco presta igual;
+  - "la entrante la capitaliza quien compró la planta" ahora corre varias semillas, porque el caso no aparece en todas.
+
+Resultado: 101 tests pasan.
+
+**Medición** (`report:fase1 r9`, ~6 min; 20 semillas; medianas, mín–máx):
+
+| | Antes (R13 pérdida esperada) | **λ_e = 0,0914 (base)** | λ_e = 0,25 | λ_e = 0,5 |
+|---|---|---|---|---|
+| Empresas paradas ≥ 12 meses (de 100) | 5 (1–8) | **1 (0–4)** | 2 (0–6) | 3 (1–5) |
+| Máx. meses seguidos parada (mediana entre semillas) | 600 | 600 (mín. 1) | 600 | 600 |
+| Empresas nuevas en 50 años (20 semillas) | — | 199 | 565 | 939 |
+| … con algún mes sin producir en el 1er año | — | 35 | 146 | 376 |
+| … paradas ≥ 6 meses en el 1er año (trampa) | — | **5** | 14 | 23 |
+| … quebradas en el 1er año | — | 30 | 119 | 324 |
+| **Zombis** (deuda 24 meses seguidos y Sᵉ en baja; promedio por mes) | — | **5,1** (3,5–7,2; máx. 13) | 3,0 | 2,8 |
+| Quiebras anuales, consumo (empírico 5–10%) | 1,0% | **0,1%** | 0,5% | 0,9% |
+| Desempleo A · B (últimos 10 años) | 5,2% · 2,4% | **2,9% · 1,8%** (A: 2,2–4,6%) | 3,5% · 2,2% | 4,4% · 2,3% |
+| Ahorro forzoso A · B | 14% · 30% | 13% · 30% | 13% · 30% | 13% · 29% |
+| Banco: insolvente · castigos/intereses · patrimonio final/inicial | 0/20 · 0,00 · 2,17 | **0/20 · 0,00 · 2,33** | 0/20 · 0,01 · 2,29 | 0/20 · 0,01 · 2,26 |
+| Rechazados por riesgo · empresas endeudadas | 303 · 81% | 38 · 87% | 148 · 85% | 282 · 82% |
+| Al tope de capacidad · utilización | 68% · 94% | 71% · 98% | 69% · 97% | 69% · 96% |
+| Inflación A · B · B − A | 0,21% · 1,37% · 1,17 pp | **0,15% · 1,34% · 1,19 pp** | 0,20% · 1,36% · 1,19 pp | 0,20% · 1,40% · 1,23 pp |
+| Criterio de la Fase 0 | 20/20 | **20/20** | 20/20 | 20/20 |
+
+**Lectura:**
+- La trampa casi desaparece: mediana de 1 empresa parada, y el desempleo de A baja a 2,9%.
+- **Las quiebras bajan otra vez, a 0,1%:** con el límite suave, casi nadie choca con él y cae en mora.
+- **Aparecen los zombis que temía Nico:** en promedio, ~5 de 100 empresas tienen deuda desde hace 2 años o más, ventas en baja y siguen vivas.
+- Un λ_e más alto (memoria más corta) baja los zombis y sube las quiebras, pero también sube las empresas paradas, porque el límite vuelve a caer rápido.
+
+### Lo que queda de la trampa: las empresas nuevas (verificado)
+
+Las empresas que siguen paradas los 50 años tienen planta (pérdida si quiebran = 0), no tienen deuda y tienen Sᵉ = 0. Seguí una (semilla 2, empresa 2031, entra en el mes 39):
+
+| Mes | Trabajadores | Producido | Vendido | Clientes fieles | Depósitos | Sᵉ |
+|---|---|---|---|---|---|---|
+| 39 (entra) | 20 | 200 | **0** | 0 | 0 (gastó el capital inicial en salarios) | 0 |
+| 40 | 0 | 0 | 0 | 3 | 0 | 0 |
+| 42 | 0 | 0 | 0 | 6 | 0 | 0 |
+
+**Mecanismo:**
+1. La empresa entra con un capital inicial de exactamente 1 mes de salarios (R12) y con Sᵉ = 0.
+2. El primer mes no vende: no tiene clientes fieles (R6, β = 1) y su precio (el promedio) no es más bajo que el de los proveedores de nadie.
+3. Gasta todo en salarios y termina con depósitos en 0 y Sᵉ = 0, así que el límite de crédito es 0.
+4. Ya tiene clientes fieles al mes siguiente, pero nunca puede volver a producir.
+
+En 50 años y 20 semillas, **5 de 199 empresas nuevas** quedan así. Son pocas, pero son permanentes, y explican las paradas restantes.
+
+## Propuesta: Sᵉ inicial de la empresa que entra (espera el OK de Nico)
+
+### Fuentes verificadas
+
+- **Assenza et al. (2015), sección 5.1:** *"the firm forms expectations on future demand and sets desired production at the level of expected demand"* (`Y* = Yᵉ`). La demanda esperada de una empresa **es** su plan de producción.
+- **Dosi, Fagiolo & Roventini (2010), K+S** (LEM WP 2008/21, sección 2.4): *"entrants are on average smaller than incumbents, with the stock of capital of new consumption-good firms and the stock of liquid assets of entrants in both sectors being a fraction of the average stocks of the incumbents"* (Caves, 1998; Bartelsman et al., 2005). La empresa que entra se inicializa con lo que tienen las que ya están.
+
+### Propuesta
+
+- **Sᵉ inicial = producción planeada × precio** de la empresa que entra, ambos fijados por R12 (tamaño mediano, precio promedio). Es su propia demanda esperada valuada a su precio, como en Assenza. Con el tamaño mediano y el precio promedio, es aproximadamente la Sᵉ de una empresa mediana del sector, que es lo que haría K+S.
+- **No cambia nada más:** el capital inicial, la planta, R13 y la pérdida esperada siguen igual.
+  - Para una empresa de consumo con planta, el banco presta si la planta cubre (LGD).
+  - Para una empresa de capital, sin garantía, el racionamiento por φ sigue actuando.
+
+### Alternativa
+
+Sᵉ inicial = una fracción de la mediana de las que ya están (K+S: las que entran son más chicas). Necesita un parámetro más; queda como opción.
+
+### Riesgo
+
+El banco le presta a una empresa sin historia de ventas, hasta 3 meses de su plan. Si no vende, se endeuda y quiebra por mora en 3 meses, en vez de quedar parada para siempre. Es lo esperable: la quiebra es la salida que hoy no tiene.
+
+### Tests
+
+- La empresa que entra tiene Sᵉ = plan × precio.
+- Medición: empresas nuevas paradas en el 1er año, quiebras de empresas nuevas, empresas paradas, zombis.
+
+## Sᵉ inicial de la empresa que entra: medición (aprobada el 2026-11-11)
+
+Sᵉ inicial = producción planeada × precio. Medido con 20 semillas antes de R10 (script ad hoc; mismas métricas que `report:fase1 r9`):
+
+| | R9 (Sᵉ inicial = 0) | **Sᵉ inicial = plan × precio** |
+|---|---|---|
+| Empresas paradas ≥ 12 meses | 1 (0–4) | **0 (0–0)**; máx. 3 meses seguidos |
+| Empresas nuevas · paradas ≥ 6 meses en el 1er año · quebradas en el 1er año | 199 · 5 · 30 | 426 · **0** · 153 (36%) |
+| Zombis (promedio por mes) | 5,1 | 5,5 |
+| Quiebras anuales, consumo | 0,1% | 0,4% |
+| Desempleo A · B | 2,9% · 1,8% | 3,2% · 1,8% |
+| Banco: insolvente · patrimonio final/inicial · castigos/intereses | 0/20 · 2,33 · 0,00 | 0/20 · 2,35 · 0,02 |
+| Inflación A · B · criterio de la Fase 0 | 0,15% · 1,34% · 20/20 | 0,18% · 1,39% · **20/20** |
+
+**La trampa sin caja queda resuelta.** Más empresas nuevas quiebran en su primer año (36%), en lugar de quedar paradas. Zombis y quiebras bajas se evalúan en el punto de control 1a, después de R10 (decisión de Nico).
+
+**r̄ calibrado** con este régimen (flujo de caja operativo / V, años 40–50 desde la creación, A): mediana **0,00825 por mes** (0,0071–0,0092). Caiani usa 0,04345 por trimestre (~0,0145 por mes).
+
+## R10: implementación y medición (2026-11-11)
+
+**Código (`src/phase1.ts`, `src/params.ts`):**
+- `desiredCapacityGrowth(firm)`: g = γ1·(r − r̄)/r̄ + γ2·(u − ū)/ū, acotada en −1.
+- `Firm.desiredOutput`: la producción deseada por R1 antes del tope, que es la señal de utilización.
+- `Firm.cashFlowRate`: (ganancia + amortización − cuotas pagadas) / V, calculada en R7.
+- Pedido de capital = reposición δ·K̄ + g·K, acumulado; nunca negativo.
+- Los préstamos se parten: la parte de la inversión va a 60 meses (`CREDIT.investmentLoanTermMonths`) y el resto a 12.
+- Parámetros: γ1 = 0,01/3, γ2 = 0,02/3, ū = 0,85, r̄ = 0,00825.
+
+**Tests:** 2 nuevos (dirección de g y cota en −1; pedido ≥ 0, crecimiento por encima de la reposición, préstamos a 60 meses) y 1 de vacuidad ajustado (las quiebras ahora se buscan en varias semillas). Resultado: 103 tests pasan.
+
+**Medición** (`report:fase1 r10`, ~7 min; 20 semillas; medianas):
+
+| | Sin R10 (solo reposición) | **R10, γ base** | γ × 0,5 | γ × 2 |
+|---|---|---|---|---|
+| Desempleo A, últimos 10 años | 3,2% | **84%** | 42% | 93% |
+| Tendencia anual del capital | ~0% | **−3,1%** | −0,7% | −4,7% |
+| Precio del capital / precio del consumo | ~0,76 | **15** | 3,8 | 12 |
+| Empleo en el sector de capital / ocupados | 8,1% | **2,9%** | 7,6% | 3,3% |
+| Inversión / ventas de consumo | ~9% | 56% | 36% | 66% |
+| Ahorro forzoso A | 13% | 70% | 35% | 85% |
+| Quiebras anuales, consumo · zombis | 0,4% · 5,5 | 12,5% · 35 | 5,8% · 36 | 13,7% · 25 |
+| Deuda / masa salarial | ~0,5 | 7,1 | 3,4 | 8,4 |
+| Inflación A · B > A | 0,18% · 20/20 | **1,97% · 12/20** | 0,96% · 12/20 | 2,46% · 14/20 |
+| Criterio de la Fase 0 (A < 1%) | 20/20 | **0/20** | 13/20 | 0/20 |
+
+**R10 con la regla de cantidad actual de las empresas de capital colapsa la economía, y el criterio de la Fase 0 deja de cumplirse.**
+
+### Diagnóstico (verificado, semilla 1, desde la creación)
+
+| Mes | Pedidos de capital · comprados | Empresas de capital que venden todo | Trabajadores en el sector de capital | Precio capital / consumo | Desempleo |
+|---|---|---|---|---|---|
+| 1 | 1.593 · 1.511 | 16/20 | 161 | 1,00 | 2,3% |
+| 12 | 1.418 · 1.051 | 20/20 | **105** | 1,03 | 0% |
+| 60 | 1.986 · 1.726 | 17/20 | 174 | 1,40 | 0% |
+| 120 | 1.538 · 1.392 | 16/20 | 140 | 1,76 | 0% |
+| 240 | 1.228 · 994 | 15/20 | 103 | 2,53 | 18,7% |
+
+Las empresas de capital venden todo y dejan pedidos sin atender, pero **no se expanden**: achican su planta y suben el precio sin parar. El capital no se repone, la capacidad de consumo cae, se pierden empleos y la economía entra en espiral. Las empresas de capital acumulan depósitos (de 27 a 245 millones de pesos en 20 años).
+
+**Causa: un apartamiento mío de la fuente en R11.** La regla de R11 para las empresas de capital citaba a Assenza et al. (2015), ec. 6.1–6.2, pero la implementé con:
+- el paso de cantidad al azar de R1 (u ≤ 5% por mes);
+- como base, las **ventas** del mes anterior, que nunca superan lo producido (demanda censurada). La empresa no "ve" la demanda que no atendió.
+
+**Texto de Assenza (ec. 6.2, verificado):**
+- `Y* = Y + ρ·(−Δ) − inventario` si `Δ ≤ 0 y P > P̄`;
+- `Y* = Y − ρ·Δ − inventario` si `Δ > 0 y P < P̄`;
+- Δ es el error de pronóstico (producción − demanda) y **ρ = 0,9** (cuadro 2, *"Quantity adjustment parameter"*).
+
+La cantidad se ajusta en proporción a la demanda **insatisfecha**, no al azar. Mientras la demanda de capital fue plana (solo reposición), la diferencia no se notaba. Con la inversión neta, la oferta de capital no puede seguir a la demanda.
+
+**Nota:** la R1 de las empresas de consumo (Fase 0, Gaffeo et al., 2008) también usa el paso al azar. Assenza usa ρ·(−Δ) también para ellas (ec. 5.2). Ahí no es un apartamiento: la fuente de esa regla es Gaffeo, no Assenza. Pero es una diferencia entre versiones de CATS a tener en cuenta.
+
+## Propuesta: corregir la regla de cantidad de las empresas de capital (espera el OK de Nico)
+
+**Fuente:** Assenza, Delli Gatti & Grazzini (2015), CESifo WP 4765, ec. 6.1–6.2 y cuadro 2 (ρ = 0,9). Verificado contra el texto.
+
+1. **Demanda de cada empresa de capital:** se registra en el mercado de bienes de capital como la suma de lo que le pidió cada comprador que la visitó (lo que le faltaba a ese comprador cuando le tocó esa empresa), lo haya podido vender o no. Δ = producción − demanda.
+   - *Ojo:* si un comprador no consigue todo en A y completa en B, la parte que no consiguió en A cuenta como demanda de A y de B. Es la "cola de compradores insatisfechos" de Assenza; puede sobreestimar un poco la demanda.
+2. **Precio (ec. 6.1, como hoy):** sube si `Δ ≤ 0 y P < P̄`; baja si `Δ > 0 y P > P̄`.
+3. **Cantidad (ec. 6.2):**
+   - si `Δ ≤ 0 y P ≥ P̄`: `Y* = Y + ρ·(−Δ) − inventario`;
+   - si `Δ > 0 y P < P̄`: `Y* = Y − ρ·Δ − inventario`;
+   - en los otros dos casos: `Y* = Y − inventario` (solo cambia el precio).
+   - Y = producción del mes anterior, ρ = 0,9. Se mantiene el supuesto de nunca planear menos que un trabajador.
+4. **No cambia:** la R1 de las empresas de consumo (Fase 0) ni R10.
+
+**Lo que se espera (sin garantía):** que el sector de capital siga a la demanda de inversión, que su precio relativo se estabilice y que la capacidad crezca hacia ū. Se mide con las mismas métricas de R10, más el criterio de la Fase 0.
+
+## Corrección de la regla de cantidad de las empresas de capital: implementación y medición (2026-11-11)
+
+**Decisión de Nico:** aprobada la regla de Assenza (ec. 6.1–6.2), con la medición del doble conteo. R10 queda **apagada por defecto** (`CAPITAL.netInvestment = 0`), para que el criterio de la Fase 0 se cumpla entre commits.
+
+**Código:**
+- `Firm.demandUnits` y `Firm.lastDemand`, registradas en el mercado de bienes de capital.
+- `CAPITAL.capitalQuantityAdjustment = 0,9` (ρ) y el interruptor `CAPITAL.capitalQuantityRule`: 0 = la regla de R11 original, 1 = Assenza.
+- `credit.capitalDemandRegistered`, para medir el doble conteo.
+
+**Primera implementación: error mío.** Conté como demanda lo que le faltaba al comprador, pudiera pagarlo o no. Las empresas de capital veían siempre exceso de demanda, nunca bajaban el precio, y el precio del capital llegó a 160–600 veces el del consumo, con colapso total. **Se corrigió:** la demanda registrada es `min(lo que le falta, lo que puede pagar a ese precio)`, que es la demanda efectiva de Assenza.
+
+**Medición con la demanda efectiva** (`report:fase1 r11k`, ~7 min; 20 semillas; medianas):
+
+| | R11 original, R10 apagada (referencia) | Assenza, R10 apagada | Assenza, R10 γ base | Assenza, R10 γ × 0,5 |
+|---|---|---|---|---|
+| **Doble conteo** (demanda registrada / unidades pedidas) | — | **0,99** (0,97–1,02) | 0,79 | 0,91 |
+| Pedidos de capital cumplidos | ~99% | 86% | 65% | 76% |
+| Precio del capital / consumo | ~0,76 | **5,3** | 5,6 | 5,8 |
+| Empleo en el sector de capital | 8,1% | 6,9% | 6,1% | 6,1% |
+| Tendencia anual del capital | ~0% | −0,65% | −1,35% | −1,23% |
+| Desempleo A | 3,2% | **54%** | 67% | 62% |
+| Quiebras anuales, consumo | 0,4% | 8,3% | 8,9% | 8,6% |
+| Inflación A · criterio de la Fase 0 (A < 1% · B > A) | 0,18% · 20/20 · 20/20 | **1,25% · 0/20 · 19/20** | 1,49% · 0/20 · 15/20 | 1,31% · 0/20 · 15/20 |
+
+**El doble conteo es despreciable** (0,99 con R10 apagada). Con R10 prendida la demanda registrada es incluso menor que la pedida (0,79), porque parte de los pedidos no se pueden pagar al precio de la empresa que se visita.
+
+**La regla de Assenza desestabiliza la economía incluso sin R10.** Diagnóstico (semilla 1, no verificado del todo):
+1. **Escasez de trabajo al arrancar:** en los primeros 12 meses hay pleno empleo (desempleo 0%) y las empresas de capital no cubren sus vacantes (12–17 de 20). R2 les sube el salario, que nunca baja. Terminan pagando 28% más que las de consumo, y eso sube el piso de su precio.
+2. **Las empresas de capital producen siempre algo menos que la demanda:** Δ ≤ 0 en 12–18 de 20 todos los meses. La mitad con precio por debajo del promedio solo sube el precio (en Assenza cambia el precio o la cantidad, nunca las dos cosas). El precio relativo del capital deriva de 1,0 a 1,74 en 20 años.
+3. **La reposición se encarece,** las empresas de consumo se endeudan, aumentan las quiebras y, pasado el año 20, la economía cae.
+
+**Estado:** el interruptor queda en 0 (la regla original, que se aparta de Assenza) para que el criterio de la Fase 0 se cumpla. Con la configuración por defecto: criterio 20/20, A 0,16%, B 1,37%, desempleo de A 3,3%, 0 empresas paradas. **Espera la decisión de Nico.**
+
+**Nota sobre los préstamos de inversión a 60 meses:** vinieron con R10 y siguen activos con R10 apagada, porque también financian la reposición. Cambian la medición por defecto respecto de la de Sᵉ inicial (zombis 5,5 → 46; empresas nuevas 426 → 756; patrimonio del banco ×2,35 → ×2,88). **La métrica de zombis deja de servir:** con préstamos a 5 años, toda empresa que repone capital tiene deuda 24 meses seguidos. Hay que redefinirla para el punto de control (por ejemplo, deuda creciente y ventas en baja).
+
+## Revisión de las reglas contra sus fuentes (2026-11-11, pedido de Nico)
+
+**Proceso de acá en adelante:** para cada regla, la ecuación de la fuente al lado de la implementación, término por término, y un test con un caso calculado a mano (`test/rules-by-hand.test.ts`, 23 tests).
+
+**Leyenda:**
+- ✓ = igual a la fuente;
+- **A** = adaptación aprobada por Nico;
+- **S** = supuesto documentado (la fuente no da el valor o no aplica);
+- **D** = diferencia no documentada hasta hoy;
+- **NV** = fuente no verificada contra el texto (no tengo acceso al texto).
+
+### R1. Precio y cantidad de las empresas de consumo — `model.ts:firmsPlan`, `phase1.ts:firmsPlanP1`
+
+Fuente: Gaffeo et al. (2008), NV; la estructura de CATS está verificada en Dawid et al. (2024), ec. 14 y cuadro 1, y en Assenza et al. (2015), ec. 5.1–5.2.
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Señal de demanda | Δ = producción − demanda (Assenza) / exceso de demanda | `soldOut` = vendió todo el stock (bien perecedero) | ✓ |
+| Precio de referencia | precio promedio del mercado | índice de precios de las ventas del mes anterior | ✓ |
+| Sube el precio | Δ ≤ 0 y P < P̄: P(1 + η) | `soldOut` y P < P̄: P·(1 + u) | ✓ |
+| Baja el precio | Δ > 0 y P > P̄: P(1 − η) | no `soldOut` y P ≥ P̄ | ✓ (empate P = P̄: **S**) |
+| Cantidad | CATS: Y* = (1 ± γ)·Y_{t−1} (Dawid); Assenza: Y* = Y + ρ(−Δ) | Y_{t−1}·(1 ± u) | ✓ con Gaffeo y Dawid; Assenza usa otra versión |
+| Tamaño del paso | Assenza: η ~ U(0; 0,1) | u ~ U(0; 0,05) | **S/D:** el valor 0,05 es un supuesto, pero la versión de CATS que usamos para el sector de capital usa 0,1 |
+| Piso de precio | Assenza: *"a certain threshold (AC) which covers average cost"* | w/α (Fase 0); w/α + δ(V/K)/κ (Fase 1) | **D:** no incluye el costo financiero (intereses) en el costo medio; el texto no lo detalla |
+| Tope de capacidad | Assenza ec. 5.8: N* = min(Y*/α, κK/α) | plannedOutput ≤ ⌊κK⌋ | ✓ |
+| Mínimo de un trabajador | *"will not choose a quantity below the level that guarantees the employment of at least one worker"* (Assenza 5.1) | Y* ≥ α | ✓ |
+
+### R2. Salarios — `firmsPlan`
+
+Fuente: Delli Gatti et al. (2011), **NV** (libro sin acceso). Assenza et al. (2015) usa **salario fijo y uniforme** (cuadro 2: w = 1), así que la versión de CATS que usamos para el capital no tiene dinámica salarial.
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Suba | ¿w(1 + ξ) si hay vacantes? (NV) | w·(1 + u), u ~ U(0; 0,05), si quedaron vacantes | **NV** |
+| Baja | rigidez a la baja (Bewley, 1999; Dickens et al., 2007) | nunca baja | **S** con evidencia empírica |
+
+**Hallazgo:** R2 es la única regla del núcleo sin ecuación verificada. Además, es la que alimenta la espiral salarial (1a.3) y el salario alto de las empresas de capital (arriba). Prioridad para verificar.
+
+### R3. Demanda de trabajo y despidos — `firmsPlan`, `firmsPlanP1`
+
+| Término | Fuente (Assenza 5.8–5.9) | Implementación | |
+|---|---|---|---|
+| Deseados | N* = min(Y*/α, κK/α) | ⌈plannedOutput/α⌉ (plannedOutput ya acotado) | ✓ |
+| Vacantes | max(N* − N, 0) | igual | ✓ |
+| Despidos | *"selects at random … workers and fires them"* | al azar | ✓ |
+| Liquidez | brecha de financiamiento con crédito (sec. 7) | N ≤ ⌊depósitos/w⌋ después del crédito | ✓ |
+
+### R4. Mercado de trabajo — `laborMarket`
+
+Fuente: Riccetti, Russo & Gallegati (2015), **NV**. Assenza: el desocupado visita Ze = 5 empresas (cuadro 2), con salario uniforme.
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Empresas visitadas | Assenza Ze = 5 | M = 4 | **S** (valor) |
+| Elección | (salario uniforme en Assenza) | la de mayor salario | **NV** |
+
+### R5. Consumo — `goodsMarket`, `goodsMarketP1`
+
+Fuente: Godley & Lavoie (2007), cap. 3.
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Ingreso | SIM: C = α1·YD + α2·H₋₁ (YD del período) | α1·YD_{t−1} + α2·W | **D (de documentación):** es la versión **SIMEX** (YDᵉ = YD₋₁, expectativas ingenuas), no SIM. La regla está bien; `fase0-reglas.md` dice SIM. |
+| Riqueza | H₋₁ | depósitos al inicio del mes | ✓ |
+| Valores | SIM 0,6 / 0,4 | 0,9 / 0,05 por mes | **S** (documentado) |
+
+### R6. Mercado de bienes
+
+- **Fase 0** (CATS, NV en detalle): visita Z = 3 al azar y compra en la más barata primero. ✓ con la descripción de Assenza (Zc = 2, valor **S**).
+- **Fase 1:** fidelidad de Delli Gatti, Terranova & Turco (2023), sección 3.9, ya verificada: conserva el proveedor, visita Z − 1 más y cambia con `1 − e^(−β·(P_ant − P_nuevo)/P_nuevo)`, β = 1. ✓
+
+### R7. Ganancias y dividendos — `profitsP1`
+
+| Término | Fuente (Caiani 3.1.3, cuadro 3) | Implementación | |
+|---|---|---|---|
+| Ganancia | ventas + intereses cobrados + Δ valor de inventarios − salarios − intereses − amortización | ventas − salarios − intereses − amortización + Δ inventario (no hay intereses por depósitos) | ✓ |
+| Reparto | ρ = 0,9 de la ganancia del período, si es positiva | ρ·(1 − ℓ) del resultado acumulado, una vez por año | **A** (LSC arts. 68 y 71, más el endeudamiento) |
+
+### R8. Tesoro y BCRA
+
+Estructura de SIM (Godley & Lavoie, cap. 3) ✓. La regla de la alícuota con base de pleno empleo es propia, **S** (documentada).
+
+### R9. Crédito — `allocateCredit`
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Límite de deuda | Dosi et al. (2013), ec. 3: deuda ≤ λ·S_{t−1} (verificado) | ⌊λ·Sᵉ⌋ − deuda | **A** (Sᵉ de Caiani, verificado en el código) |
+| Expectativa | Caiani: xᵉ = λ_e·x₋₁ + (1 − λ_e)·xᵉ₋₁, λ_e = 0,25 por trimestre | λ_e = 0,0914 por mes | ✓ (conversión) |
+| Orden de atención | Dosi: patrimonio/ventas, de mayor a menor | patrimonio/Sᵉ | **A** |
+| Tasa base | Dosi ec. 7: r_L = (1 + μ)·r | igual, μ = 0,5 | ✓ |
+| Plazo | Caiani: 20 trimestres para todos los préstamos | 60 meses la inversión, 12 el capital de trabajo | **A** |
+
+### R10. Inversión — `desiredCapacityGrowth`
+
+Verificada en el código de los autores.
+
+| Término | Caiani | Implementación | |
+|---|---|---|---|
+| g | γ1·(r − r̄)/r̄ + γ2·(u − ū)/ū, ≥ −1 | igual | ✓ |
+| r | flujo de caja pasado / valor del capital pasado | (ganancia + amortización − cuotas)/V | ✓ |
+| u | producción deseada / capacidad | desiredOutput/(κK) | ✓ |
+| Unidades | ⌈((1+g)·cap − cap residual)/productividad⌉ | ⌊acumulado de g·K + δ·K̄⌋, arrastrando la fracción | **A/D menor:** techo contra piso con arrastre; equivalentes en el promedio |
+| Parámetros | trimestrales | ÷3; r̄ calibrado con el régimen como *"SS-given"* | **A** |
+
+### R11. Capital
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Producción de consumo | Assenza 5.3–5.4: min(αN, κK) | min(αN, ⌊κK⌋) | ✓ |
+| Depreciación | Assenza 5.5: K₊₁ = (1 − δω)K + I | K −= δωK | ✓ |
+| Reposición | Assenza 5.6: δK̄/γ, con K̄ = νK̄₋₁ + (1−ν)Y/κ | δK̄ (se invierte todos los meses: γ = 1) | ✓ |
+| Valor libro | Caiani: amortización lineal por lote | geométrica según el uso | **A** |
+| Producción de capital | Assenza 6.3: αN | α_K·N | ✓ |
+| Precio y cantidad del capital | Assenza 6.1–6.2 | interruptor: 0 = R11 original (**D** con la fuente), 1 = Assenza | **pendiente de decisión** |
+| Inventario | Caiani: al costo unitario corriente | w/α_K por unidad | ✓ |
+| Capital nuevo | Caiani: se usa desde el período siguiente | igual | ✓ |
+
+### R12. Quiebras y entrada
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Disparador | Caiani 3.3: *"run out of liquidity or … net-wealth turns negative"* | patrimonio < 0 o 3 cuotas impagas | ✓ (3: **S**) |
+| Venta forzosa | Caiani: a los hogares, con descuento (*haircut* 0,5) | r_K = 0,3 (Ramey & Shapiro) | **A** |
+| Sin comprador | Caiani: en proporción a la riqueza | en proporción a los depósitos | ✓ |
+| Entrada | Assenza: reemplazo uno a uno; K+S: fracción del promedio | uno a uno, tamaño mediano, 3 meses de demora, capital de 1 mes de salarios | ✓ / **S** |
+| Sᵉ inicial | Assenza 5.1: demanda esperada = plan | plan × precio | ✓ |
+
+### R13. Banco — `allocateCredit`, `bankStage`, `creditRisk.ts`
+
+| Término | Fuente | Implementación | |
+|---|---|---|---|
+| Apalancamiento | Assenza 8.1: (L + F)/(E + L + F) | (deuda + pedido)/(deuda + pedido + patrimonio) | ✓ |
+| φ | Assenza: logística sobre la historia | logística agrupada, ventana de 120 meses | ✓ (agrupación **A**) |
+| Tasa | Assenza 8.9 (plazo infinito, μ = 1,2) | no arbitraje a un mes: (r0 + φ·LGD)/(1 − φ) | **A** |
+| LGD | Caiani 3.2: garantía de la planta / deuda | 1 − r_K·V/exposición | ✓ |
+| Racionamiento | Assenza 8.11: φ·(L + F) ≤ ζ·E_b | φ·LGD > θ | **A** |
+| Límite total | Basilea, 8% | igual | ✓ |
+| **Dividendos del banco** | Caiani cuadro 3: *"Banks' profit share distributed as dividends"* = **0,6** | **0,9** ("igual que R7, supuesto") | **D:** hay un valor con fuente y usamos otro. Relevante para la observación de Nico sobre el patrimonio del banco |
+
+### Diferencias encontradas (fuera de la de las empresas de capital, ya conocida)
+
+1. **R2 no tiene ecuación verificada** (NV), y la versión de CATS que seguimos para el capital usa salario fijo. Es la regla que alimenta la espiral salarial.
+2. **R13: los dividendos del banco** usan 0,9 cuando Caiani da 0,6.
+3. **R1: el tamaño del paso de precio** es 0,05 (supuesto); Assenza usa U(0; 0,1).
+4. **R1: el piso de precio** no incluye el costo financiero; Assenza habla de "costo medio".
+5. **R5 es SIMEX, no SIM** (solo documentación).
+6. **R10: techo contra piso con arrastre** en las unidades (menor).
+7. **Tamaños de búsqueda** (M = 4, Z = 3 contra 5 y 2 de Assenza): supuestos, sin cambio.
+
+Ninguna se corrigió: esperan la decisión de Nico.

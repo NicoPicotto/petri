@@ -1,15 +1,17 @@
 # Petri — simulador de economía política (nombre de trabajo)
 
-## Estado actual (2026-11-11)
+## Estado actual (2026-11-12)
 
-- **Fase 0: cerrada.** El 2026-11-11 se corrigió un defecto de R1 (la producción deseada crecía sin límite). El criterio de salida se sigue cumpliendo; ver `docs/fase0-reglas.md`.
-- **Fase 1: en curso.** Plan aprobado en `docs/fase1-reglas.md`. Hecho: paso 1a.0 (diagnóstico con G = 0, corrección de R1, eliminación del colchón de R7). Hecho también: paso 1a.1 (tamaño de la Fase 1: 2.000 hogares y 120 empresas, calentamiento de 420 meses) y paso 1a.2 (balance del banco y flujos del crédito). Pasos 1a.3 y 1a.4 (R9 crédito, R13 banco, R12 quiebras y entrada) implementados en `src/phase1.ts`. R7 revisada (reparto anual sobre resultados acumulados, según endeudamiento) implementada y medida. Condiciones iniciales calibradas (`PHASE1_INITIAL`). R6 con fidelidad al proveedor (CATS, β = 1, exponencial determinista en `src/detmath.ts`). R13 revisada (tasa según el riesgo con logística, racionamiento por umbral): banco solvente, quiebras de 6,2% anual, crédito en régimen. Valuación del capital aprobada (costo histórico depreciado, venta forzosa en la quiebra, amortización en el piso de R1). R11 implementada y medida (paso 1a.5: 100 empresas de consumo + 20 de capital, solo reposición): criterio de la Fase 0 20/20, banco solvente, pero las quiebras casi desaparecen y el desempleo sube a 7,3%. Verificado: R1 al tope de capacidad es fiel a Assenza (supuesto de CATS, candidato a perilla de teoría). Hallazgo: "trampa sin caja" (7–20 empresas activas que no producen nunca más), espera decisión. Propuesta de R10 (Caiani, verificada en el código de los autores) escrita, espera OK. Después, el punto de control 1a (ver `docs/fase1-reglas.md` y `docs/pendientes.md`).
+- **Cambio de enfoque (decisión de Nico, 2026-11-12):** el modelo base pasa a ser **Caiani et al. (2016)**, portado fielmente y verificado contra su código (JMAB). Las particularidades argentinas entran como extensiones documentadas. Motivos, estado de cada regla, lo aprendido e infraestructura que se reutiliza: [docs/cambio-de-enfoque.md](docs/cambio-de-enfoque.md).
+- **Fase 0: cerrada** con sus reglas propias (CATS + SIM). La app la sigue usando hasta que el port de Caiani pase sus criterios. El criterio de salida de la Fase 0 se vuelve a correr con el port.
+- **Fase 1, tramo 1a (enfoque anterior): cerrado como registro.** El código está en `packages/engine/src/phase1.ts`. Por defecto: R10 apagada y la regla de cantidad original del sector de capital; con eso el criterio de la Fase 0 se cumple en 20/20. Todo el registro está en `docs/fase1-reglas.md`.
+- **Siguiente:** decidir con Nico las preguntas abiertas del port (duración del período, cantidad de bancos, bonos, gobierno, tamaño; ver `docs/cambio-de-enfoque.md`). Después, portar Caiani regla por regla, cada una con su ecuación al lado del código de JMAB y un test calculado a mano. El primer criterio es reproducir los resultados publicados de Caiani.
 - Al arrancar una sesión, leer en este orden:
-  1. [docs/pendientes.md](docs/pendientes.md): qué quedó abierto, qué se difirió a la Fase 1 y qué supuestos provisorios hay.
-  2. [docs/fase1-reglas.md](docs/fase1-reglas.md): plan de la Fase 1, decisiones de Nico y resultados de cada paso.
-  3. [docs/fase0-reglas.md](docs/fase0-reglas.md): reglas R1–R8 con fuentes, calentamiento, criterio de salida y resultados, limitaciones conocidas, decisiones tomadas.
-  4. [docs/arquitectura.md](docs/arquitectura.md): cómo correr el proyecto, estructura del motor y de la app, convenciones (etapas, relojes, log, replay, determinismo), formato del archivo de corrida.
-  5. [docs/sfc.md](docs/sfc.md): matriz de balances y primitivas contables.
+  1. [docs/cambio-de-enfoque.md](docs/cambio-de-enfoque.md): por qué Caiani es el modelo base, estado de cada regla, lo aprendido, infraestructura reutilizable y preguntas abiertas del port.
+  2. [docs/pendientes.md](docs/pendientes.md): qué quedó abierto y qué extensiones argentinas están identificadas.
+  3. [docs/arquitectura.md](docs/arquitectura.md): cómo correr el proyecto, estructura del motor y de la app, convenciones (etapas, relojes, log, replay, determinismo), formato del archivo de corrida.
+  4. [docs/sfc.md](docs/sfc.md): matriz de balances y primitivas contables.
+  5. Registro histórico, cuando haga falta: [docs/fase1-reglas.md](docs/fase1-reglas.md) (tramo 1a con el enfoque anterior: mediciones, errores, revisión contra fuentes) y [docs/fase0-reglas.md](docs/fase0-reglas.md) (reglas R1–R8 de la Fase 0).
 - Comandos: `pnpm test`, `pnpm test:slow`, `pnpm typecheck`, `pnpm dev`, `pnpm --filter @petri/engine report:fase0`, `pnpm --filter @petri/engine report:fase1`. Requiere Node ≥ 22.12.
 
 ## Visión
@@ -100,15 +102,13 @@ Esto es un **requisito central**, no un extra. Varias cápsulas corren en simult
 
 ## Fuentes
 
-### Modelos de comportamiento (base, no reinventar)
+### Modelo base: Caiani et al. (2016)
 
-Literatura de macroeconomía basada en agentes:
-- **CATS**: Delli Gatti, Gallegati et al., *Macroeconomics from the Bottom-up*.
-- **Keynes + Schumpeter (K+S)**: Dosi et al.
-- **Mark-0**: Gualdi, Bouchaud et al.
-- Modelos **agent-based stock-flow consistent** (ej.: Caiani et al.).
-
-Las reglas para fijar precios, contratar, invertir, consumir y ahorrar se toman de esta literatura y se adaptan, citando la fuente en el código y en `docs/`.
+**El modelo de comportamiento es Caiani, Godin, Caverzasi, Gallegati, Kinsella & Stiglitz (2016)**, *Agent based-stock flow consistent macroeconomics: Towards a benchmark model*, Journal of Economic Dynamics and Control 69 (decisión de Nico, 2026-11-12; motivos en `docs/cambio-de-enfoque.md`).
+- **Se porta fielmente y se verifica contra su código publicado:** [`S120/benchmark`](https://github.com/S120/benchmark) (agentes, estrategias, `model/mainBaseline.xml`) y [`S120/jmab`](https://github.com/S120/jmab). Si el paper y el código difieren, manda el código, y la diferencia se documenta.
+- **Toda diferencia con Caiani es una extensión documentada:** qué cambia, por qué (particularidad argentina, determinismo, período mensual, etc.), con fuente y con test. No se mezclan reglas de otros modelos en el núcleo sin pasar por esa vía.
+- **Proceso por regla:** en `docs/`, la ecuación de Caiani (y la línea de JMAB) al lado de la implementación, término por término; y un test con un caso calculado a mano (patrón de `test/rules-by-hand.test.ts`).
+- **Otros modelos como referencia, no como fuente de reglas del núcleo:** CATS (Delli Gatti et al.; Assenza et al., 2015), K+S (Dosi et al.), Mark-0 (Gualdi, Bouchaud et al.). Sirven para contrastar resultados, para candidatos a perillas de teoría (principio 2) y para extensiones, cada una documentada como tal.
 
 ### Datos (condiciones iniciales y validación)
 
@@ -161,6 +161,7 @@ Cada fase tiene un **criterio de salida**. **Ninguna fase arranca si la anterior
 - **Estado: criterio cumplido** (2026-11-10, 20 semillas: inflación anual de A entre 0,31% y 0,70%, de B entre 3,32% y 3,57%; ver "Resultados" en `docs/fase0-reglas.md`). Además de lo pedido, la Fase 0 sumó un calentamiento de 240 meses, una regla provisoria (R7, colchón de liquidez) y el indicador de emisión efectiva. Después de corregir R1, eliminar el colchón de R7 y pasar a 420 meses de calentamiento (2026-11-11), se sigue cumpliendo: A entre 0,18% y 0,55%, B entre 1,46% y 2,31%, B > A en las 20 semillas.
 
 ### Fase 1: Economía interna completa
+- **Base:** el port fiel de Caiani et al. (2016) (hogares, empresas de consumo y de capital, bancos, gobierno, banco central, crédito, inversión y quiebras), verificado contra JMAB. Primer criterio: reproducir sus resultados publicados. Lo que sigue son extensiones sobre esa base.
 - Sectores agro, industria, servicios y comercio.
 - Formalidad e informalidad.
 - Estratos con necesidades y nivel de vida.

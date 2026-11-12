@@ -256,7 +256,6 @@ describe('R12 con capital: venta forzosa de la planta', () => {
   });
 
   it('la empresa que entra usa la planta y la capitaliza quien la compró (si puede)', () => {
-    let s = warm(11);
     let seen = 0;
     let entered = 0;
     let pending: ({ owner: number | null; k: number } | null)[] = [];
@@ -267,12 +266,17 @@ describe('R12 con capital: venta forzosa de la planta', () => {
         if (p === null || p === undefined || !f.active || f.sector !== 'consumption') return;
         entered += 1;
         expect(f.capital).toBe(p.k); // la planta no se depreció mientras estuvo cerrada
+        expect(f.expectedSales).toBe(f.plannedOutput * f.price); // Sᵉ inicial = plan × precio
         if (p.owner !== null && f.ownerId === p.owner) seen += 1;
       });
     };
     const ENTRY = 1;
     const stages = around(ENTRY, pre, post);
-    for (let t = 0; t < MONTHS; t++) s = step(s, KNOBS, { stages });
+    // Varias semillas: el caso "lo capitaliza quien compró la planta" no aparece en todas.
+    for (let seed = 11; seed < 41 && seen === 0; seed++) {
+      let s = warm(seed);
+      for (let t = 0; t < MONTHS; t++) s = step(s, KNOBS, { stages });
+    }
     expect(entered).toBeGreaterThan(0);
     expect(seen).toBeGreaterThan(0);
   });

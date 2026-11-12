@@ -87,6 +87,33 @@ export interface VariantRun {
   lateForcedSavingShare: number;
   /** Fracción de empresas de consumo activas que agotaron stock, últimos 10 años. */
   lateSoldOutShare: number;
+  /**
+   * Trampa sin caja: empresas de consumo activas que llevan ≥ 12 meses seguidos
+   * sin producir (promedio por mes, últimos 10 años) y máximo de meses seguidos.
+   */
+  lateIdleFirms: number;
+  maxIdleMonths: number;
+  /**
+   * Empresas nuevas (50 años visibles, los dos sectores): cuántas entraron, cuántas
+   * tuvieron algún mes sin producir en sus primeros 12 meses, cuántas quedaron
+   * paradas ≥ 6 meses seguidos dentro de ese primer año (trampa) y cuántas
+   * quebraron en su primer año.
+   */
+  entrants: number;
+  entrantsWithIdleMonth: number;
+  entrantsTrapped: number;
+  entrantsBankruptFirstYear: number;
+  /**
+   * Zombis: empresas de consumo activas con deuda los últimos 24 meses seguidos y
+   * ventas esperadas menores que hace 24 meses (no quebraron). Promedio por mes y
+   * máximo, últimos 10 años.
+   */
+  lateZombies: number;
+  maxZombies: number;
+  /** Inversión (ventas de bienes de capital) / ventas de bienes de consumo, últimos 10 años. */
+  lateInvestmentShare: number;
+  /** Demanda registrada por las empresas de capital / unidades pedidas (doble conteo de las colas), 50 años visibles. */
+  capitalDemandOvercount: number;
 }
 
 const VISIBLE = 600;
@@ -227,16 +254,86 @@ export function runVariant(
   let fireSalesPooled = 0;
   let ordered = 0;
   let bought = 0;
+  let registered = 0;
   const capitalSeries: number[] = [];
   const kShare: number[] = [];
   const util: number[] = [];
   const atCap: number[] = [];
   const pkRatio: number[] = [];
   const forcedShare: number[] = [];
+  const idleFirms: number[] = [];
+  // Seguimiento de empresas nuevas: mes de entrada, meses sin producir, racha.
+  type Young = { age: number; idleMonths: number; run: number; trapped: boolean };
+  const young = new Map<number, Young>();
+  let entrants = 0;
+  let entrantsWithIdle = 0;
+  let entrantsTrapped = 0;
+  let entrantsBankrupt = 0;
+  // Zombis: historia de 25 meses de (deuda > 0, ventas esperadas) por empresa.
+  const zHist = new Map<number, { debt: boolean; se: number }[]>();
+  const zombieCounts: number[] = [];
+  const investShare: number[] = [];
+  const idleRun = new Map<number, number>();
+  let maxIdle = 0;
   const soldOut: number[] = [];
   for (let t = 1; t <= VISIBLE; t++) {
     const wasActive = s.firms.map((f) => f.active);
     s = step(s, knobs, { stages });
+    for (const f of s.firms) {
+      if (!f.active || f.sector !== 'consumption') {
+        idleRun.delete(f.id);
+        continue;
+      }
+      const n = f.wageBill === 0 ? (idleRun.get(f.id) ?? 0) + 1 : 0;
+      idleRun.set(f.id, n);
+      maxIdle = Math.max(maxIdle, n);
+    }
+    if (t > VISIBLE - 120) idleFirms.push([...idleRun.values()].filter((n) => n >= 12).length);
+    // Empresas nuevas.
+    s.firms.forEach((f, i) => {
+      if (!wasActive[i] && f.active) {
+        entrants += 1;
+        young.set(f.id, { age: 0, idleMonths: 0, run: 0, trapped: false });
+      }
+    });
+    for (const f of s.firms) {
+      const y = young.get(f.id);
+      if (y === undefined) continue;
+      if (!f.active) {
+        entrantsBankrupt += 1;
+        if (y.idleMonths > 0) entrantsWithIdle += 1;
+        if (y.trapped) entrantsTrapped += 1;
+        young.delete(f.id);
+        continue;
+      }
+      y.age += 1;
+      if (f.wageBill === 0) {
+        y.idleMonths += 1;
+        y.run += 1;
+        if (y.run >= 6) y.trapped = true;
+      } else {
+        y.run = 0;
+      }
+      if (y.age >= 12) {
+        if (y.idleMonths > 0) entrantsWithIdle += 1;
+        if (y.trapped) entrantsTrapped += 1;
+        young.delete(f.id);
+      }
+    }
+    // Zombis.
+    let zombies = 0;
+    for (const f of s.firms) {
+      if (!f.active || f.sector !== 'consumption') {
+        zHist.delete(f.id);
+        continue;
+      }
+      const h = zHist.get(f.id) ?? [];
+      h.push({ debt: f.positions.loans < 0, se: f.expectedSales });
+      if (h.length > 25) h.shift();
+      zHist.set(f.id, h);
+      if (h.length === 25 && h.slice(1).every((x) => x.debt) && h[24]!.se < h[0]!.se) zombies += 1;
+    }
+    if (t > VISIBLE - 120) zombieCounts.push(zombies);
     s.firms.forEach((f, i) => {
       if (wasActive[i] && !f.active) {
         if (f.sector === 'capital') bankruptK += 1;
@@ -247,6 +344,7 @@ export function runVariant(
     fireSalesPooled += s.credit.fireSalesPooled;
     ordered += s.credit.capitalOrdered;
     bought += s.credit.capitalBought;
+    registered += s.credit.capitalDemandRegistered;
     capitalSeries.push(Math.max(1, s.firms.reduce((a, f) => a + (f.sector === 'consumption' ? f.capital : 0), 0)));
     if (insolventAt === null && netFinancialWorth(s.bank) < 0) insolventAt = burnIn + t;
     prices.push(s.stats.priceIndex);
@@ -270,6 +368,9 @@ export function runVariant(
       util.push(cons.length > 0 ? mean(cons.map((f) => f.lastOutput / (capital.capitalProductivity * f.capital))) : 0);
       atCap.push(cons.length > 0 ? cons.filter((f) => f.lastOutput >= Math.floor(capital.capitalProductivity * f.capital + 1e-9) - 1e-9 && f.lastOutput > 0).length / cons.length : 0);
       pkRatio.push(s.stats.capitalPriceIndex / s.stats.priceIndex);
+      const kSales = s.firms.reduce((x, f) => x + (f.sector === 'capital' ? f.revenue : 0), 0);
+      const cSales = s.firms.reduce((x, f) => x + (f.sector === 'consumption' ? f.revenue : 0), 0);
+      investShare.push(cSales > 0 ? kSales / cSales : 0);
       forcedShare.push(wanted > 0 ? forced / wanted : 0);
       const activeC = s.firms.filter((f) => f.active && f.sector === 'consumption');
       soldOut.push(activeC.length > 0 ? activeC.filter((f) => f.soldOut).length / activeC.length : 0);
@@ -309,5 +410,15 @@ export function runVariant(
     lateCapitalPriceRatio: mean(pkRatio),
     lateForcedSavingShare: mean(forcedShare),
     lateSoldOutShare: mean(soldOut),
+    lateIdleFirms: mean(idleFirms),
+    maxIdleMonths: maxIdle,
+    entrants,
+    entrantsWithIdleMonth: entrantsWithIdle,
+    entrantsTrapped,
+    entrantsBankruptFirstYear: entrantsBankrupt,
+    lateZombies: mean(zombieCounts),
+    maxZombies: Math.max(0, ...zombieCounts),
+    lateInvestmentShare: mean(investShare),
+    capitalDemandOvercount: ordered > 0 ? registered / ordered : 0,
   };
 }
