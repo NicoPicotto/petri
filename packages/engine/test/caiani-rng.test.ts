@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../src/rng';
-import { OracleCaianiRng, PrngCaianiRng, parseDraws, type DrawRecord } from '../src/caiani/rng';
+import { OracleCaianiRng, PrngCaianiRng, jmabShuffle, parseDraws, type DrawRecord } from '../src/caiani/rng';
 
 const id = (x: number) => x;
 
@@ -162,4 +162,52 @@ describe.skipIf(!existsSync(REAL))('Rng semántico con el registro real del orá
     expect(r.remaining).toBe(0);
     expect(r.pDiffs).toEqual([]);
   }, 60_000);
+});
+
+describe('mezcla de AgentList (algoritmo de JMAB, sesgado a propósito)', () => {
+  it('caso a mano: [a, b, c, d] con u = 0,9; 0,1; 0,6', () => {
+    // i = 0: ⌊4·0,9⌋ = 3 → [d, b, c, a]; i = 1: ⌊4·0,1⌋ = 0 → [b, d, c, a]; i = 2: ⌊4·0,6⌋ = 2 → igual.
+    const u = [0.9, 0.1, 0.6];
+    let k = 0;
+    expect(jmabShuffle(['a', 'b', 'c', 'd'], () => u[k++]!)).toEqual(['b', 'd', 'c', 'a']);
+    expect(k).toBe(3); // n − 1 sorteos
+  });
+
+  it('n = 3: reproduce la distribución exacta de JMAB, que no es uniforme', () => {
+    // Exacta: los 3² = 9 caminos equiprobables (u en el centro de cada tercio).
+    const exact = new Map<string, number>();
+    for (const a of [0, 1, 2]) {
+      for (const b of [0, 1, 2]) {
+        const u = [(a + 0.5) / 3, (b + 0.5) / 3];
+        let k = 0;
+        const key = jmabShuffle([0, 1, 2], () => u[k++]!).join('');
+        exact.set(key, (exact.get(key) ?? 0) + 1 / 9);
+      }
+    }
+    expect([...exact.values()].some((p) => Math.abs(p - 1 / 6) > 0.02)).toBe(true); // sesgada
+    const r = new PrngCaianiRng(Rng.fromSeed(3));
+    expect(r.shuffleAlgorithm).toBe('jmab');
+    const N = 90_000;
+    const freq = new Map<string, number>();
+    for (let n = 0; n < N; n++) {
+      const key = r.shuffle('X.y', 'buyers', [0, 1, 2], id).join('');
+      freq.set(key, (freq.get(key) ?? 0) + 1);
+    }
+    for (const [key, p] of exact) {
+      const f = (freq.get(key) ?? 0) / N;
+      expect(Math.abs(f - p)).toBeLessThan(4 * Math.sqrt((p * (1 - p)) / N));
+    }
+  });
+
+  it('alternativa uniforme (Fisher–Yates), para medir el efecto del sesgo', () => {
+    const r = new PrngCaianiRng(Rng.fromSeed(3), { shuffle: 'uniform' });
+    const N = 60_000;
+    const freq = new Map<string, number>();
+    for (let n = 0; n < N; n++) {
+      const key = r.shuffle('X.y', 'buyers', [0, 1, 2], id).join('');
+      freq.set(key, (freq.get(key) ?? 0) + 1);
+    }
+    expect(freq.size).toBe(6);
+    for (const c of freq.values()) expect(Math.abs(c / N - 1 / 6)).toBeLessThan(4 * Math.sqrt((1 / 6) * (5 / 6) / N));
+  });
 });

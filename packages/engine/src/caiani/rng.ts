@@ -6,7 +6,8 @@
  * (`Clase.método`, como lo escribe el oráculo).
  *
  * - Modo PRNG (`PrngCaianiRng`): xoshiro128** de rng.ts como fuente de uniformes; la normal plegada
- *   por inversa (normal.ts), un uniforme por sorteo.
+ *   por inversa (normal.ts), un uniforme por sorteo. Las mezclas de listas de agentes usan por defecto
+ *   el algoritmo (sesgado) de JMAB; ver `ShuffleAlgorithm`.
  * - Modo oráculo (`OracleCaianiRng`, V3): devuelve, en orden, los valores que registró el `.jar`
  *   instrumentado (`reference/p0/oracle`, `oracle.Draws`), y verifica que el tipo y el lugar
  *   coincidan. No importa con qué método ni con cuántos uniformes los generó Colt: se consume el
@@ -41,8 +42,45 @@ export interface CaianiRng {
   uniform01(site: string, what: string): number;
 }
 
+/**
+ * Algoritmo de `AgentList.shuffle` (modo PRNG):
+ * - `'jmab'` (por defecto): el de JMAB (`net.sourceforge.jabm.agent.AgentList.shuffle`): para cada
+ *   i < n − 1, intercambia la posición i con ⌊n·u⌋, una posición al azar de **toda** la lista. **No es
+ *   uniforme** (hay n^(n−1) caminos para n! órdenes). Es un defecto de JMAB que se reproduce a
+ *   propósito, para que la distribución de los órdenes sea la del `.jar` (decisión de Nico, 2026-11-13).
+ * - `'uniform'`: Fisher–Yates, para medir cuánto influye el sesgo.
+ * `Collections.shuffle` (empleados) es uniforme en Java y usa siempre Fisher–Yates.
+ */
+export type ShuffleAlgorithm = 'jmab' | 'uniform';
+
+export interface PrngOptions {
+  shuffle?: ShuffleAlgorithm;
+}
+
+/**
+ * `AgentList.shuffle` de JMAB, en el lugar: `choice = (int)((long) n · prng.raw())`. `next` da
+ * uniformes en [0, 1). n − 1 sorteos.
+ */
+export function jmabShuffle<T>(items: T[], next: () => number): T[] {
+  const n = items.length;
+  for (let i = 0; i < n - 1; i++) {
+    const choice = Math.floor(n * next());
+    const tmp = items[i] as T;
+    items[i] = items[choice] as T;
+    items[choice] = tmp;
+  }
+  return items;
+}
+
 export class PrngCaianiRng implements CaianiRng {
-  constructor(readonly rng: Rng) {}
+  readonly shuffleAlgorithm: ShuffleAlgorithm;
+
+  constructor(
+    readonly rng: Rng,
+    options: PrngOptions = {},
+  ) {
+    this.shuffleAlgorithm = options.shuffle ?? 'jmab';
+  }
 
   foldedNormal(_site: string, sigma: number): number {
     return foldedNormalFromUniform(this.rng.nextFloat(), sigma);
@@ -55,7 +93,8 @@ export class PrngCaianiRng implements CaianiRng {
   }
 
   shuffle<T>(_site: string, _what: string, items: T[], _idOf?: (t: T) => number): T[] {
-    return this.rng.shuffle(items);
+    if (this.shuffleAlgorithm === 'uniform') return this.rng.shuffle(items);
+    return jmabShuffle(items, () => this.rng.nextFloat());
   }
 
   shuffleEmployees<T>(_site: string, _ownerId: number, items: T[], _idOf?: (t: T) => number): T[] {
@@ -94,9 +133,11 @@ export interface DrawRecord {
   type: DrawType;
   site: string;
   detail: string;
+  /** Índice del evento del tick (orden de modelFile.xml); −1 fuera de los eventos. Falta en los registros de P0/P1. */
+  event?: number;
 }
 
-/** Lee el draws.tsv del oráculo: `secuencia, tick, tipo, lugar, detalle` separados por tabuladores. */
+/** Lee el draws.tsv del oráculo: `secuencia, tick, tipo, lugar, detalle[, evento]` separados por tabuladores. */
 export function parseDraws(text: string): DrawRecord[] {
   const out: DrawRecord[] = [];
   const lines = text.split('\n');
@@ -104,10 +145,12 @@ export function parseDraws(text: string): DrawRecord[] {
     const line = lines[n] as string;
     if (line === '') continue;
     const f = line.split('\t');
-    if (f.length !== 5 || !DRAW_TYPES.includes(f[2] as string)) {
+    if ((f.length !== 5 && f.length !== 6) || !DRAW_TYPES.includes(f[2] as string)) {
       throw new Error(`draws.tsv, línea ${n + 1}: formato inesperado: ${line.slice(0, 120)}`);
     }
-    out.push({ seq: Number(f[0]), tick: Number(f[1]), type: f[2] as DrawType, site: f[3] as string, detail: f[4] as string });
+    const r: DrawRecord = { seq: Number(f[0]), tick: Number(f[1]), type: f[2] as DrawType, site: f[3] as string, detail: f[4] as string };
+    if (f.length === 6) r.event = Number(f[5]);
+    out.push(r);
   }
   return out;
 }

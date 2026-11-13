@@ -9,7 +9,7 @@
 
 import type { AgentId, Ledger } from './ledger';
 import type { Micro } from './money';
-import type { InitialiserParams, StructureParams } from './params';
+import type { InitialiserParams, RuleParams, StructureParams } from './params';
 
 /** Ids de los valores rezagados (`modellone.StaticValues.LAG_*`). */
 export const LAG = {
@@ -46,6 +46,21 @@ export const EXPECTATION = {
   DEPOSITS: 3,
   REALSALES: 4,
 } as const;
+
+/** Ids de los mercados (`modellone.StaticValues.MKT_*`): índices de `active`. */
+export const MKT = {
+  CAPGOOD: 0,
+  CONSGOOD: 1,
+  CREDIT: 2,
+  DEPOSIT: 3,
+  LABOR: 4,
+  BONDS: 5,
+  ADVANCES: 6,
+} as const;
+export const MARKET_COUNT = 7;
+
+/** Observaciones que guarda cada rezago (`TreeMapPassedValues.nbLags`; 4 en todo el XML). */
+export const LAG_DEPTH = 4;
 
 /**
  * Valores rezagados (`TreeMapPassedValues`): id del rezago → (período → valor). Son double: es la
@@ -94,7 +109,15 @@ export interface CapitalGoodStock {
   obsolete: boolean;
 }
 
-export interface HouseholdState {
+/** Lo que comparten todos los agentes (`SimpleAbstractAgent`). */
+export interface AgentFlags {
+  /** `activeAgent[MKT_*]`: si participa del mercado en este tick. */
+  active: boolean[];
+  /** `SimpleAbstractAgent.defaulted`. */
+  defaulted: boolean;
+}
+
+export interface HouseholdState extends AgentFlags {
   id: AgentId;
   /** Salario de reserva (`AbstractHousehold.wage`). */
   wage: number;
@@ -109,8 +132,12 @@ export interface HouseholdState {
   expectations: Expectations;
 }
 
-export interface FirmState {
+export interface FirmState extends AgentFlags {
   id: AgentId;
+  /** `AbstractFirm.desiredOutput` (unidades reales). */
+  desiredOutput: number;
+  /** `AbstractFirm.bailoutCost`: costo del rescate en el tick (lo pagan los hogares a los bancos). */
+  bailoutCost: Micro;
   /** Orden de JMAB (`AbstractFirm.employees`); se mezcla al despedir y al pagar salarios. */
   employees: AgentId[];
   /** SM_CONSGOOD: inventario de la empresa de consumo. */
@@ -127,15 +154,33 @@ export interface FirmState {
   expectations: Expectations;
 }
 
-export interface BankState {
+export interface BankState extends AgentFlags {
   id: AgentId;
   lags: Lags;
   expectations: Expectations;
+  /** `Bank.liquidityRatio` = reservas / depósitos. */
+  liquidityRatio: number;
+  /** `Bank.capitalRatio` = patrimonio del tick anterior / préstamos. */
+  capitalRatio: number;
+  bailoutCost: Micro;
+  /** `AbstractBank.currentNonPerformingLoans` del tick. */
+  currentNonPerformingLoans: Micro;
 }
 
-export interface GovernmentState {
+export interface GovernmentState extends AgentFlags {
   id: AgentId;
   employees: AgentId[];
+}
+
+export interface CentralBankState extends AgentFlags {
+  id: AgentId;
+  /** `CentralBank.interestsOnAdvances` / `interestsOnBonds`: ganancias del BC del tick (van al gobierno). */
+  interestsOnAdvances: Micro;
+  interestsOnBonds: Micro;
+}
+
+export function newFlags(): AgentFlags {
+  return { active: new Array<boolean>(MARKET_COUNT).fill(false), defaulted: false };
 }
 
 /**
@@ -154,6 +199,7 @@ export type SimpleMarket = (typeof SIMPLE_MARKETS)[number];
 export interface CaianiState {
   init: InitialiserParams;
   structure: StructureParams;
+  rules: RuleParams;
   /** Ronda de JMAB (0 después de la inicialización). */
   round: number;
   ledger: Ledger;
@@ -176,6 +222,7 @@ export interface CaianiState {
   capitalFirms: FirmState[];
   banks: BankState[];
   government: GovernmentState;
+  centralBank: CentralBankState;
   /** Rezagos agregados de la simulación (`MacroSimulation.passedValues`). */
   aggregateLags: Lags;
 }
@@ -188,9 +235,30 @@ export function goodValue(g: ConsumptionGoodStock | CapitalGoodStock, holder: Ag
   return holder === g.producer ? g.unitCost * g.quantity : g.value;
 }
 
+/**
+ * `TreeMapPassedValues.addObservation`: guarda el valor del período; si ya había `LAG_DEPTH`
+ * observaciones, antes saca la más vieja (aunque el período nuevo ya estuviera: así lo hace JMAB).
+ */
 export function setLag(lags: Lags, id: number, period: number, value: number): void {
   const m = lags[id] ?? (lags[id] = {});
+  const periods = Object.keys(m);
+  if (periods.length === LAG_DEPTH) {
+    let first = Infinity;
+    for (const k of periods) first = Math.min(first, Number(k));
+    delete m[first];
+  }
   m[period] = value;
+}
+
+/**
+ * `SimpleAbstractAgent.getPassedValue(id, lag)`: la observación del período max(0, ronda − rezago).
+ * Si no está, JMAB tira una excepción (desboxeo de null); acá también.
+ */
+export function getLag(lags: Lags, id: number, round: number, lag: number): number {
+  const period = Math.max(0, round - lag);
+  const v = lags[id]?.[period];
+  if (v === undefined) throw new Error(`rezago ${id}: no hay observación del período ${period} (ronda ${round}, rezago ${lag})`);
+  return v;
 }
 
 /** `SimpleAdaptiveExpectation.updateExpectation`. */

@@ -135,3 +135,21 @@ export const STRUCTURE: Readonly<StructureParams> = {
   expectationPeriods: 4,
   expectationLambda: 0.25,
 };
+
+/**
+ * Parámetros de comportamiento (P3), agregados regla por regla en el orden del tick. Cada uno con su
+ * línea de modelFile.xml.
+ */
+export interface RuleParams {
+  /** `TargetExpectedInventoriesOutputStrategy.inventoryShare`: inventario objetivo / ventas esperadas. */
+  inventoryShareCapital: number; // 1800
+  inventoryShareConsumption: number; // 2094
+  /** `CentralBank.advancesInterestRate`: tasa con que el BC calcula su ganancia por adelantos. */
+  centralBankAdvancesRate: number; // 2966
+}
+
+export const RULES: Readonly<RuleParams> = {
+  inventoryShareCapital: 0.1,
+  inventoryShareConsumption: 0.1,
+  centralBankAdvancesRate: 0.005,
+};

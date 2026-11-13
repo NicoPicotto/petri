@@ -12,9 +12,13 @@
 - [ ] **P3, a verificar con el oráculo:** en qué etapas quedan reservas negativas (bancos y cuenta del gobierno) y si después del mercado de adelantos vuelven a ser ≥ 0 (contadores `negativeReservesBank` y `negativeReservesGovernment` del ledger).
 - [ ] **P3, arnés de V3:** contador de decisiones discretas que se dan vuelta dentro de la tolerancia (decisión de Nico, 2026-11-13); el `Rng` en modo oráculo ya anota las Bernoulli con p distinta (`pDiffs`).
 - [x] **P2, inicialización (V1 cumplido, 2026-11-13):** `caiani/init.ts`, verificado contra el volcado del oráculo agente por agente ([inicializacion.md](inicializacion.md)). Corrige lo anotado en P1: los préstamos iniciales **no** se condonan, cierran en cero a la edad 20.
-- [ ] **Decidir (P2 → P3): algoritmo de las mezclas en modo PRNG.** `AgentList.shuffle` de JMAB no es uniforme (intercambia cada posición con una de toda la lista); el `Rng` del port usa Fisher–Yates. Propuesta: usar el algoritmo de JMAB en modo PRNG para que la distribución de órdenes sea la del `.jar` (importa para V4). Ver [inicializacion.md](inicializacion.md), sec. 6.
+- [x] **Algoritmo de las mezclas en modo PRNG** (Nico, 2026-11-13): el de JMAB por defecto, defecto reproducido a propósito, con un interruptor `'uniform'`. Ver [inicializacion.md](inicializacion.md), sec. 3.
+- [ ] **Medir cuánto influye el sesgo de las mezclas** (interruptor `shuffle: 'uniform'`), cuando el port corra entero (P4).
+- [x] **Empleo público inicial** (pedido de Nico): el gobierno arranca con 0 y contrata 1.360 en el tick 1; al final del tick 1 el estado es el del paper (u₀ = 8%). Ver [inicializacion.md](inicializacion.md), sec. 6.
+- [ ] **P3, evento por evento** ([reglas-caiani.md](reglas-caiani.md)): evento 0 hecho; siguen 1 (precios de capital) y 2 (precios de consumo).
+- [ ] **P3, impuestos:** portar la rama de `Households.payTaxes` con efectivo o rechazarla con un error (nunca se ejecuta en la corrida base).
 - [ ] **P3: valor contable de los bienes reales** en `double` (como JMAB, hoy) o en µ; se decide cuando entren sus flujos.
-- [x] **Efectivo de los hogares** (rama rara de `Households.payTaxes`): nadie arranca con efectivo y `DepositMechanism` lo mantiene en 0 (`shareDeposits = 1`). Verificación empírica en [inicializacion.md](inicializacion.md), sec. 5.
+- [x] **Efectivo de los hogares** (rama rara de `Households.payTaxes`): nadie arranca con efectivo y `DepositMechanism` lo mantiene en 0 (`shareDeposits = 1`). Verificado con el oráculo: ningún efectivo distinto de cero en 400 trimestres ([inicializacion.md](inicializacion.md), sec. 5).
 - [ ] **(Opcional) Origen de la tabla publicada:** no se sabe qué versión o configuración la generó. No bloquea el port.
 - [x] **Escala monetaria del ledger** (P1; **aprobada por Nico el 2026-11-12**):
   - **Propuesta:** saldos enteros con 1 unidad de Caiani = 10⁶ unidades del ledger.

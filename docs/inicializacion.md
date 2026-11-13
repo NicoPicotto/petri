@@ -40,7 +40,7 @@ Parámetros: bean `macroAgentInitialiser`, líneas 1381–1420 del XML (`params.
 
 `uniformDistr = 0`: cada `(1 + distr.nextDouble())` vale exactamente 1 (Colt igual consume un número del generador, pero el resultado no depende de él). El port no sortea y rechaza `uniformDistr ≠ 0`, que no se usa.
 
-**Resultado:** 6.000 ocupados (1.000 en capital, 5.000 en consumo) y 2.000 desocupados; el gobierno contrata en el tick 1.
+**Resultado:** 6.000 ocupados (1.000 en capital, 5.000 en consumo) y 2.000 desocupados; el gobierno contrata 1.360 en el tick 1 (sec. 6).
 
 ## 3. Diferencias con JMAB (adaptaciones documentadas)
 
@@ -49,7 +49,7 @@ Parámetros: bean `macroAgentInitialiser`, líneas 1381–1420 del XML (`params.
 3. **`LAG_NETWEALTH` y la expectativa de depósitos** se calculan a partir de los saldos en µ, como lo van a hacer las reglas de P3 (diferencia relativa ≤ 3·10⁻⁷).
 4. **Bienes reales**: su valor contable es un `double`, como en JMAB, hasta que P3 decida cómo se registran sus flujos. `goodValue` replica `getValue()`: un bien que todavía tiene su productor (inventario) vale a costo, costo unitario × cantidad, no `value`.
 5. **Listas de los `BrochureMarket`**: no se guardan aparte; son las de las poblaciones (`state.populations`), igual que en JMAB, sin referencias compartidas en el estado serializable.
-6. **Mezclas en modo PRNG**: el `Rng` del port usa Fisher–Yates (uniforme). `AgentList.shuffle` de JMAB es otro algoritmo: para cada i, intercambia con una posición al azar de **toda** la lista. No es uniforme. **Pendiente de decisión** (ver sec. 6). En modo oráculo no importa: se consume el orden registrado.
+6. **Mezclas en modo PRNG: se reproduce a propósito un defecto de JMAB** (decisión de Nico, 2026-11-13). `AgentList.shuffle` de JMAB, para cada i < n − 1, intercambia la posición i con ⌊n·u⌋, una posición al azar de **toda** la lista. No es uniforme: hay n^(n−1) caminos para n! órdenes. El modo PRNG del `Rng` usa por defecto ese mismo algoritmo (`jmabShuffle`), para que la distribución de los órdenes sea la del `.jar`. Hay un interruptor (`new PrngCaianiRng(rng, { shuffle: 'uniform' })`, Fisher–Yates) para medir más adelante cuánto influye el sesgo. `Collections.shuffle` (empleados) sí es uniforme en Java y queda con Fisher–Yates. En modo oráculo no importa: se consume el orden registrado. Test: para n = 3 el modo por defecto reproduce la distribución exacta de JMAB (9 caminos equiprobables), y el uniforme da 1/6 por orden.
 
 ## 4. Verificación (V1)
 
@@ -82,9 +82,27 @@ Además, casos calculados a mano (depósito de un hogar, préstamo j = 1, bonos 
 
 **Durante la corrida, leyendo el código:** el único mecanismo que mueve efectivo es `DepositMechanism`, que lleva el efectivo al deseado. Para los hogares el deseado es `liquidez − shareDeposits·liquidez` con `shareDeposits = 1` (línea 2700 del XML): da exactamente 0 en `double`. Las empresas devuelven 0 fijo (`getCashAmount`). Los salarios, el seguro de desempleo y los dividendos se acreditan en depósitos. Así que la rama de `payTaxes` no se ejecutaría nunca.
 
-**Verificación empírica:** PENDIENTE (corrida de 400 trimestres con `CashWatch`).
+**Verificación empírica (2026-11-13):** corrida completa del oráculo, semilla 12345, 400 trimestres (`p2-cash`), con `CashWatch` después de cada uno de los 138 eventos de cada tick: **247.152.000 chequeos, ningún efectivo distinto de cero** en hogares, empresas ni bancos, incluso con quiebras de empresas en el medio. La rama rara de `payTaxes` no se ejecuta en la corrida base. El port igual la tiene que portar (con el depósito que queda en negativo), o rechazarla con un error si alguna vez hay efectivo; se decide en P3, en el evento de impuestos. Además, los 36 CSV de los ticks 1 a 6 coinciden con la corrida "a" de P0: la instrumentación nueva no cambia la simulación.
 
-## 6. Pendiente de decisión
+## 6. Empleo público: el gobierno arranca con 0 y contrata 1.360 en el tick 1
 
-- **Algoritmo de las mezclas en modo PRNG** (sec. 3, punto 6). Propuesta: que el modo PRNG use el mismo algoritmo que `AgentList.shuffle` de JMAB (para cada i < n − 1, intercambiar con la posición ⌊n·u⌋), para que la distribución de los órdenes sea la del `.jar`. Importa para V4: los mezcladores de cada tick usan ese algoritmo, y con listas cortas (10 bancos, 20 empresas de capital) el sesgo no es despreciable. `Collections.shuffle` (empleados) sí es uniforme y queda con Fisher–Yates.
+El plan decía que el gobierno contrata 1.360. El inicializador no le da empleados (`gEmpl` no está en el XML: vale 0). Pero en cada tick, en `governmentLaborTic` (evento 13), `GovernmentAntiCyclical.computeLaborDemand` (líneas 146–165) hace esto:
+1. despide al azar una fracción `turnoverLabor` = 0,05 de sus empleados (bean `turnoverVal`, XML 2018; el mismo de las empresas);
+2. fija la demanda en `fixedLaborDemand − empleados` (XML 2870: 1.360), o despide el excedente.
+
+Con el oráculo (semilla 12345, `p3-gov`, estado al final de cada trimestre):
+
+| | t = 0 | trimestre 1 | trimestre 10 | trimestre 100 |
+|---|---|---|---|---|
+| Empleados públicos | 0 | 1.360 | 1.360 | 1.360 |
+| En empresas | 6.000 | 6.000 | 5.860 | 6.163 |
+| Desocupados | 2.000 | 640 | 780 | 477 |
+| Desempleo (CSV del oráculo) | — | 8,00% | 9,75% | 5,96% |
+
+**Contra el paper:** el cuadro 3 dice N_g = 1.360 empleados públicos (constante) y desempleo inicial u₀ = 0,08. Eso equivale a arrancar con los 1.360 ya empleados: 7.360 ocupados y 640 desocupados. El código arranca en t = 0 con 2.000 desocupados (25%), pero al final del tick 1 está exactamente en la situación del paper (8%). La diferencia solo afecta lo que pasa dentro del tick 1: el rezago `LAG_EMPLOYED` de los 2.000 vale 0, y quiénes terminan como empleados públicos sale del mercado de trabajo del tick 1. El port sigue al código, como manda la regla.
+
+**Corrección al plan:** la rotación de los empleados públicos es 0,05 (`turnoverVal`, cuadro 3 del paper: ϑ = 0,05), no 10%.
+
+## 7. Pendiente de decisión
+
 - **Valor contable de los bienes reales** en `double` o en µ: se decide en P3, cuando entren sus flujos (venta, inversión, amortización, revaluación de inventarios).

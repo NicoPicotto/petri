@@ -59,6 +59,7 @@ Texto extraído en `reference/p0/paper-wp.txt` (`pdftotext -layout`). Secuencia 
 | Trabajadores iniciales de las empresas de consumo | 4.000 (cuadro 3) | 5.000 (inicializador; la matriz de flujos del propio paper usa 25.000 de salarios = 5.000 × 5). Errata del cuadro |
 | Réplicas | 100 (sec. 5) | 25 en el lanzador (`baseline.prop`); 25 en las sensibilidades (sec. 5.3) |
 | Quiebra por impuestos | no se menciona | sí |
+| Empleados públicos iniciales | 1.360, con desempleo inicial u₀ = 0,08 (cuadro 3) | 0 en t = 0 (`gEmpl` no está en el XML); los 1.360 se contratan en el tick 1 y el desempleo queda en 8% ([inicializacion.md](inicializacion.md), sec. 6) |
 | Tasa de los préstamos | eq. 3.12, ajuste según el ratio de capital contra el promedio | igual; el premio por empresa está comentado |
 
 **Pendiente de leer con detalle:** sección 5 (resultados y hechos estilizados), para fijar los objetivos de V4 además de las tablas xlsx.
@@ -139,3 +140,4 @@ Texto extraído en `reference/p0/paper-wp.txt` (`pdftotext -layout`). Secuencia 
   - La semilla 778 da otros resultados (32 de 36 CSV distintos).
 - **Volumen:** ~35.000 sorteos por trimestre con el registro completo; para V3 se registra solo la ventana de ticks que se compara.
 - **Volcado del estado (P2, 2026-11-13):** `oracle.StateDump` vuelca el estado completo en JSON Lines después de la inicialización y, con `DUMP_TICKS="1,50"`, al principio de esos ticks (lo que necesita V3). La mezcla de hogares del inicializador ahora se registra (`shuffle initHouseholds`); los sorteos de la inicialización tienen tick −1 (`logFrom = -1` para incluirlos). `oracle.CashWatch` registra el efectivo distinto de cero después de cada evento. Se compila con `reference/tools/build-oracle.sh`. Detalle en [inicializacion.md](inicializacion.md), sec. 4.
+- **V3 por evento (P3, 2026-11-13):** `draws.tsv` lleva el índice del evento en una sexta columna; `DUMP_EVENTS="t:e"` vuelca el estado después del evento e del tick t; cada ítem del volcado tiene un `@oid` para reconstruir los contratos. Método en [reglas-caiani.md](reglas-caiani.md).

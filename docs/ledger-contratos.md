@@ -187,7 +187,7 @@ Módulo `packages/engine/src/caiani/`: `money.ts`, `ledger.ts` (lleva el encabez
 
 **Rng semántico.**
 - Interfaz `CaianiRng`: `foldedNormal`, `bernoulli`, `shuffle`, `shuffleEmployees`, `sample` y `uniform01`. Cada pedido lleva el lugar de JMAB (`Clase.método`).
-- Modo PRNG: xoshiro de `rng.ts`, un uniforme por normal; la Bernoulli con p ≤ 0 o p ≥ 1 no consume azar, igual que JMAB.
+- Modo PRNG: xoshiro de `rng.ts`, un uniforme por normal; la Bernoulli con p ≤ 0 o p ≥ 1 no consume azar, igual que JMAB. Las mezclas de listas de agentes usan por defecto el algoritmo sesgado de `AgentList.shuffle` (decisión de Nico, P2; [inicializacion.md](inicializacion.md), sec. 3).
 - Modo oráculo: verifica el tipo, el lugar, el tick (si se fija) y los agentes de cada lista. El σ de la normal no se registra, así que no se puede verificar. La p de la Bernoulli se compara con tolerancia relativa de 10⁻⁶ y las diferencias se anotan en `pDiffs`.
 - Los ids son los de JMAB: el arnés de V3 pasa la correspondencia.
 - **Verificado con el registro real** de la corrida "a" del oráculo (212.680 sorteos, ticks 1 a 6): el test los relee en orden y comprueba que cada valor llega exacto. Por separado, los dígitos de los 109.998 valores `double` registrados por Java coinciden con la representación más corta (la de JS), así que `parseFloat` recupera el mismo `double`.
@@ -200,5 +200,5 @@ Módulo `packages/engine/src/caiani/`: `money.ts`, `ledger.ts` (lleva el encabez
 - `Rng` en los dos modos. El test con el registro real se saltea si falta `reference/`.
 
 **Para P3, visto en el código de JMAB:**
-- `Households.payTaxes`, cuando el depósito no alcanza y el hogar tiene efectivo, deja el depósito en negativo: primero lo pone en `taxes` y después en `depValue − taxes`, con el valor viejo. Hay que ver si en la corrida base los hogares llegan a tener efectivo. Si no tienen, no importa.
+- `Households.payTaxes`, cuando el depósito no alcanza y el hogar tiene efectivo, deja el depósito en negativo: primero lo pone en `taxes` y después en `depValue − taxes`, con el valor viejo. Hay que ver si en la corrida base los hogares llegan a tener efectivo. Si no tienen, no importa. **Resuelto (P2):** nadie tiene efectivo en ningún momento de una corrida de 400 trimestres ([inicializacion.md](inicializacion.md), sec. 5).
 - Los pagos de impuestos e intereses de JMAB modifican los saldos directamente, sin pasar por `transfer`, pero las cuentas que tocan son las mismas que cubre `pay`/`payTo`.

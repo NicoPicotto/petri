@@ -38,12 +38,13 @@ import {
 } from './ledger';
 import { beginPeriod } from './flows';
 import { toMicro, toUnits } from './money';
-import { INITIALISER, STRUCTURE, type InitialiserParams, type StructureParams } from './params';
+import { INITIALISER, RULES, STRUCTURE, type InitialiserParams, type RuleParams, type StructureParams } from './params';
 import type { CaianiRng } from './rng';
 import {
   EXPECTATION,
   LAG,
   goodValue,
+  newFlags,
   setLag,
   updateExpectation,
   type BankState,
@@ -64,6 +65,7 @@ export const SITE_MARKET_INIT = 'RandomMarketInitialiser.initialise';
 export interface InitOptions {
   init?: InitialiserParams;
   structure?: StructureParams;
+  rules?: RuleParams;
   /** Id de JMAB de un agente del port, para el `Rng` en modo oráculo. Por defecto, el mismo id. */
   jmabId?: (id: AgentId) => number;
 }
@@ -167,6 +169,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     open(ledger, 'cash', id, cb, toMicro(hhCash), {}, 'deposits');
     open(ledger, 'deposit', id, bank, toMicro(hhDep), { rate: P.iDep }, 'deposits');
     const hh: HouseholdState = {
+      ...newFlags(),
       id,
       wage: P.hhWage,
       employer: null,
@@ -222,7 +225,10 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   };
 
   const newFirm = (id: AgentId): FirmState => ({
+    ...newFlags(),
     id,
+    desiredOutput: 0,
+    bailoutCost: 0,
     employees: [],
     consumptionGoods: [],
     capitalGoods: [],
@@ -369,7 +375,16 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   const bAdv = P.bsAdv / bSize;
   const banks: BankState[] = [];
   for (let i = 0; i < bSize; i++) {
-    const b: BankState = { id: bIds[i] as AgentId, lags: {}, expectations: {} };
+    const b: BankState = {
+      ...newFlags(),
+      id: bIds[i] as AgentId,
+      lags: {},
+      expectations: {},
+      liquidityRatio: 0,
+      capitalRatio: 0,
+      bailoutCost: 0,
+      currentNonPerformingLoans: 0,
+    };
     open(ledger, 'cash', b.id, cb, toMicro(bCash), {}, 'deposits');
     open(ledger, 'reserves', b.id, cb, toMicro(bRes), { rate: 0 }, 'deposits');
     for (let j = 1; j <= bondMat; j++) {
@@ -410,7 +425,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   }
 
   // Gobierno
-  const government = { id: gov, employees: [] as AgentId[] };
+  const government = { ...newFlags(), id: gov, employees: [] as AgentId[] };
   for (let i = 0; i < P.gEmpl; i++) hire(gov, government.employees);
   open(ledger, 'reserves', gov, cb, 0, { rate: 0 }, 'deposits');
 
@@ -462,6 +477,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   return {
     init: P,
     structure: S,
+    rules: options.rules ?? RULES,
     round: 0,
     ledger,
     populations,
@@ -471,6 +487,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     capitalFirms,
     banks,
     government,
+    centralBank: { ...newFlags(), id: cb, interestsOnAdvances: 0, interestsOnBonds: 0 },
     aggregateLags,
   };
 }
