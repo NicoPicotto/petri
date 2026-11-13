@@ -19,8 +19,13 @@ import {
   capitalPriceEvent,
   capitalAttractiveness,
   investmentDemandEvent,
-  adaptiveLoanRate,
+  adaptiveInterestRate,
   creditSupplyEvent,
+  depositSupplyEvent,
+  depositInterestEvent,
+  contractIds,
+  contractOf,
+  type AdaptiveRateParams,
   realCapitalDemand,
   switchingProbability,
   LN2,
@@ -32,6 +37,10 @@ import {
   parseDraws,
   requiredWorkers,
   targetOutput,
+  DecisionRecorder,
+  compareOutcomes,
+  summarizeDecisions,
+  withDecisions,
   type CaianiRng,
   type CaianiState,
   type FirmState,
@@ -268,24 +277,24 @@ describe('evento 5 (demanda de inversión): casos a mano', () => {
 });
 
 describe('evento 6 (oferta de crédito): casos a mano', () => {
-  const r = { loanRateAdaptive: 1, loanRateIncrease: false, loanRateSigma: 0.0094 };
+  const r: AdaptiveRateParams = { adaptive: 1, increase: false, sigma: 0.0094, upperBound: Infinity, reference: 'ratio de capital' };
   const banks = [
-    { capitalRatio: 0.2, pastLoanRate: 0.008 },
-    { capitalRatio: 0.1, pastLoanRate: 0.006 },
+    { ratio: 0.2, pastRate: 0.008 },
+    { ratio: 0.1, pastRate: 0.006 },
   ];
 
   it('tasa: media ∓ media·|N| según el ratio de capital contra el promedio (increase = false)', () => {
     // Umbral (0,2 + 0,1)/2 = 0,15; tasa media 0,007. Ratio 0,2 > 0,15: baja → 0,007 − 0,007·0,1.
-    expect(adaptiveLoanRate(0.2, banks, fixedNormals([0.1]), r)).toBe(0.007 - 1 * 0.007 * 0.1);
+    expect(adaptiveInterestRate(0.2, banks, fixedNormals([0.1]), r)).toBe(0.007 - 1 * 0.007 * 0.1);
     // Ratio 0,1 ≤ 0,15: sube.
-    expect(adaptiveLoanRate(0.1, banks, fixedNormals([0.1]), r)).toBe(0.007 + 1 * 0.007 * 0.1);
+    expect(adaptiveInterestRate(0.1, banks, fixedNormals([0.1]), r)).toBe(0.007 + 1 * 0.007 * 0.1);
     // Igual al umbral: no lo supera, sube.
-    expect(adaptiveLoanRate(0.15, banks, fixedNormals([0.1]), r)).toBe(0.007 + 0.007 * 0.1);
+    expect(adaptiveInterestRate(0.15, banks, fixedNormals([0.1]), r)).toBe(0.007 + 0.007 * 0.1);
   });
 
   it('piso 0; sin bancos con préstamos y patrimonio positivo, NaN (como JMAB)', () => {
-    expect(adaptiveLoanRate(0.2, banks, fixedNormals([1.5]), r)).toBe(0);
-    expect(adaptiveLoanRate(0.2, [], fixedNormals([0.1]), r)).toBeNaN();
+    expect(adaptiveInterestRate(0.2, banks, fixedNormals([1.5]), r)).toBe(0);
+    expect(adaptiveInterestRate(0.2, [], fixedNormals([0.1]), r)).toBeNaN();
   });
 
   it('sobre el estado inicial: oferta infinita, activo en crédito, un sorteo por banco', () => {
@@ -309,6 +318,56 @@ describe('evento 6 (oferta de crédito): casos a mano', () => {
   });
 });
 
+describe('eventos 7 y 8 (depósitos): casos a mano', () => {
+  it('tasa de depósitos: todos los bancos en el promedio, techo = tasa de adelantos', () => {
+    const p: AdaptiveRateParams = { adaptive: 1, increase: false, sigma: 0.0094, upperBound: 0.005, reference: 'ratio de liquidez' };
+    const banks = [
+      { ratio: 0.3, pastRate: 0.003 },
+      { ratio: 0.2, pastRate: 0.002 },
+    ];
+    // Umbral 0,25, media 0,0025. Liquidez 0,3 > 0,25: baja; 0,2: sube.
+    expect(adaptiveInterestRate(0.3, banks, fixedNormals([0.1]), p)).toBe(0.0025 - 0.0025 * 0.1);
+    expect(adaptiveInterestRate(0.2, banks, fixedNormals([0.1]), p)).toBe(0.0025 + 0.0025 * 0.1);
+    // Paso enorme: techo 0,005.
+    expect(adaptiveInterestRate(0.2, banks, fixedNormals([3]), p)).toBe(0.005);
+  });
+
+  it('evento 7 sobre el estado inicial: un sorteo por banco y activo en depósitos', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    computeExpectationsEvent(s);
+    const xs = s.banks.map((_, i) => 0.001 * (i + 1));
+    depositSupplyEvent(s, fixedNormals(xs));
+    for (const b of s.banks) {
+      expect(b.active[MKT.DEPOSIT]).toBe(true);
+      expect(Math.abs(b.depositInterestRate - 0.0025)).toBeLessThan(0.0025 * 0.011);
+    }
+  });
+
+  it('evento 8: cada depósito capitaliza round(saldo × tasa del contrato); el depositante lo registra', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const b = s.banks[0]!;
+    const ids = contractIds(s.ledger, b.id, 'liabilities', 'deposit');
+    const before = ids.map((id) => ({ ...contractOf(s.ledger, id) }));
+    // Una tasa distinta en un contrato: se usa la del contrato, no la del banco.
+    contractOf(s.ledger, ids[0]!).rate = 0.01;
+    before[0]!.rate = 0.01;
+    depositInterestEvent(s);
+    let tot = 0;
+    ids.forEach((id, n) => {
+      const c0 = before[n]!;
+      const interest = Math.round(c0.amount * c0.rate);
+      tot += interest;
+      expect(contractOf(s.ledger, id).amount).toBe(c0.amount + interest);
+    });
+    expect(b.totInterestsDeposits).toBe(tot);
+    const h = s.households.find((x) => x.id === before[0]!.holder)!;
+    expect(h.interestReceived).toBe(Math.round(before[0]!.amount * 0.01));
+    // Hogar con 10,088… de depósito a 0,25%: 25.220 µ (JMAB: 0,025220041596875).
+    expect(Math.round(10_088_016.63875 * 0.0025)).toBe(25_220);
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–8. */
@@ -317,12 +376,25 @@ const RUNS = [
   { run: 'p3-t50', tick: 50 },
 ];
 
+/** Eventos portados, en orden; `rng` = el evento sortea (si no, se verifica que el registro no tenga sorteos). */
+const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
+  { e: 0, run: (s) => computeExpectationsEvent(s) },
+  { e: 1, run: capitalPriceEvent },
+  { e: 2, run: consumptionPriceEvent },
+  { e: 3, run: capitalMarketFirstStepEvent },
+  { e: 4, run: (s) => rdDecisionEvent(s) },
+  { e: 5, run: investmentDemandEvent },
+  { e: 6, run: creditSupplyEvent },
+  { e: 7, run: depositSupplyEvent },
+  { e: 8, run: (s) => depositInterestEvent(s) },
+];
+const LAST = EVENTS[EVENTS.length - 1]!.e;
+
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;
   const dumpOf = (name: string) => readDump(dir + name);
   const before = `tick-${tick}.jsonl`;
   const after = (e: number) => `tick-${tick}-ev-${e}.jsonl`;
-  const LAST = 6;
   const available = existsSync(dir + after(LAST));
   const draws = available ? parseDraws(readFileSync(`${ORACLE}${run}/draws.tsv`, 'utf8')) : [];
   let toJ: ((id: number) => number) | undefined;
@@ -340,6 +412,9 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     expect(r.diffs).toEqual([]);
   };
+  /** Registro de decisiones de cada modalidad (lo llenan los dos tests de abajo; vitest los corre en orden). */
+  const single = new DecisionRecorder();
+  const chained = new DecisionRecorder();
 
   it.skipIf(!available)('el estado reconstruido desde un volcado coincide con el volcado', () => {
     const d = dumpOf(before);
@@ -348,54 +423,29 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     expect(r.counts.maxAmountDiff).toBe(0);
   }, 120_000);
 
-  it.skipIf(!available)('cada evento desde el volcado anterior (0–6)', () => {
-    const s0 = stateFromDump(dumpOf(before));
-    computeExpectationsEvent(s0);
-    check(s0, after(0), 'evento 0');
-    const s1 = stateFromDump(dumpOf(after(0)));
-    const rng1 = drawsOf(1);
-    capitalPriceEvent(s1, rng1);
-    expect(rng1.remaining).toBe(0);
-    check(s1, after(1), 'evento 1');
-    const s2 = stateFromDump(dumpOf(after(1)));
-    const rng2 = drawsOf(2);
-    consumptionPriceEvent(s2, rng2);
-    expect(rng2.remaining).toBe(0);
-    check(s2, after(2), 'evento 2');
-    const s3 = stateFromDump(dumpOf(after(2)));
-    const rng3 = drawsOf(3);
-    capitalMarketFirstStepEvent(s3, rng3);
-    expect(rng3.remaining).toBe(0);
-    check(s3, after(3), 'evento 3');
-    const s4 = stateFromDump(dumpOf(after(3)));
-    rdDecisionEvent(s4);
-    check(s4, after(4), 'evento 4');
-    const s5 = stateFromDump(dumpOf(after(4)));
-    const rng5 = drawsOf(5);
-    investmentDemandEvent(s5, rng5);
-    expect(rng5.remaining).toBe(0);
-    check(s5, after(5), 'evento 5');
-    const s6 = stateFromDump(dumpOf(after(5)));
-    const rng6 = drawsOf(6);
-    creditSupplyEvent(s6, rng6);
-    expect(rng6.remaining).toBe(0);
-    check(s6, after(6), 'evento 6');
+  it.skipIf(!available)(`cada evento desde el volcado anterior (0–${LAST})`, () => {
+    for (const { e, run: ev } of EVENTS) {
+      const s = stateFromDump(dumpOf(e === 0 ? before : after(e - 1)));
+      const rng = drawsOf(e);
+      withDecisions(single, e, () => ev(s, rng));
+      expect(rng.remaining).toBe(0);
+      check(s, after(e), `evento ${e}`);
+    }
+    console.log(`Decisiones, tick ${tick}, cada evento suelto:\n  ${summarizeDecisions(single.log).join('\n  ')}`);
   }, 120_000);
 
-  it.skipIf(!available)('eventos 0–6 encadenados desde el principio del tick', () => {
+  it.skipIf(!available)(`eventos 0–${LAST} encadenados desde el principio del tick`, () => {
     const s = stateFromDump(dumpOf(before));
-    computeExpectationsEvent(s);
-    capitalPriceEvent(s, drawsOf(1));
-    consumptionPriceEvent(s, drawsOf(2));
-    capitalMarketFirstStepEvent(s, drawsOf(3));
-    expect(drawsOf(4).remaining).toBe(0); // el evento 4 no sortea
-    rdDecisionEvent(s);
-    const rng5 = drawsOf(5);
-    investmentDemandEvent(s, rng5);
-    expect(rng5.remaining).toBe(0);
-    const rng6 = drawsOf(6);
-    creditSupplyEvent(s, rng6);
-    expect(rng6.remaining).toBe(0);
-    check(s, after(6), 'eventos 0–6');
+    for (const { e, run: ev } of EVENTS) {
+      const rng = drawsOf(e);
+      withDecisions(chained, e, () => ev(s, rng));
+      expect(rng.remaining).toBe(0);
+    }
+    check(s, after(LAST), `eventos 0–${LAST}`);
+    console.log(`Decisiones, tick ${tick}, encadenados:\n  ${summarizeDecisions(chained.log).join('\n  ')}`);
+    // Decisiones que se dan vuelta entre el encadenado y el evento suelto (que arranca del estado de JMAB).
+    const { flips, lengthMismatch } = compareOutcomes(single.log, chained.log);
+    console.log(`Decisiones dadas vuelta, tick ${tick}: ${flips.length}`, JSON.stringify(flips.slice(0, 10)), lengthMismatch);
+    expect(lengthMismatch).toEqual([]);
   }, 120_000);
 });

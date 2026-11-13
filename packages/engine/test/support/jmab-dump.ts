@@ -266,6 +266,7 @@ export function stateFromDump(d: Dump): CaianiState {
       wage: j['AbstractHousehold.wage'],
       employer: emp === null ? null : fromJ(emp),
       dividendsReceived: toMicro(j['Households.dividendsReceived']),
+      interestReceived: toMicro(j['Households.interestsReceived']),
       previousSeller: fromJ(ref(strat(j, 0)['previousGoodSupplier'])!),
       previousBank: fromJ(ref(strat(j, 11)['previousDepositSupplier'])!),
       lags: lagsOf(j['SimpleAbstractAgent.passedValues'], `hogar ${toJ(id)}`),
@@ -292,6 +293,7 @@ export function stateFromDump(d: Dump): CaianiState {
       amountResearch: consumption ? 0 : j['CapitalFirm.amountResearch'],
       desiredCapacityGrowth: consumption ? j['ConsumptionFirm.desiredCapacityGrowth'] : 0,
       desiredRealCapitalDemand: consumption ? j['ConsumptionFirm.desiredRealCapitalDemand'] : 0,
+      interestReceived: toMicro(j[consumption ? 'ConsumptionFirm.interestReceived' : 'CapitalFirm.interestReceived']),
       selectedCapitalSuppliers: agentRefs(j['ConsumptionFirm.selectedCapitalGoodSuppliers'], fromJ),
       lags: lagsOf(j['SimpleAbstractAgent.passedValues'], `empresa ${toJ(id)}`),
       expectations: expectationsOf(j['SimpleAbstractAgent.expectations']),
@@ -310,6 +312,8 @@ export function stateFromDump(d: Dump): CaianiState {
       currentNonPerformingLoans: toMicro(j['AbstractBank.currentNonPerformingLoans']),
       bankInterestRate: j['bankInterestRate'],
       totalLoanSupply: j['totalLoanSupply'],
+      depositInterestRate: j['depositInterestRate'],
+      totInterestsDeposits: toMicro(j['totInterestsDeposits']),
     };
   });
   const gov = firstOf('government');
@@ -398,10 +402,14 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
     else counts.maxRelPure = Math.max(counts.maxRelPure, r);
     if (!(r <= tol)) note(`${what}: port ${port}, JMAB ${java} (rel ${r})`);
   };
-  const amount = (what: string, port: number, java: number) => {
+  /**
+   * Montos: 2 µ, o tantos µ como redondeos a µ entraron en el monto si es una suma de montos redondeados
+   * (plan, sec. 4: "tantos como redondeos tocaron esa cuenta en el tick").
+   */
+  const amount = (what: string, port: number, java: number, roundings = 0) => {
     const dd = Math.abs(port - toMicro(java));
     counts.maxAmountDiff = Math.max(counts.maxAmountDiff, dd);
-    if (dd > AMOUNT_TOL) note(`${what}: port ${port} µ, JMAB ${java}`);
+    if (dd > Math.max(AMOUNT_TOL, roundings)) note(`${what}: port ${port} µ, JMAB ${java} (tolerancia ${Math.max(AMOUNT_TOL, roundings)} µ)`);
   };
   const same = (what: string, port: unknown, java: unknown) => {
     if (port !== java) note(`${what}: port ${String(port)}, JMAB ${String(java)}`);
@@ -569,6 +577,7 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
     same(`${w} empleador`, h.employer === null ? null : toJ(h.employer), ref(j['AbstractHousehold.employer']));
     close(`${w} salario`, h.wage, j['AbstractHousehold.wage']);
     amount(`${w} dividendos`, h.dividendsReceived, j['Households.dividendsReceived']);
+    amount(`${w} intereses de depósitos`, h.interestReceived, j['Households.interestsReceived']);
     same(`${w} vendedor previo`, toJ(h.previousSeller), ref(strat(j, 0)['previousGoodSupplier']));
     same(`${w} banco previo`, toJ(h.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
     lagsCompare(w, h.lags, j['SimpleAbstractAgent.passedValues']);
@@ -591,6 +600,7 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
       close(`${w} demanda real de capital`, f.desiredRealCapitalDemand, j['ConsumptionFirm.desiredRealCapitalDemand'], true);
     }
     if (j['CapitalFirm.amountResearch'] !== undefined) close(`${w} I+D`, f.amountResearch, j['CapitalFirm.amountResearch']);
+    amount(`${w} intereses de depósitos`, f.interestReceived, j['ConsumptionFirm.interestReceived'] ?? j['CapitalFirm.interestReceived']);
     const sel = (l: AgentId[] | null) => (l === null ? 'null' : l.map(toJ).join());
     const jsel = j['ConsumptionFirm.selectedCapitalGoodSuppliers'] as J[] | null | undefined;
     same(`${w} vendedores de capital vistos`, sel(f.selectedCapitalSuppliers), jsel === null || jsel === undefined ? 'null' : jsel.map(ref).join());
@@ -610,6 +620,14 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
     amount(`${w} morosidad del tick`, b.currentNonPerformingLoans, j['AbstractBank.currentNonPerformingLoans']);
     close(`${w} tasa de préstamos`, b.bankInterestRate, j['bankInterestRate']);
     close(`${w} oferta de crédito`, b.totalLoanSupply, j['totalLoanSupply'], true);
+    close(`${w} tasa de depósitos`, b.depositInterestRate, j['depositInterestRate']);
+    // Suma de un interés redondeado a µ por depósito del banco (depositInterestEvent).
+    amount(
+      `${w} intereses pagados a depósitos`,
+      b.totInterestsDeposits,
+      j['totInterestsDeposits'],
+      contractIds(s.ledger, b.id, 'liabilities', 'deposit').length,
+    );
     lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues']);
     expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
   }

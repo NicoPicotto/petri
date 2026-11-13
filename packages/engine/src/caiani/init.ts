@@ -177,6 +177,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       dividendsReceived: toMicro(P.dividendsReceived / hhSize),
       previousSeller: cIds[idiv(i, hhPercFirm)] as AgentId,
       previousBank: bank,
+      interestReceived: 0,
       lags: {},
       expectations: {},
     };
@@ -242,6 +243,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     amountResearch: 0,
     desiredCapacityGrowth: 0,
     desiredRealCapitalDemand: 0,
+    interestReceived: 0,
     lags: {},
     expectations: {},
   });
@@ -395,6 +397,8 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       currentNonPerformingLoans: 0,
       bankInterestRate: R.initialBankInterestRate, // propiedad del prototipo (XML 2288)
       totalLoanSupply: 0, // valor por defecto del campo en Java
+      depositInterestRate: R.initialDepositInterestRate, // propiedad del prototipo (XML 2299)
+      totInterestsDeposits: 0,
     };
     open(ledger, 'cash', b.id, cb, toMicro(bCash), {}, 'deposits');
     open(ledger, 'reserves', b.id, cb, toMicro(bRes), { rate: 0 }, 'deposits');

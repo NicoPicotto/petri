@@ -176,6 +176,17 @@ export interface RuleParams {
   loanRateAdaptive: number; // 2446
   loanRateIncrease: boolean; // 2444
   loanRateSigma: number; // 2982
+  /** `Bank.depositInterestRate` inicial (propiedad del prototipo del banco). */
+  initialDepositInterestRate: number; // 2299
+  /** `Bank.advancesInterestRate`: techo de la tasa de depósitos (`getInterestRateUpperBound(MKT_DEPOSIT)`). */
+  bankAdvancesInterestRate: number; // 2297
+  /**
+   * `CopyOfAdaptiveInterestRateAverageThreshold` de la tasa de depósitos (`banksDepInterestStrategy`, evento
+   * 7): paso, sentido y desvío de `foldedNormal2` (2986–2990). El `threshold` del XML (2519) no se usa.
+   */
+  depositRateAdaptive: number; // 2518
+  depositRateIncrease: boolean; // 2516
+  depositRateSigma: number; // 2988
 }
 
 /**
@@ -202,4 +213,9 @@ export const RULES: Readonly<RuleParams> = {
   loanRateAdaptive: 1,
   loanRateIncrease: false,
   loanRateSigma: 0.0094,
+  initialDepositInterestRate: 0.0025,
+  bankAdvancesInterestRate: 0.005,
+  depositRateAdaptive: 1,
+  depositRateIncrease: false,
+  depositRateSigma: 0.0094,
 };

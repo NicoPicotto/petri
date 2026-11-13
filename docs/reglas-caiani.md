@@ -1,6 +1,6 @@
 # Reglas del port de Caiani (P3)
 
-Estado al 2026-11-13: **infraestructura de V3 por evento lista; eventos 0 a 6 portados y verificados en los ticks 1 y 50, bit a bit.** Para retomar en una sesión nueva, ver la sec. 10. Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
+Estado al 2026-11-13: **infraestructura de V3 por evento lista; eventos 0 a 8 portados y verificados en los ticks 1 y 50 (bit a bit salvo un total de intereses que no lee nadie, sec. 9); contador de decisiones discretas en el V3.** Para retomar en una sesión nueva, ver la sec. 11. Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
 
 Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equivalente al `.jar`, V0), de `paper-launcher/Model/modelFile.xml` y de los volcados del oráculo.
 
@@ -17,7 +17,26 @@ Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equiv
 
 **Orden de despacho.** Dentro de un evento, JMAB llama a los agentes en **orden de creación** (el de suscripción al planificador), no en el de la lista de la población (que las mezclas reordenan). Verificado en los eventos 1 y 2: el paso |N| de cada empresa, despejado de su margen antes y después, coincide a 10⁻¹³ con el registrado en esa posición de la secuencia. Importa porque el oráculo registra las normales sin el id del agente: el port las tiene que pedir en el mismo orden. Los arreglos del estado del port (`households`, `consumptionFirms`, etc.) están en orden de creación.
 
-**Tolerancias** (plan, sec. 4, V3): montos, 2 µ; `double` calculados a partir de montos, 10⁻⁶ relativo; los demás `double`, 10⁻⁹. Una decisión discreta que se dé vuelta dentro de la tolerancia se va a contar aparte (decisión de Nico, 2026-11-13); todavía no hubo ninguna.
+**Tolerancias** (plan, sec. 4, V3): montos, 2 µ, o tantos µ como redondeos a µ entraron si el monto es una suma de montos redondeados (el arnés lo aplica campo por campo: hoy solo `totInterestsDeposits`, sec. 9); `double` calculados a partir de montos, 10⁻⁶ relativo; los demás `double`, 10⁻⁹.
+
+**Decisiones discretas (contador de V3, 2026-11-13, pedido de Nico).** Módulo `caiani/decisions.ts`, test a mano en `test/caiani-decisions.test.ts`.
+- Cada comparación que define una rama en un evento pasa por un helper (`gt`, `ge`, `lt`, `record`, `rounding`) que devuelve lo mismo que la comparación sola. Con un registrador activo (`withDecisions(rec, evento, fn)`) anota, por evento y por lugar, la **distancia al umbral** en la escala de la tolerancia del valor comparado (µ absolutos para montos; relativa para los `double`, a la escala de los operandos o de los términos de los que sale el valor) y el resultado. Si la distancia es ≤ la tolerancia, la decisión es **frágil**: una diferencia que V3 admite alcanzaría para darla vuelta. El registro solo observa: sin registrador, los helpers no hacen nada más que comparar.
+- **Decisiones dadas vuelta:** el V3 corre cada evento suelto (desde el volcado de JMAB, o sea con las entradas de JMAB) y encadenado desde el principio del tick, los dos con registrador; `compareOutcomes` lista las comparaciones con otro resultado en la misma posición. Una que se da vuelta hoy igual hace fallar la comparación de estado aguas abajo; el contador dice dónde empezó.
+- **Qué no se registra:** comparaciones entre enteros exactos (edades, plazos, cantidades de la lista), banderas de actividad que vienen de otro evento (se registran donde se deciden), y la comparación del atractivo del proveedor previo cuando el previo **es** el mejor (es el mismo cálculo dos veces, no puede darse vuelta). El piso de la producción deseada (`max(0, …)`) se mide contra la escala de los términos de la resta, no contra el resultado.
+- **Resultado en los ticks 1 y 50 (eventos 0–8):** ninguna decisión se da vuelta. Frágiles:
+
+  | Evento | Tick 1 | Tick 50 |
+  |---|---|---|
+  | 0 | 0 de 150 | 0 de 150 |
+  | 1 | **20 de 60**: inventario / ventas = 10/100 = 0,1, exactamente el umbral (empate exacto; `>` es falso y el margen sube) | 0 de 60 |
+  | 2 | **100 de 2.400**: inventario / ventas a 2,4·10⁻¹⁰ del umbral (32 / 320,0000000776…) | 0 de 2.586 |
+  | 3, 4 | sin comparaciones numéricas | ídem |
+  | 5 | 0 de 2.882 | 0 de 3.063 |
+  | 6 | **10 de 40**: ratio de capital a ~10⁻¹⁵ del promedio (sec. 8) | 0 de 40 |
+  | 7 | **10 de 30**: ratio de liquidez en el promedio (distancia mínima 0) | 0 de 30 |
+  | 8 | sin comparaciones | ídem |
+
+  Las frágiles del tick 1 vienen de que la inicialización deja a todas las empresas y bancos de cada tipo iguales y justo en los umbrales. En el tick 50 la distancia más chica es 1,8·10⁻⁴ (redondeo de los trabajadores requeridos).
 
 **Corridas de referencia** (semilla 12345; el test `caiani-events.test.ts` las recorre con `describe.each`):
 - `DUMP_TICKS=1 DUMP_EVENTS="1:0,1:1,1:2,1:3,1:4,1:5,1:6,1:7,1:8" reference/tools/run-oracle.sh p3-t1 12345 1 -1 999999`
@@ -50,8 +69,8 @@ Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y
 | 4 | `rdDecisionTic` (I+D, apagada en el base) | **portado, V3 ✓** |
 | 5 | `investmentDemandTic` (sin sorteos en los ticks 1 y 50) | **portado, V3 ✓** |
 | 6 | `creditSupplyTic` (10) | **portado, V3 ✓** |
-| 7 | `depSupplyTic` (10) | |
-| 8 | `depInterestTic` | |
+| 7 | `depSupplyTic` (10) | **portado, V3 ✓** |
+| 8 | `depInterestTic` | **portado, V3 ✓** (total del banco dentro de la tolerancia por redondeos) |
 | 9 | `creditDemandTic` | |
 | 10 | `creditMarketTic` (201) | |
 | 11 | `laborSupplyTic` (8.000) | |
@@ -166,7 +185,7 @@ Lo escuchan solo las empresas de capital: `CopyOfCapitalFirm2WagesEnd.onTicArriv
 | Qué | JMAB | Port |
 |---|---|---|
 | Disparo | `Bank.onTicArrived` 199–202 → `determineBankGenericInterestRate` (273–277) y `determineCreditSupply` (378–387) | `creditSupplyEvent` |
-| Promedios | `CopyOfAdaptiveInterestRateAverageThreshold.computeInterestRate` 64–80 (`mktId` = MKT_CREDIT): sobre los bancos con préstamos (`getNumericBalanceSheet()[0][SM_LOAN] != 0`) y patrimonio > 0, **en el orden de la lista de la población** (`banks.getAgents()`): umbral = ratio de capital medio (el del evento 0), tasa media = `LAG_LOANINTEREST` del período anterior. Sin ninguno, 0/0 = NaN | `adaptiveLoanRate`; la lista de elegibles se arma una vez (nada de lo que lee cambia dentro del evento) |
+| Promedios | `CopyOfAdaptiveInterestRateAverageThreshold.computeInterestRate` 64–80 (`mktId` = MKT_CREDIT; la misma estrategia fija la tasa de depósitos, sec. 9): sobre los bancos con préstamos (`getNumericBalanceSheet()[0][SM_LOAN] != 0`) y patrimonio > 0, **en el orden de la lista de la población** (`banks.getAgents()`): umbral = ratio de capital medio (el del evento 0), tasa media = `LAG_LOANINTEREST` del período anterior. Sin ninguno, 0/0 = NaN | `adaptiveInterestRate` (común a los dos mercados); la lista de elegibles se arma una vez (nada de lo que lee cambia dentro del evento) |
 | Tasa | 91–102: con `increase` = false (XML 2444), si el ratio de capital del banco supera el umbral, media − 1·media·\|N(0; 0,0094)\|; si no, media + 1·media·\|N\| (`adaptiveParameter` = 1, XML 2446; `foldedNormal1`, 2980–2984); acotada a [0, +∞) (`Bank.getInterestRateLowerBound`/`UpperBound` del crédito, 524–530 y 591–595) | igual; `Math.max`/`min` propagan NaN igual en Java y en JS |
 | Umbral del XML | `threshold` = 0,17995897 (2447) | no se usa: se pisa con el promedio antes de leerlo |
 | Tasa inicial | 0,0075 (propiedad del prototipo, XML 2288) | `RULES.initialBankInterestRate` |
@@ -180,22 +199,40 @@ Lo escuchan solo las empresas de capital: `CopyOfCapitalFirm2WagesEnd.onTicArriv
 - A mano: la tasa baja si el ratio supera el promedio y sube si no (también si es igual), piso 0, sin bancos elegibles da NaN; sobre el estado inicial del port, oferta +∞, rezago, mercado de crédito activo y un sorteo por banco.
 - V3, ticks 1 y 50, desde el volcado anterior y encadenado desde el principio del tick: **diferencia 0**. Las dos ramas aparecen en los dos ticks. En los dos ticks los 10 bancos entran en los promedios: la exclusión (sin préstamos o con patrimonio ≤ 0) la cubre solo el caso a mano. Control negativo: con `increase` = true aparecen las 10 tasas como diferencia.
 
-## 9. Estado agregado al port en P3 hasta ahora
+## 9. Eventos 7 y 8: depósitos (`depSupplyTic`, `depInterestTic`)
+
+**Qué cambia en JMAB** (diff de volcados, ticks 1 y 50). Evento 7: en los 10 bancos, `depositInterestRate` y `active[MKT_DEPOSIT]` (a `true`; en el tick 50 ya lo estaba), más las variables de trabajo de la estrategia (no se portan, como en el evento 6); un sorteo `fn` por banco. Evento 8: el saldo de todos los depósitos (en los dos balances), `interestsReceived` / `interestReceived` de los 8.000 hogares y las 120 empresas, y `totInterestsDeposits` de los bancos; sin sorteos.
+
+| Qué | JMAB | Port |
+|---|---|---|
+| Disparo 7 | `Bank.onTicArrived` 203–205 → `determineDepositInterestRate` (369–375): tasa con la estrategia y activo en depósitos | `depositSupplyEvent` |
+| Tasa de depósitos | `CopyOfAdaptiveInterestRateAverageThreshold` con `mktId` = MKT_DEPOSIT (`banksDepInterestStrategy`, XML 2512–2520): promedios de **todos** los bancos (53–63), en el orden de la población: umbral = ratio de liquidez medio (evento 0), tasa media = `LAG_DEPOSITINTEREST` del período anterior; `increase` = false (2516), `adaptiveParameter` = 1 (2518), `foldedNormal2` (σ 0,0094, 2986–2990); acotada a [0, `advancesInterestRate`] = [0; 0,005] (`Bank.getInterestRateUpperBound`, 591–595; XML 2297). Tasa inicial 0,0025 (XML 2299) | `adaptiveInterestRate` con techo; `RULES.initialDepositInterestRate`, `bankAdvancesInterestRate`, `depositRate*` |
+| Disparo 8 | `Bank.onTicArrived` 196–198 → `payDepositInterests` (392–403) | `depositInterestEvent` |
+| Interés | por depósito del banco, en el orden de su lista: interés = tasa **del contrato** × saldo; `depositor.interestPaid(interés)`, que **asigna** (`Households` 448–451, `ConsumptionFirm` 930–933, `CapitalFirm` 857–860); saldo = saldo·(1 + tasa), sin contrapartida en dinero; `totInterestsDeposits` = suma | interés = `Math.round(saldo µ × tasa)`; `credit(…, 'depositInterest')` (el banco paga con su propio pasivo); `interestReceived` (µ) asignado; total = suma de lo acreditado |
+
+**Unidades del evento 8.** El interés se redondea a µ una vez por depósito (como las ganancias del BC, evento 0) y el saldo nuevo es saldo + interés: difiere de valor·(1 + tasa) de JMAB en menos de 1 µ por depósito. `interestReceived` y `totInterestsDeposits` son lo acreditado (es lo que entra después en las ganancias de las empresas, `ConsumptionFirm` 625 y `CapitalFirm` 682, y en el ingreso bruto de los hogares, `Households` 459). `totInterestsDeposits` en JMAB **no lo lee nadie** (ni agentes ni reportes); su diferencia con JMAB es la acumulación de los redondeos de ~800 depósitos por banco: 33 µ en el tick 1 y 11 µ en el 50, dentro de la tolerancia "un µ por redondeo" del plan.
+
+**Verificación:**
+- A mano: tasa de depósitos que baja y que sube según la liquidez, techo 0,005; evento 7 sobre el estado inicial (un sorteo por banco, activo en depósitos); evento 8 sobre el estado inicial, con una tasa de contrato distinta de la del banco (se usa la del contrato), saldos nuevos, interés del depositante y total.
+- V3, ticks 1 y 50, suelto y encadenado: evento 7 **diferencia 0**; evento 8 **diferencia 0** en los 36.000–37.000 contratos y en los intereses de cada depositante; el total del banco, dentro de la tolerancia (arriba). En el tick 1 la decisión de la tasa de depósitos es un empate (sec. 1, decisiones): los 10 bancos tienen el mismo ratio de liquidez.
+
+## 10. Estado agregado al port en P3 hasta ahora
 
 - Todos los agentes (`AgentFlags`): `active[MKT_*]`, `defaulted`.
 - Empresas: `desiredOutput`, `bailoutCost` (µ), `markUp`, `expectedVariableCosts`.
-- Bancos: `liquidityRatio`, `capitalRatio`, `bailoutCost`, `currentNonPerformingLoans` (µ); `bankInterestRate`, `totalLoanSupply` (evento 6).
+- Bancos: `liquidityRatio`, `capitalRatio`, `bailoutCost`, `currentNonPerformingLoans` (µ); `bankInterestRate`, `totalLoanSupply` (evento 6); `depositInterestRate` (evento 7), `totInterestsDeposits` (µ, evento 8).
+- Hogares y empresas: `interestReceived` (µ, evento 8).
 - BC (`centralBank`): `interestsOnAdvances`, `interestsOnBonds` (µ).
 - Rezagos: `setLag` con la eviction de `TreeMapPassedValues` (4 observaciones) y `getLag`.
 - Empresas de consumo: `selectedCapitalSuppliers` (evento 3), `desiredCapacityGrowth`, `desiredRealCapitalDemand` (evento 5). Empresas de capital: `amountResearch` (evento 4).
-- Parámetros (`RULES`, con su línea del XML): participación del inventario objetivo, tasa de adelantos del BC, margen (umbral, paso, σ, iniciales), productividad del trabajo en capital, vendedores por comprador en el mercado de capital, `researchShare`, λ y `payOrReceive` del cambio de proveedor de capital, tasa inicial de los bancos y estrategia de la tasa de préstamos (paso, sentido, σ).
+- Parámetros (`RULES`, con su línea del XML): participación del inventario objetivo, tasa de adelantos del BC, margen (umbral, paso, σ, iniciales), productividad del trabajo en capital, vendedores por comprador en el mercado de capital, `researchShare`, λ y `payOrReceive` del cambio de proveedor de capital, tasas iniciales de los bancos, estrategias de las tasas de préstamos y de depósitos (paso, sentido, σ) y techo de la tasa de depósitos.
 - `OracleCaianiRng`: opción `agentId` (sec. 1).
 
 Cada campo nuevo va en `state.ts`, en `initialize` (valor del constructor de JMAB), en `stateFromDump` y en `compareState` (`test/support/jmab-dump.ts`).
 
-## 10. Para retomar en una sesión nueva
+## 11. Para retomar en una sesión nueva
 
 1. Leer este documento (sec. 1: método; sec. 2: mapa) y [inicializacion.md](inicializacion.md).
-2. Siguiente: **evento 7, `depSupplyTic`** (bancos: `Bank.determineDepositInterestRate` 369–375, la misma `CopyOfAdaptiveInterestRateAverageThreshold` con `mktId` = MKT_DEPOSIT: promedios de **todos** los bancos, ratio de liquidez y `LAG_DEPOSITINTEREST`, techo = `advancesInterestRate`, `foldedNormal2`; activa en depósitos; 10 sorteos). Después 8 (`depInterestTic`, `Bank.payDepositInterests`: primer flujo de dinero del tick). Los volcados de los dos ya están en las corridas de referencia. El evento 10 (`creditMarketTic`) es el primer `SelectionRandomRobinBuyerMixer` con lista propia del mercado: usar `selectSellers`.
-3. Por cada evento: agregar `t:e` a las dos corridas de referencia y correrlas; diff de volcados; leer el código de los agentes que escuchan el evento (`activeTicEvents`); portar en `events.ts` con la línea de JMAB al lado; casos a mano y V3 en `caiani-events.test.ts`; registrar acá.
+2. Siguiente: **evento 9, `creditDemandTic`** (demanda de crédito de las empresas: `PeckingOrderTheory`, plan sec. 2, R9) y **10, `creditMarketTic`** (201 sorteos en el tick 1; primer `SelectionRandomRobinBuyerMixer` con lista propia del mercado: usar `selectSellers`; `ExpectedReturnCreditSupply` con `DeterministicLogisticCashFlowComputer`; `ConstrainedCreditMechanism` resta de `totalLoanSupply`). Antes: volver a correr las dos corridas de referencia con `DUMP_EVENTS` hasta el evento que se vaya a portar (conviene agregar varios de una vez, p. ej. 9–14).
+3. Por cada evento: agregar `t:e` a las dos corridas de referencia y correrlas; diff de volcados; leer el código de los agentes que escuchan el evento (`activeTicEvents`); portar en `events.ts` con la línea de JMAB al lado; casos a mano y V3 en `caiani-events.test.ts` (agregar el evento a la tabla `EVENTS`); cada comparación que define una rama, con los helpers de `decisions.ts`; registrar acá.
 4. Norma operativa: no editar los scripts de `reference/tools` mientras corre algo largo ([arquitectura.md](arquitectura.md), "Corridas largas").

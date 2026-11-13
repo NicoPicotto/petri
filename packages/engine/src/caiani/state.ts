@@ -128,6 +128,8 @@ export interface HouseholdState extends AgentFlags {
   previousSeller: AgentId;
   /** `MostPayingDepositWithSwitching.previousDepositSupplier`. */
   previousBank: AgentId;
+  /** `Households.interestsReceived`: interés del depósito del tick (evento 8; se asigna, no se suma). */
+  interestReceived: Micro;
   lags: Lags;
   expectations: Expectations;
 }
@@ -172,6 +174,8 @@ export interface FirmState extends AgentFlags {
   desiredCapacityGrowth: number;
   /** Solo empresas de consumo: `ConsumptionFirm.desiredRealCapitalDemand` (unidades de capital, entero). */
   desiredRealCapitalDemand: number;
+  /** `ConsumptionFirm.interestReceived` / `CapitalFirm.interestReceived`: interés del depósito del tick (evento 8). */
+  interestReceived: Micro;
   lags: Lags;
   expectations: Expectations;
 }
@@ -194,6 +198,10 @@ export interface BankState extends AgentFlags {
    * de Caiani y en double, no en µ: con `InfiniteSupplyCreditStrategy` (el base) vale +∞.
    */
   totalLoanSupply: number;
+  /** `Bank.depositInterestRate`: tasa que ofrece a los depósitos nuevos (evento 7). */
+  depositInterestRate: number;
+  /** `Bank.totInterestsDeposits`: intereses pagados a los depósitos en el tick (evento 8). */
+  totInterestsDeposits: Micro;
 }
 
 export interface GovernmentState extends AgentFlags {

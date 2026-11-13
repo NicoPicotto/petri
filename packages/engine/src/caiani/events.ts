@@ -16,10 +16,11 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { contractIds, contractOf, firstAsset, netFinancialWorth, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { contractIds, contractOf, credit, firstAsset, netFinancialWorth, type AgentId, type ContractKind, type Ledger } from './ledger';
 import { toUnits, type Micro } from './money';
 import { expNeg } from '../detmath';
 import type { CaianiRng } from './rng';
+import { ge, gt, lt, record, rounding } from './decisions';
 import {
   EXPECTATION,
   LAG,
@@ -42,6 +43,8 @@ export const EVENT = {
   RD_DECISION: 4,
   INVESTMENT_DEMAND: 5,
   CREDIT_SUPPLY: 6,
+  DEPOSIT_SUPPLY: 7,
+  DEPOSIT_INTEREST: 8,
 } as const;
 
 /**
@@ -67,9 +70,14 @@ function sumContracts(ledger: Ledger, agent: AgentId, side: 'assets' | 'liabilit
  *   Y* = max(0, Sᵉ + (share·Sᵉ − inventario))
  * con Sᵉ la expectativa de ventas reales y el inventario el primer ítem del tipo de bien producido.
  */
+export const SITE_TARGET_OUTPUT = 'TargetExpectedInventoriesOutputStrategy.computeOutput';
+
 export function targetOutput(expectedRealSales: number, inventoryQuantity: number, share: number): number {
   const expInv = expectedRealSales * share;
-  return Math.max(0, expectedRealSales + (expInv - inventoryQuantity));
+  const x = expectedRealSales + (expInv - inventoryQuantity);
+  // Decisión: el piso 0. Escala: la de los términos (el resultado sale de una resta).
+  record(SITE_TARGET_OUTPUT, x > 0, x, 0, 'pure', Math.max(Math.abs(expectedRealSales), Math.abs(expInv), Math.abs(inventoryQuantity)));
+  return Math.max(0, x);
 }
 
 function firmOutput(f: FirmState, inventoryQuantity: number, share: number): void {
@@ -102,7 +110,11 @@ export function computeExpectationsEvent(s: CaianiState): void {
     const inv = k.capitalGoods[0];
     if (!inv) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
     firmOutput(k, inv.quantity, s.rules.inventoryShareCapital);
-    k.active[MKT.CAPGOOD] = inv.quantity + Math.floor(k.desiredOutput) > 0;
+    // Decisión: con inventario > 0 queda activa; sin inventario, el borde es Y* = 1 (⌊Y*⌋ > 0).
+    const activeK = inv.quantity + Math.floor(k.desiredOutput) > 0;
+    if (inv.quantity !== 0) record('CapitalFirm.determineOutput activo (inventario)', activeK, inv.quantity, 0, 'pure');
+    else record('CapitalFirm.determineOutput activo (⌊Y*⌋)', activeK, k.desiredOutput, 1, 'pure');
+    k.active[MKT.CAPGOOD] = activeK;
   }
 
   for (const c of s.consumptionFirms) {
@@ -125,7 +137,7 @@ export function computeExpectationsEvent(s: CaianiState): void {
     const deposits = sumContracts(L, b.id, 'liabilities', 'deposit');
     const reserves = sumContracts(L, b.id, 'assets', 'reserves');
     // Cociente de sumas en µ: igual al de JMAB salvo el redondeo de los saldos.
-    b.liquidityRatio = deposits === 0 ? 0 : reserves / deposits;
+    b.liquidityRatio = record('Bank.onTicArrived depósitos = 0', deposits === 0, deposits, 0, 'amount') ? 0 : reserves / deposits;
     const loans = toUnits(sumContracts(L, b.id, 'assets', 'loan'));
     // Como JMAB: sin préstamos da Infinity (o NaN si el patrimonio también es 0).
     b.capitalRatio = getLag(b.lags, LAG.NETWEALTH, s.round, 1) / loans;
@@ -174,11 +186,11 @@ export function adaptiveMarkUpPrice(
   const reference = inventoryQuantity / pastRealSales;
   const previousLowerBound = price / (1 + f.markUp);
   const x = rng.foldedNormal(SITE_MARKUP, r.markUpSigma);
-  if (reference > r.markUpThreshold) f.markUp -= r.markUpAdaptive * f.markUp * x;
+  if (gt(`${SITE_MARKUP} referencia > umbral`, reference, r.markUpThreshold, 'pure')) f.markUp -= r.markUpAdaptive * f.markUp * x;
   else f.markUp += r.markUpAdaptive * f.markUp * x;
   const lb = lowerBound();
-  const p = lb !== 0 ? lb * (1 + f.markUp) : previousLowerBound * (1 + f.markUp);
-  return p > lb ? p : lb;
+  const p = record(`${SITE_MARKUP} piso ≠ 0`, lb !== 0, lb, 0, 'pure') ? lb * (1 + f.markUp) : previousLowerBound * (1 + f.markUp);
+  return gt(`${SITE_MARKUP} precio > piso`, p, lb, 'pure') ? p : lb;
 }
 
 /**
@@ -196,7 +208,7 @@ export function requiredWorkers(capital: readonly CapitalGoodStock[], output: nu
   for (const p of prods) {
     for (const g of capital) {
       if (g.productivity !== p) continue;
-      if (residual > g.productivity * g.quantity) {
+      if (gt('ConsumptionFirm.getRequiredWorkers residual > capacidad de la añada', residual, g.productivity * g.quantity, 'pure')) {
         workers += g.quantity / g.capitalLaborRatio;
         residual -= g.productivity * g.quantity;
       } else {
@@ -246,7 +258,8 @@ export function capitalPriceEvent(s: CaianiState, rng: CaianiRng): void {
 export function consumptionLowerBound(c: FirmState): number {
   const w = wageExpectation(c);
   if (c.desiredOutput > 0) {
-    return (w * Math.round(requiredWorkers(c.capitalGoods, c.desiredOutput))) / c.desiredOutput;
+    const workers = requiredWorkers(c.capitalGoods, c.desiredOutput);
+    return (w * rounding('ConsumptionFirm.getPriceLowerBound Math.round(trabajadores)', workers, Math.round(workers), 'pure')) / c.desiredOutput;
   }
   const inv = c.consumptionGoods[0];
   if (!inv) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
@@ -371,10 +384,10 @@ export const SITE_SWITCHING = 'AbstractSwitchingStrategy.switches';
 export function switchingProbability(previous: number, potential: number, lambda: number, payOrReceive: boolean): number {
   let x: number;
   if (payOrReceive) {
-    if (!(potential < previous)) return 0;
+    if (!lt(`${SITE_SWITCHING} potencial < previo`, potential, previous, 'pure')) return 0;
     x = (lambda * (previous - potential)) / potential;
   } else {
-    if (!(previous < potential)) return 0;
+    if (!lt(`${SITE_SWITCHING} previo < potencial`, previous, potential, 'pure')) return 0;
     x = (lambda * (potential - previous)) / previous;
   }
   if (!(x >= 0)) throw new Error(`switchingProbability: exponente positivo (previous ${previous}, potential ${potential})`);
@@ -420,14 +433,19 @@ export function realCapitalDemand(c: FirmState, newCapital: CapitalGoodStock): n
   for (const old of c.capitalGoods) {
     const lpOld = old.productivity * old.capitalLaborRatio;
     if (old.age !== -1) currentCapacity += old.productivity * old.quantity;
-    if (((lpOld - lpNew) / w) * (old.duration - old.age) - newCapital.price > 0) {
+    const saving = ((lpOld - lpNew) / w) * (old.duration - old.age);
+    // x − p > 0 ⇔ x > p en double (IEEE, con subnormales): se registra contra el precio.
+    if (record('RealCapitalDemandWithPayBackPeriod obsolescencia', saving - newCapital.price > 0, saving, newCapital.price, 'pure')) {
       old.obsolete = true;
     } else if (old.duration - old.age > 1) {
       residualCapacity += old.productivity * old.quantity;
     }
   }
   const desiredCapacity = (1 + c.desiredCapacityGrowth) * currentCapacity;
-  if (desiredCapacity >= residualCapacity) return javaRoundToInt((desiredCapacity - residualCapacity) / newCapital.productivity);
+  if (ge('RealCapitalDemandWithPayBackPeriod deseada ≥ residual', desiredCapacity, residualCapacity, 'pure')) {
+    const x = (desiredCapacity - residualCapacity) / newCapital.productivity;
+    return rounding('RealCapitalDemandWithPayBackPeriod Math.round(demanda)', x, javaRoundToInt(x), 'pure');
+  }
   return 0;
 }
 
@@ -472,7 +490,7 @@ export function investmentDemandEvent(s: CaianiState, rng: CaianiRng): void {
     let maxAttr = -Infinity;
     for (const k of sellers) {
       const a = capitalAttractiveness(w, offered(k));
-      if (a > maxAttr) {
+      if (gt('BestQualityPriceCapitalSupplierWithSwitching mejor atractivo', a, maxAttr, 'pure')) {
         best = k;
         maxAttr = a;
       }
@@ -480,7 +498,10 @@ export function investmentDemandEvent(s: CaianiState, rng: CaianiRng): void {
     const prev = c.previousCapitalSupplier;
     if (prev === null) throw new Error(`empresa de consumo ${c.id} sin proveedor de capital previo (JMAB: NullPointerException)`);
     const prevAttr = capitalFirm(prev).active[MKT.CAPGOOD] ? capitalAttractiveness(w, offered(prev)) : -Infinity;
-    if (prevAttr < maxAttr) {
+    // Si el previo es el mejor, los dos atractivos son el mismo cálculo: no es una decisión que pueda
+    // darse vuelta y no se registra. Un empate con otra empresa sí se registra.
+    const prevWorse = prev === best ? prevAttr < maxAttr : lt('BestQualityPriceCapitalSupplierWithSwitching previo < mejor', prevAttr, maxAttr, 'pure');
+    if (prevWorse) {
       if (prevAttr === -Infinity || switches(prevAttr, maxAttr, s.rules.capitalSwitchingLambda, s.rules.capitalSwitchingPayOrReceive, rng)) {
         c.previousCapitalSupplier = best;
       }
@@ -496,45 +517,67 @@ export function investmentDemandEvent(s: CaianiState, rng: CaianiRng): void {
 
 export const SITE_INTEREST_RATE = 'CopyOfAdaptiveInterestRateAverageThreshold.computeInterestRate';
 
+/** Parámetros de una `CopyOfAdaptiveInterestRateAverageThreshold` (uno por mercado). */
+export interface AdaptiveRateParams {
+  /** `adaptiveParameter`. */
+  adaptive: number;
+  /** `increase`: si es false, con la referencia por encima del promedio la tasa baja. */
+  increase: boolean;
+  /** Desvío de la normal plegada de la estrategia. */
+  sigma: number;
+  /** `Bank.getInterestRateUpperBound(mktId)`: +∞ en crédito, `advancesInterestRate` en depósitos. */
+  upperBound: number;
+  /** Nombre de la variable de referencia, para el registro de decisiones. */
+  reference: string;
+}
+
 /**
- * `CopyOfAdaptiveInterestRateAverageThreshold.computeInterestRate` con `mktId` = MKT_CREDIT (64–102):
- * - promedios sobre los bancos con préstamos (saldo ≠ 0) y patrimonio > 0, en el orden de la lista de la
- *   población (`banks.getAgents()`; importa para la suma en double): umbral = ratio de capital medio,
- *   tasa media = `LAG_LOANINTEREST` del período anterior (`getPassedValue(…, 1)`). Sin ninguno, 0/0 = NaN;
- * - referencia = ratio de capital del banco (evento 0);
- * - con `increase` = false: si la referencia supera el umbral, tasa = media − a·media·|N|; si no,
- *   media + a·media·|N|. Un sorteo por banco en cualquier rama;
- * - acotada a [0, +∞) (`Bank.getInterestRateLowerBound` / `UpperBound` del crédito). `Math.max`/`min`
+ * `CopyOfAdaptiveInterestRateAverageThreshold.computeInterestRate` (47–103), para los dos mercados en
+ * que la usan los bancos:
+ * - promedios sobre `banks`, en el orden de la lista de la población (`banks.getAgents()`; importa para
+ *   la suma en double): umbral = referencia media, tasa media = tasa del mercado rezagada un período.
+ *   Crédito (64–80): solo los bancos con préstamos y patrimonio > 0 (sin ninguno, 0/0 = NaN), con el
+ *   ratio de capital y `LAG_LOANINTEREST`. Depósitos (53–63): todos los bancos, con el ratio de
+ *   liquidez y `LAG_DEPOSITINTEREST`. Quien llama arma `banks`;
+ * - con `increase` = false: si la referencia del banco supera el umbral, tasa = media − a·media·|N|; si
+ *   no, media + a·media·|N|. Un sorteo por banco en cualquier rama;
+ * - acotada a [0, techo] (`Bank.getInterestRateLowerBound` = 0 en los dos mercados). `Math.max`/`min`
  *   de Java y de JS propagan NaN igual.
- * `eligible` son los bancos que entran en los promedios, ya en el orden de la población.
  */
-export function adaptiveLoanRate(
+export function adaptiveInterestRate(
   referenceVariable: number,
-  eligible: readonly { capitalRatio: number; pastLoanRate: number }[],
+  banks: readonly { ratio: number; pastRate: number }[],
   rng: CaianiRng,
-  r: { loanRateAdaptive: number; loanRateIncrease: boolean; loanRateSigma: number },
+  p: AdaptiveRateParams,
 ): number {
   let tot = 0;
   let inter = 0;
-  for (const b of eligible) {
-    tot += b.capitalRatio;
-    inter += b.pastLoanRate;
+  for (const b of banks) {
+    tot += b.ratio;
+    inter += b.pastRate;
   }
-  const n = eligible.length;
+  const n = banks.length;
   const threshold = tot / n;
   const avInterest = inter / n;
   // `adaptiveParameter*avInterest*distribution.nextDouble()`: se evalúa de izquierda a derecha.
-  const step = () => r.loanRateAdaptive * avInterest * rng.foldedNormal(SITE_INTEREST_RATE, r.loanRateSigma);
+  const step = () => p.adaptive * avInterest * rng.foldedNormal(SITE_INTEREST_RATE, p.sigma);
   let iR: number;
-  if (referenceVariable > threshold) iR = r.loanRateIncrease ? avInterest + step() : avInterest - step();
-  else iR = r.loanRateIncrease ? avInterest - step() : avInterest + step();
-  return Math.min(Math.max(iR, 0), Infinity);
+  // La referencia (ratio de capital o de liquidez) sale de montos.
+  if (gt(`${SITE_INTEREST_RATE} ${p.reference} > promedio`, referenceVariable, threshold, 'fromAmounts')) {
+    iR = p.increase ? avInterest + step() : avInterest - step();
+  } else {
+    iR = p.increase ? avInterest - step() : avInterest + step();
+  }
+  record(`${SITE_INTEREST_RATE} piso 0`, iR > 0, iR, 0, 'pure', avInterest);
+  if (p.upperBound !== Infinity) record(`${SITE_INTEREST_RATE} techo`, iR < p.upperBound, iR, p.upperBound, 'pure');
+  return Math.min(Math.max(iR, 0), p.upperBound);
 }
 
 /**
  * Evento 6, `creditSupplyTic` (TIC_CREDITSUPPLY): solo los bancos, en orden de creación
  * (`Bank.onTicArrived` 199–202):
- * 1. `determineBankGenericInterestRate` (273–277): `bankInterestRate` con `adaptiveLoanRate`. Los
+ * 1. `determineBankGenericInterestRate` (273–277): `bankInterestRate` con `adaptiveInterestRate`
+ *    (crédito: bancos con préstamos y patrimonio > 0, ratio de capital, techo +∞). Los
  *    promedios leen el ratio de capital del evento 0 y la tasa rezagada: no dependen de las tasas que
  *    ya fijaron los otros bancos en este evento.
  * 2. `determineCreditSupply` (378–387): `InfiniteSupplyCreditStrategy` → +∞; se guarda en
@@ -552,13 +595,95 @@ export function creditSupplyEvent(s: CaianiState, rng: CaianiRng): void {
   // `getNumericBalanceSheet()[0][SM_LOAN] != 0 && getNetWealth() > 0`. No cambia dentro del evento.
   const eligible = s.populations.banks
     .map(bank)
-    .filter((b) => sumContracts(L, b.id, 'assets', 'loan') !== 0 && netFinancialWorth(L, b.id) > 0)
-    .map((b) => ({ capitalRatio: b.capitalRatio, pastLoanRate: getLag(b.lags, LAG.LOANINTEREST, s.round, 1) }));
+    .filter((b) => {
+      const loans = sumContracts(L, b.id, 'assets', 'loan');
+      return (
+        record(`${SITE_INTEREST_RATE} préstamos ≠ 0`, loans !== 0, loans, 0, 'amount') &&
+        gt(`${SITE_INTEREST_RATE} patrimonio > 0`, netFinancialWorth(L, b.id), 0, 'amount')
+      );
+    })
+    .map((b) => ({ ratio: b.capitalRatio, pastRate: getLag(b.lags, LAG.LOANINTEREST, s.round, 1) }));
+  const p: AdaptiveRateParams = {
+    adaptive: s.rules.loanRateAdaptive,
+    increase: s.rules.loanRateIncrease,
+    sigma: s.rules.loanRateSigma,
+    upperBound: Infinity, // Bank.getInterestRateUpperBound(MKT_CREDIT)
+    reference: 'ratio de capital',
+  };
   for (const b of s.banks) {
-    b.bankInterestRate = adaptiveLoanRate(b.capitalRatio, eligible, rng, s.rules);
+    b.bankInterestRate = adaptiveInterestRate(b.capitalRatio, eligible, rng, p);
     const loanSupply = Infinity; // InfiniteSupplyCreditStrategy.computeCreditSupply
     b.totalLoanSupply = loanSupply;
     setLag(b.lags, LAG.BANKTOTLOANSUPPLY, s.round, loanSupply);
     if (b.totalLoanSupply > 0) b.active[MKT.CREDIT] = true;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 7: tasa de los depósitos
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 7, `depSupplyTic` (TIC_DEPOSITSUPPLY): solo los bancos, en orden de creación
+ * (`Bank.onTicArrived` 203–205 → `determineDepositInterestRate` 369–375): `depositInterestRate` con
+ * `adaptiveInterestRate` en el mercado de depósitos (`banksDepInterestStrategy`, XML 2512–2520):
+ * promedios de **todos** los bancos (ratio de liquidez del evento 0 y `LAG_DEPOSITINTEREST` del período
+ * anterior), techo = `advancesInterestRate` del banco; y el banco queda activo en depósitos.
+ */
+export function depositSupplyEvent(s: CaianiState, rng: CaianiRng): void {
+  const firstB = s.banks[0]!.id;
+  const all = s.populations.banks.map((id) => {
+    const b = s.banks[id - firstB];
+    if (!b || b.id !== id) throw new Error(`el agente ${id} no es un banco`);
+    return { ratio: b.liquidityRatio, pastRate: getLag(b.lags, LAG.DEPOSITINTEREST, s.round, 1) };
+  });
+  const p: AdaptiveRateParams = {
+    adaptive: s.rules.depositRateAdaptive,
+    increase: s.rules.depositRateIncrease,
+    sigma: s.rules.depositRateSigma,
+    upperBound: s.rules.bankAdvancesInterestRate, // Bank.getInterestRateUpperBound(MKT_DEPOSIT)
+    reference: 'ratio de liquidez',
+  };
+  for (const b of s.banks) {
+    b.depositInterestRate = adaptiveInterestRate(b.liquidityRatio, all, rng, p);
+    b.active[MKT.DEPOSIT] = true;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 8: intereses de los depósitos
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 8, `depInterestTic` (TIC_DEPINTERESTS): solo los bancos, en orden de creación
+ * (`Bank.onTicArrived` 196–198 → `payDepositInterests` 392–403). Para cada depósito del banco, en el
+ * orden de su lista:
+ * - interés = tasa **del contrato** × saldo; el depositante lo registra con `interestPaid`, que
+ *   **asigna** (no suma: si un agente tuviera dos depósitos quedaría el último, como en JMAB);
+ * - el saldo se capitaliza (`setValue(valor·(1 + tasa))`): no hay contrapartida en dinero, el banco
+ *   le paga al depositante con su propio pasivo (`credit`, flujo `depositInterest`);
+ * - `totInterestsDeposits` = suma de los intereses del banco.
+ * En µ: interés = `Math.round(saldo × tasa)` (como las ganancias del BC); el saldo nuevo es saldo +
+ * interés, y `interestReceived` y `totInterestsDeposits` son lo acreditado. Diferencia con JMAB:
+ * valor·(1 + tasa) contra valor + redondeo(valor·tasa), menos de 1 µ por depósito.
+ */
+export function depositInterestEvent(s: CaianiState): void {
+  const L = s.ledger;
+  const holderOf = new Map<AgentId, { interestReceived: Micro }>();
+  for (const h of s.households) holderOf.set(h.id, h);
+  for (const f of s.consumptionFirms) holderOf.set(f.id, f);
+  for (const f of s.capitalFirms) holderOf.set(f.id, f);
+  for (const b of s.banks) {
+    let tot = 0;
+    for (const id of contractIds(L, b.id, 'liabilities', 'deposit')) {
+      const c = contractOf(L, id);
+      const interest = Math.round(c.amount * c.rate);
+      const depositor = holderOf.get(c.holder);
+      if (!depositor) throw new Error(`depósito ${id} del banco ${b.id}: el tenedor ${c.holder} no es hogar ni empresa`);
+      depositor.interestReceived = interest;
+      tot += interest;
+      credit(L, id, interest, 'depositInterest');
+    }
+    b.totInterestsDeposits = tot;
   }
 }

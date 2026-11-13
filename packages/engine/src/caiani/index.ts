@@ -11,3 +11,4 @@ export * from './params';
 export * from './state';
 export * from './init';
 export * from './events';
+export * from './decisions';
