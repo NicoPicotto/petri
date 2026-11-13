@@ -55,7 +55,7 @@ Hay tres versiones distintas, y no son iguales:
 **Se reutiliza tal cual:** `rng`, `step` y las etapas, `warmup`, perillas/log/`replay`, `hash`, `detmath` y `creditRisk` (logística, `expNeg`), los tests de infraestructura, la app (workers, lockstep, grilla), las métricas de `cambio-de-enfoque.md`.
 
 **Se adapta:**
-- **Ledger con contratos bilaterales.** Hoy las posiciones son agregadas por agente y no dicen en qué banco está un depósito. Con 10 bancos: depósitos, préstamos (con tasa, plazo, edad y cuota), bonos y reservas son contratos (tenedor, emisor, monto). Un pago entre clientes de bancos distintos mueve reservas (como en JMAB). Las primitivas `issue`/`transfer`/`redeem` y `checkSfc` se conservan, a nivel de contrato.
+- **Ledger con contratos bilaterales** (diseño detallado: [ledger-contratos.md](ledger-contratos.md)). Hoy las posiciones son agregadas por agente y no dicen en qué banco está un depósito. Con 10 bancos: depósitos, préstamos (con tasa, plazo, edad y cuota), bonos y reservas son contratos (tenedor, emisor, monto). Un pago entre clientes de bancos distintos mueve reservas (como en JMAB). Las primitivas `issue`/`transfer`/`redeem` y `checkSfc` se conservan, a nivel de contrato.
 - **Escala monetaria.** Caiani usa `double`: salario 5 por trimestre, precio 1,03. En centavos, el paso del margen (~0,3 centavos) se redondea a cero. Propuesta: precios, tasas y expectativas en `double` (deterministas con las cuatro operaciones), saldos enteros en una unidad mucho más chica (p. ej. 1 unidad de Caiani = 10⁶), verificando el techo de `MAX_SAFE_INTEGER`. A decidir en P1.
 - **Normal plegada determinista.** Propuesta: tabla precalculada de la inversa de la normal con interpolación (o ziggurat con `expNeg`), documentada como adaptación y con test de momentos. Lo demás: `pow` con exponente entero → multiplicaciones; `log` en `thresholdMean` → constante precalculada; `exp` → `detmath`.
 - **Archivo de corrida v3** (cambian el estado y el período).
@@ -71,26 +71,26 @@ Hay tres versiones distintas, y no son iguales:
 - **V1, condiciones iniciales.** Portar `SFCSSMacroAgentInitialiser`; el balance del período 0 igual al de Java salvo redondeo.
 - **V2, regla por regla.** Ecuación y línea de JMAB al lado del código; test calculado a mano (patrón de `test/rules-by-hand.test.ts`).
 - **V3, oráculo con trazas.** JMAB instrumentado con semilla fija vuelca el estado y la secuencia de números aleatorios consumidos. El port recibe ese estado y un `Rng` que devuelve esa secuencia, calcula el tick siguiente y se compara etapa por etapa (tolerancia relativa 1e-9 en `double`, redondeo en saldos). De a un tick, desde estados en t = 1, 50, 200 y 399 (en trayectorias largas es esperable que algún umbral se dé vuelta). Obliga a respetar el orden de eventos y de sorteos de JMAB.
-- **V4, reproducción estadística.** 25 réplicas × 400 trimestres; se descartan las que colapsan (desempleo > 80%, como su script); filtro HP λ = 1600; últimos 100 trimestres (`startRound = simRounds − 100` en `BaselineAnalysis.R`).
+- **V4, reproducción estadística.** 100 réplicas × 400 trimestres por lado; se descartan las que colapsan (desempleo > 80%, como su script); filtro HP λ = 1600; últimos 100 trimestres (`startRound = simRounds − 100` en `BaselineAnalysis.R`).
 
-  **Objetivo: la distribución del `.jar` del paper** (decisión de Nico, 2026-11-12: si las réplicas confirmaban la diferencia con la tabla publicada, "manda el código"). Se confirmó con 25 réplicas (detalle en [caiani-referencia.md](caiani-referencia.md), "Lote de 25 réplicas"). Archivo de referencia: `reference/p0/runs/resumen-25.json` (promedio de la tendencia en la ventana, por réplica).
+  **Objetivo: la distribución del `.jar` del paper** (decisión de Nico, 2026-11-12: si las réplicas confirmaban la diferencia con la tabla publicada, "manda el código"). Se confirmó con 25 réplicas y se reconfirmó con 100 (detalle en [caiani-referencia.md](caiani-referencia.md), "Lote de 25 réplicas" y "Lote de 100 réplicas"). Archivo de referencia: `reference/p0/runs/resumen-100.json` (promedio de la tendencia en la ventana, por réplica).
 
-  | Indicador | `.jar`: media de 25 réplicas (desvío entre réplicas) | Tabla publicada ("Summary Baseline", solo como registro) |
+  | Indicador | `.jar`: media de 100 réplicas (desvío entre réplicas) | Tabla publicada ("Summary Baseline", solo como registro) |
   |---|---|---|
-  | PBI real | 36.949 (68) | 36.760 |
-  | Desempleo | 7,51% (0,10) | 7,84% |
-  | Inversión real | 6.888 (51) | 6.962 |
-  | Consumo real | 30.061 (85) | 29.790 |
-  | Inflación de bienes de consumo | 0,530% trimestral (0,020) | 0,4245% |
-  | Inflación de bienes de capital | 0,566% trimestral (0,020) | 0,4607% |
-  | Crecimiento del ingreso neto | 0,534% trimestral (0,019) | 0,4231% |
-  | Apalancamiento de los bancos | 5,42 (0,73) | 5,049 |
-  | Apalancamiento de las empresas de consumo | 0,834 (0,014) | 0,7456 |
+  | PBI real | 36.947 (78) | 36.760 |
+  | Desempleo | 7,52% (0,10) | 7,84% |
+  | Inversión real | 6.908 (54) | 6.962 |
+  | Consumo real | 30.039 (95) | 29.790 |
+  | Inflación de bienes de consumo | 0,532% trimestral (0,022) | 0,4245% |
+  | Inflación de bienes de capital | 0,572% trimestral (0,021) | 0,4607% |
+  | Crecimiento del ingreso neto | 0,536% trimestral (0,021) | 0,4231% |
+  | Apalancamiento de los bancos | 5,51 (0,75) | 5,049 |
+  | Apalancamiento de las empresas de consumo | 0,831 (0,017) | 0,7456 |
 
   Más la volatilidad del ciclo y las correlaciones, también calculadas sobre las réplicas del `.jar` (las de `Summary Correlation Analysis Baseline.xlsx` quedan como registro).
 
   **Criterio de V4 (acordado con Nico el 2026-11-12, escrito antes de cualquier resultado del port).** Implementado en `reference/tools/v4_compare.py`; los estadísticos por réplica salen de `reference/tools/analyze_baseline.py`, con las mismas definiciones que `BaselineAnalysis.R`.
-  - **Unidad de comparación:** un valor por réplica y por estadístico. Las réplicas del port usan semillas distintas entre sí, con la misma regla de descarte (desempleo > 0,8). El `.jar` no tuvo ninguna caída en 25; cualquier caída del port se investiga.
+  - **Unidad de comparación:** un valor por réplica y por estadístico. Las réplicas del port usan semillas distintas entre sí, con la misma regla de descarte (desempleo > 0,8). El `.jar` no tuvo ninguna caída en 100; cualquier caída del port se investiga.
   - **Estadísticos (34 por réplica):**
     - los 9 promedios de la tendencia en la ventana (tabla de arriba);
     - los 9 desvíos del ciclo relativo a la tendencia en la ventana (`cycSD:`, lo que la fila "Standard Deviation Cycle" promedia);
@@ -110,7 +110,8 @@ Hay tres versiones distintas, y no son iguales:
     - Con n = 25, cada estadístico falla por azar con probabilidad P(|Z| > 1,77) ≈ 8%: un port perfecto pasaría sin fallas solo ~6% de las veces.
     - Prueba empírica (`v4_compare.py --split`, el `.jar` contra sí mismo, 12 réplicas contra 13): 13 fallas de 43, todas por tamaño; Holm no rechazó ninguna.
     - Con **100 réplicas por lado** (las que dice el paper), la probabilidad de falla por azar en cada estadístico de medias es ~0,04%, y un port perfecto pasa ~99% de las veces.
-    - **Propuesta, a confirmar por Nico:** 100 réplicas del `.jar` (faltan 75, ~8 horas con 4 en paralelo) y 100 del port.
+    - **Decisión (Nico, 2026-11-12): 100 réplicas del `.jar` y 100 del port.** La tabla de arriba ya es la de las 100 del `.jar` (2026-11-13).
+    - Prueba empírica con las 100 (`v4_compare.py --split`, 50 contra 50): **0 fallas de 43**; el tamaño más grande fue 0,34 desvíos (ccf+1 de la inversión). Con 100 contra 100 el margen es mayor todavía.
 - **V5, sensibilidades.** Los experimentos del paper (aversión al riesgo de los bancos, depósitos precautorios, pesos de la inversión) en la misma dirección y orden de magnitud.
 - **Después:** volver a correr el criterio de la Fase 0 (emisión ⇒ inflación) y el de G = 0 sobre el port.
 

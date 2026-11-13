@@ -106,6 +106,24 @@ Texto extraído en `reference/p0/paper-wp.txt` (`pdftotext -layout`). Secuencia 
   - Origen probable: otra versión del código u otra configuración que la del `.jar` (no se investigó más). Coincide con que en las tablas de sensibilidad del propio paper, con parámetros vecinos al base, la inflación da 0,50–0,52.
   - **Por decisión de Nico, el objetivo de V4 es la distribución del `.jar`** (`plan-port-caiani.md`, sec. 4). La tabla publicada queda como registro.
 
+- **Lote de 100 réplicas (2026-11-12/13):** `reference/tools/run-baseline.sh 100 4` sumó las 75 que faltaban (de las 16:00 a las 03:47, ~31 minutos por réplica con 4 en paralelo; 4,9 GB en total). **Ninguna colapsó.** Resumen en `reference/p0/runs/resumen-100.json`; es la referencia de V4.
+
+  | | Publicado | `.jar` (media de 100) | Desvío entre réplicas | Réplicas del lado del publicado | z (lote de 25 / de 100) | ¿Dentro del IP 95%? |
+  |---|---|---|---|---|---|---|
+  | PBI real | 36.760 | 36.947 | 78 | 2/100 | −10,7 / −16,9 | No |
+  | Desempleo | 7,84% | 7,52% | 0,10 | 0/100 por encima | +14,7 / +23,2 | No |
+  | Inversión real | 6.962 | 6.908 | 54 | 14/100 por encima | +4,4 / +7,0 | No |
+  | Consumo real | 29.790 | 30.039 | 95 | 0/100 (mín 29.796) | −11,8 / −18,6 | No |
+  | Inflación C | 0,4245 | 0,532 | 0,022 | 0/100 (mín 0,483) | −21,8 / −34,4 | No |
+  | Inflación K | 0,4607 | 0,572 | 0,021 | 0/100 (mín 0,521) | −23,4 / −37,0 | No |
+  | Crecimiento del ingreso neto | 0,4231 | 0,536 | 0,021 | 0/100 (mín 0,486) | −24,0 / −37,9 | No |
+  | Apalancamiento bancos | 5,049 | 5,51 | 0,75 | 28/100 | −2,7 / −4,3 | No (p = 0,008 / 4e-5) |
+  | Apalancamiento empresas C | 0,7456 | 0,831 | 0,017 | 0/100 (mín 0,783) | −22,2 / −35,0 | No |
+
+  - Las medias casi no se movieron respecto del lote de 25; la conclusión se mantiene y se refuerza. **Ahora los nueve indicadores quedan afuera**, incluido el apalancamiento de los bancos (con 25 réplicas había quedado adentro por poco).
+  - El `.jar` contra sí mismo con el criterio de V4 (`v4_compare.py --split`, 50 contra 50): 0 fallas de 43.
+  - Momentos del ciclo (media de 100, desvío): volatilidad relativa al PBI de la inversión 4,60 (0,20), del consumo 0,755 (0,046) y del desempleo 1,038 (0,019); correlación contemporánea con el PBI de la inversión 0,766, del consumo 0,595 y del desempleo −0,532; desempleo en t+1 contra PBI en t −0,964 (0,004); autocorrelación de rezago 1 del PBI 0,552, de la inversión 0,277, del consumo 0,852 y del desempleo 0,426.
+
 ## Oráculo (V3): fuente 2015 instrumentado
 
 - **Qué es:** `reference/p0/oracle/` es una copia de `reference/jmab-2015/src` con todo el azar instrumentado, compilada con ECJ en `oracle.jar`. Se corre con `reference/tools/run-oracle.sh <nombre> <semilla> <rondas> [desde hasta]`.
