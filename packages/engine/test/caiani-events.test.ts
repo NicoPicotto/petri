@@ -29,6 +29,7 @@ import {
   laborDemandEvent,
   governmentLaborEvent,
   laborMarketEvent,
+  productionEvent,
   adaptiveWage,
   wageMicroReference,
   expectedReturnCreditSupply,
@@ -364,7 +365,7 @@ describe('eventos 7 y 8 (depósitos): casos a mano', () => {
     }
   });
 
-  it('evento 8: cada depósito capitaliza round(saldo × tasa del contrato); el depositante lo registra', () => {
+  it('evento 8: cada depósito capitaliza su interés (saldo × tasa del contrato, con arrastre sobre la lista del banco); el depositante lo registra', () => {
     const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
     const b = s.banks[0]!;
     const ids = contractIds(s.ledger, b.id, 'liabilities', 'deposit');
@@ -374,15 +375,20 @@ describe('eventos 7 y 8 (depósitos): casos a mano', () => {
     before[0]!.rate = 0.01;
     depositInterestEvent(s);
     let tot = 0;
+    let acc = 0;
     ids.forEach((id, n) => {
       const c0 = before[n]!;
-      const interest = Math.round(c0.amount * c0.rate);
+      // Arrastre: round(Σ hasta acá) − round(Σ hasta el anterior).
+      const interest = Math.round(acc + c0.amount * c0.rate) - Math.round(acc);
+      acc += c0.amount * c0.rate;
+      expect(Math.abs(interest - c0.amount * c0.rate)).toBeLessThan(1);
       tot += interest;
       expect(contractOf(s.ledger, id).amount).toBe(c0.amount + interest);
     });
     expect(b.totInterestsDeposits).toBe(tot);
     const h = s.households.find((x) => x.id === before[0]!.holder)!;
-    expect(h.interestReceived).toBe(Math.round(before[0]!.amount * 0.01));
+    expect(h.interestReceived).toBe(Math.round(before[0]!.amount * 0.01)); // el primero de la lista: sin arrastre previo
+    expect(Math.abs(tot - acc)).toBeLessThanOrEqual(0.5); // el total, a ≤ 0,5 µ de la suma en double
     // Hogar con 10,088… de depósito a 0,25%: 25.220 µ (JMAB: 0,025220041596875).
     expect(Math.round(10_088_016.63875 * 0.0025)).toBe(25_220);
   });
@@ -798,6 +804,82 @@ describe('eventos 11 a 14 (mercado de trabajo): casos a mano', () => {
   });
 });
 
+describe('evento 15 (producción): casos a mano', () => {
+  it('consumo: añadas de la más productiva a la menos, fracción de la última; costo unitario; rezagos', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const c = s.consumptionFirms[0]!;
+    // 20 añadas de 20 unidades, productividad 1, capital/trabajo 6,4 (3,125 trabajadores cada una).
+    // 47 empleados: 15 añadas enteras (46,875 trabajadores, 300 unidades) y 0,125·6,4 = 0,8 de la 16.ª.
+    c.employees = c.employees.slice(0, 47);
+    for (const [i, id] of c.employees.entries()) s.households.find((h) => h.id === id)!.wage = i < 40 ? 5 : 6;
+    const inv0 = c.consumptionGoods[0]!.quantity;
+    let amort = 0;
+    let cap = 0;
+    for (const g of c.capitalGoods) {
+      amort += (g.price * g.quantity) / g.amortization;
+      cap += g.value;
+    }
+    productionEvent({ ...s, capitalFirms: [] });
+    expect(c.consumptionGoods[0]!.quantity).toBe(inv0 + (300 + 6.4 * (47 - 46.875)));
+    expect(c.consumptionGoods[0]!.unitCost).toBe((amort + (40 * 5 + 7 * 6)) / (300 + 6.4 * (47 - 46.875)));
+    expect(c.lags[LAG.PRODUCTION]![1]).toBe(300 + 6.4 * (47 - 46.875));
+    expect(c.lags[LAG.CAPACITY]![1]).toBe(400);
+    expect(c.lags[LAG.CAPITALFINANCIALVALUE]![1]).toBe(cap);
+    expect(c.active[MKT.CONSGOOD]).toBe(true);
+    // Una añada más productiva se usa primero: con productividad 2 en la última de la lista y 3,125
+    // trabajadores, produce 40 con ellos aunque esté al final.
+    const d = s.consumptionFirms[1]!;
+    d.capitalGoods[19]!.productivity = 2;
+    d.employees = d.employees.slice(0, 4); // 3,125 en la de productividad 2 (40) y 0,875 en la primera (5,6)
+    const q0 = d.consumptionGoods[0]!.quantity;
+    productionEvent({ ...s, consumptionFirms: [d], capitalFirms: [] });
+    expect(d.consumptionGoods[0]!.quantity).toBeCloseTo(q0 + 40 + 0.875 * 6.4, 12);
+  });
+
+  it('consumo sin empleados: no produce, el costo unitario no cambia, inactiva si no tiene inventario', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const c = s.consumptionFirms[0]!;
+    for (const id of c.employees) s.households.find((h) => h.id === id)!.employer = null;
+    c.employees = [];
+    c.consumptionGoods[0]!.quantity = 0;
+    const uc = c.consumptionGoods[0]!.unitCost;
+    productionEvent({ ...s, capitalFirms: [] });
+    expect(c.lags[LAG.PRODUCTION]![1]).toBe(0);
+    expect(c.lags[LAG.CAPACITY]![1]).toBe(400);
+    expect(c.consumptionGoods[0]!.unitCost).toBe(uc);
+    expect(c.active[MKT.CONSGOOD]).toBe(false);
+  });
+
+  it('capital: requeridos × 2; con demanda de trabajo sin cubrir, empleados × 2; valor contable recalculado', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const k = s.capitalFirms[0]!;
+    const inv = k.capitalGoods[0]!;
+    const q0 = inv.quantity;
+    k.desiredOutput = 81; // round(40,5) = 41 trabajadores → 82
+    k.laborDemand = 0;
+    for (const id of k.employees) s.households.find((h) => h.id === id)!.wage = 5;
+    productionEvent({ ...s, consumptionFirms: [], capitalFirms: [k] });
+    expect(inv.quantity).toBe(q0 + 82);
+    expect(inv.unitCost).toBe((k.employees.length * 5) / 82);
+    expect(inv.value).toBe(inv.price * inv.quantity * (1 - inv.age / inv.amortization)); // CapitalGood.setQuantity
+    // Restringida (le faltan trabajadores), sin I+D: 41/41 = 1 → produce con los 50 que tiene: 100.
+    k.laborDemand = 3;
+    const q1 = inv.quantity;
+    productionEvent({ ...s, consumptionFirms: [], capitalFirms: [k] });
+    expect(inv.quantity).toBe(q1 + 2 * k.employees.length);
+    // Con I+D > 0 la división entera de JMAB da 41 / (41 + 1) = 0: no produce (la I+D está apagada en el base).
+    k.amountResearch = 5;
+    k.expectations[EXPECTATION.WAGES]!.expectation = 5;
+    const q2 = inv.quantity;
+    productionEvent({ ...s, consumptionFirms: [], capitalFirms: [k] });
+    expect(inv.quantity).toBe(q2);
+    expect(inv.unitCost).toBe(Infinity); // masa salarial / 0, como Java
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–14. */
@@ -823,6 +905,7 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   { e: 12, run: laborDemandEvent },
   { e: 13, run: governmentLaborEvent },
   { e: 14, run: laborMarketEvent },
+  { e: 15, run: (s) => productionEvent(s) },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
@@ -830,7 +913,7 @@ const LAST = EVENTS[EVENTS.length - 1]!.e;
  * Montos que no cumplen la regla general de tolerancia y quedan reportados (no se agranda la tolerancia):
  * se informan en cada corrida y esperan una decisión. Ver reglas-caiani.md, sec. 1, "Tolerancias".
  */
-const REPORTED_AMOUNT_FIELDS: string[] = ['intereses pagados a depósitos', 'servicio de la deuda', 'intereses de la deuda', 'crédito pedido'];
+const REPORTED_AMOUNT_FIELDS: string[] = []; // vacía desde el redondeo con arrastre (2026-11-13)
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;

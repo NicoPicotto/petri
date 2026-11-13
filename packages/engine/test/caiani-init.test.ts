@@ -19,7 +19,7 @@ import {
   contractIds,
   contractOf,
   initialize,
-  installment,
+  installments,
   parseDraws,
   toMicro,
   type CaianiState,
@@ -71,15 +71,19 @@ describe('inicialización del port de Caiani: casos a mano', () => {
   });
 
   it('los préstamos iniciales cierran en cero exactamente a la edad 20 (no hay condonación)', () => {
+    // Se pagan las cuotas de cada empresa tick por tick (installments, con arrastre sobre la lista) y se
+    // envejecen los préstamos, sin sacar los que cierran.
+    const M = structuredClone(L);
     for (const f of [...s.consumptionFirms, ...s.capitalFirms]) {
-      for (const id of contractIds(L, f.id, 'liabilities', 'loan')) {
-        const l = { ...contractOf(L, id) };
-        while (l.age <= (l.length as number)) {
-          l.amount -= installment(l).principal;
-          l.age += 1;
-        }
-        expect(l.amount).toBe(0);
+      const ids = contractIds(M, f.id, 'liabilities', 'loan');
+      for (let t = 0; t < 20; t++) {
+        installments(M, f.id, 'loan').forEach((due, i) => {
+          const l = contractOf(M, ids[i]!);
+          if (l.age <= (l.length as number)) l.amount -= due.principal;
+        });
+        for (const id of ids) contractOf(M, id).age += 1;
       }
+      for (const id of ids) expect(contractOf(M, id).amount).toBe(0);
     }
   });
 

@@ -116,3 +116,27 @@ export function allocateLargestRemainder(total: Micro, weights: readonly number[
   }
   return parts;
 }
+
+/**
+ * Redondeo con arrastre (decisión de Nico, 2026-11-13; reglas-caiani.md, sec. 1): cuando un agente recorre
+ * una lista de montos que JMAB acumula en `double` (los depósitos de un banco, los préstamos de una
+ * empresa, los empleados a los que les paga), cada monto se redondea como la diferencia entre la suma
+ * acumulada redondeada y la anterior: mₖ = round(Sₖ) − round(Sₖ₋₁), con Sₖ = x₁ + … + xₖ en `double`.
+ * - cada monto queda a < 1 µ de su `double` (redondeando cada uno por separado, ≤ 0,5 µ);
+ * - la suma de cualquier tramo seguido de la lista queda a ≤ 1 µ de la suma en `double`.
+ * Determinista y con las cuatro operaciones. Para x ≥ 0 los montos son ≥ 0.
+ */
+export class CarryRounder {
+  private sum = 0;
+  private rounded = 0;
+
+  /** Agrega x (en µ, como `double`) y devuelve el monto redondeado que le toca. */
+  add(x: number): Micro {
+    if (!Number.isFinite(x)) throw new Error(`CarryRounder: monto no finito ${x}`);
+    this.sum += x;
+    const r = Math.round(this.sum);
+    const m = r - this.rounded;
+    this.rounded = r;
+    return m === 0 ? 0 : m; // sin −0
+  }
+}

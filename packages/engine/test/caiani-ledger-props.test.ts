@@ -16,7 +16,7 @@ import {
   credit,
   debit,
   firstAsset,
-  installment,
+  installmentOf,
   open,
   pay,
   payTo,
@@ -93,7 +93,10 @@ describe('ledger: propiedades con operaciones al azar', () => {
               const f = rng.pick(w.firms);
               const loans = contractIds(L, f, 'liabilities', 'loan');
               const dep = firstAsset(L, f, 'deposit');
-              if (loans.length > 0 && dep) serviceLoan(L, rng.pick(loans), dep.id);
+              if (loans.length > 0 && dep) {
+                const loan = rng.pick(loans);
+                serviceLoan(L, loan, dep.id, installmentOf(L, loan));
+              }
             } else if (op === 4) {
               // Interés de depósitos capitalizado.
               const dep = firstAsset(L, rng.pick([...w.households, ...w.firms]), 'deposit');
@@ -110,7 +113,7 @@ describe('ledger: propiedades con operaciones al azar', () => {
               const b = rng.pick(w.banks);
               const advs = contractIds(L, b, 'liabilities', 'advance');
               const adv = advs.length > 0 ? contractOf(L, rng.pick(advs)) : undefined;
-              if (adv && installment(adv).principal > 0) serviceLoan(L, adv.id, firstAsset(L, b, 'reserves')!.id);
+              if (adv && installmentOf(L, adv.id).principal > 0) serviceLoan(L, adv.id, firstAsset(L, b, 'reserves')!.id, installmentOf(L, adv.id));
             } else if (op === 8) {
               // Compra de bonos por un banco.
               const b = rng.pick(w.banks);

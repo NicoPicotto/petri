@@ -16,8 +16,8 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { contractIds, contractOf, credit, firstAsset, installment, netFinancialWorth, open, type AgentId, type ContractKind, type Ledger } from './ledger';
-import { toMicro, toUnits, type Micro } from './money';
+import { contractIds, contractOf, credit, firstAsset, installments, netFinancialWorth, open, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { CarryRounder, toMicro, toUnits, type Micro } from './money';
 import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
@@ -56,6 +56,7 @@ export const EVENT = {
   LABOR_DEMAND: 12,
   GOVERNMENT_LABOR: 13,
   LABOR_MARKET: 14,
+  PRODUCTION: 15,
 } as const;
 
 /**
@@ -674,9 +675,10 @@ export function depositSupplyEvent(s: CaianiState, rng: CaianiRng): void {
  * - el saldo se capitaliza (`setValue(valor·(1 + tasa))`): no hay contrapartida en dinero, el banco
  *   le paga al depositante con su propio pasivo (`credit`, flujo `depositInterest`);
  * - `totInterestsDeposits` = suma de los intereses del banco.
- * En µ: interés = `Math.round(saldo × tasa)` (como las ganancias del BC); el saldo nuevo es saldo +
- * interés, y `interestReceived` y `totInterestsDeposits` son lo acreditado. Diferencia con JMAB:
- * valor·(1 + tasa) contra valor + redondeo(valor·tasa), menos de 1 µ por depósito.
+ * En µ: los intereses del banco se redondean **con arrastre** sobre su lista de depósitos (`CarryRounder`,
+ * decisión de Nico del 2026-11-13): cada uno queda a < 1 µ de saldo × tasa y el total, a ≤ 1 µ de la suma
+ * de JMAB. El saldo nuevo es saldo + interés, y `interestReceived` y `totInterestsDeposits` son lo
+ * acreditado.
  */
 export function depositInterestEvent(s: CaianiState): void {
   const L = s.ledger;
@@ -686,9 +688,10 @@ export function depositInterestEvent(s: CaianiState): void {
   for (const f of s.capitalFirms) holderOf.set(f.id, f);
   for (const b of s.banks) {
     let tot = 0;
+    const rounder = new CarryRounder();
     for (const id of contractIds(L, b.id, 'liabilities', 'deposit')) {
       const c = contractOf(L, id);
-      const interest = Math.round(c.amount * c.rate);
+      const interest = rounder.add(c.amount * c.rate);
       const depositor = holderOf.get(c.holder);
       if (!depositor) throw new Error(`depósito ${id} del banco ${b.id}: el tenedor ${c.holder} no es hogar ni empresa`);
       depositor.interestReceived = interest;
@@ -707,14 +710,13 @@ export function depositInterestEvent(s: CaianiState): void {
  * `computeDebtPayments` (`ConsumptionFirm` 355–396, `CapitalFirm` 490–530): por cada préstamo de la
  * empresa (sus pasivos), con edad > 0, interés = tasa × saldo y capital según la amortización; con edad 0
  * (dado en este tick), nada. Devuelve el servicio total (`debtBurden`) y los intereses (`debtInterests`).
- * En µ, con `installment` del ledger (la misma cuota que se paga en el evento 20): difiere de la de JMAB
- * en menos de ~1,5 µ por préstamo (ledger-contratos.md; reglas-caiani.md, sec. 10).
+ * En µ, con `installments` del ledger (las mismas cuotas que se pagan en el evento 20, con redondeo con
+ * arrastre sobre la lista): los totales quedan a ≤ 1 µ de los de JMAB (ledger-contratos.md; reglas-caiani.md, sec. 10).
  */
 export function debtPayments(L: Ledger, firm: AgentId): { burden: Micro; interests: Micro } {
   let burden = 0;
   let interests = 0;
-  for (const id of contractIds(L, firm, 'liabilities', 'loan')) {
-    const due = installment(contractOf(L, id));
+  for (const due of installments(L, firm, 'loan')) {
     burden += due.interest + due.principal;
     interests += due.interest;
   }
@@ -1280,4 +1282,121 @@ export function laborMarketEvent(s: CaianiState, rng: CaianiRng): void {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 15: producción
+// ---------------------------------------------------------------------------------------------
+
+/** `AbstractFirm.getWageBill` (189–195): suma de los salarios de los empleados, en el orden de la lista. */
+function wageBill(s: CaianiState, f: FirmState): number {
+  let w = 0;
+  for (const id of f.employees) w += householdById(s, id).wage;
+  return w;
+}
+
+/**
+ * `CapitalGood.setQuantity` (184–193): cambia la cantidad y recalcula el valor contable,
+ * precio × cantidad × (1 − edad / amortización). `ConsumptionGood` no lo recalcula.
+ */
+function setCapitalGoodQuantity(g: CapitalGoodStock, quantity: number): void {
+  g.quantity = quantity;
+  g.value = g.price * g.quantity * (1 - g.age / g.amortization);
+}
+
+/**
+ * `ConsumptionFirm.produce` (440–500). Con empleados: recorre las añadas de capital (todas, en el orden de
+ * la lista) sumando capacidad (cantidad × productividad), valor (`getValue`: el valor contable, porque la
+ * empresa no es el productor) y amortización (precio × cantidad / amortización); después las usa de la más
+ * productiva a la menos (a igual productividad, en el orden de la lista; `TreeMap.descendingKeySet`): si los
+ * trabajadores que quedan alcanzan para la añada entera (cantidad / capital-trabajo < restantes), produce
+ * productividad × cantidad; si no, capital-trabajo × restantes × productividad (usa una fracción) y no
+ * quedan trabajadores. Suma la producción al inventario y fija el costo unitario = (amortización + masa
+ * salarial) / producción. Sin empleados: solo capacidad y valor. Activa en el mercado de consumo si el
+ * inventario es > 0. Rezagos: producción, capacidad y valor financiero del capital.
+ */
+function consumptionProduce(s: CaianiState, c: FirmState): void {
+  let outputQty = 0;
+  let capacity = 0;
+  let capValue = 0;
+  const inventories = c.consumptionGoods[0];
+  if (!inventories) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
+  if (c.employees.length > 0) {
+    let amortisationCosts = 0;
+    for (const g of c.capitalGoods) {
+      capacity += g.quantity * g.productivity;
+      capValue += goodValue(g, c.id);
+      amortisationCosts += (g.price * g.quantity) / g.amortization;
+    }
+    const prods: number[] = [];
+    for (const g of c.capitalGoods) if (!prods.includes(g.productivity)) prods.push(g.productivity);
+    prods.sort((a, b) => b - a);
+    let residualWorkers = c.employees.length;
+    for (const p of prods) {
+      for (const g of c.capitalGoods) {
+        if (g.productivity !== p) continue;
+        const employedWorkers = g.quantity / g.capitalLaborRatio;
+        // No se registra como decisión: en el umbral las dos ramas dan la misma producción (es continua).
+        if (employedWorkers < residualWorkers) {
+          outputQty += g.productivity * g.quantity;
+          residualWorkers -= employedWorkers;
+        } else {
+          outputQty += g.capitalLaborRatio * residualWorkers * g.productivity;
+          residualWorkers = 0;
+        }
+      }
+    }
+    inventories.quantity = inventories.quantity + outputQty;
+    inventories.unitCost = (amortisationCosts + wageBill(s, c)) / outputQty;
+  } else {
+    for (const g of c.capitalGoods) {
+      capacity += g.quantity * g.productivity;
+      capValue += goodValue(g, c.id);
+    }
+  }
+  c.active[MKT.CONSGOOD] = inventories.quantity > 0;
+  setLag(c.lags, LAG.PRODUCTION, s.round, outputQty);
+  setLag(c.lags, LAG.CAPACITY, s.round, capacity);
+  setLag(c.lags, LAG.CAPITALFINANCIALVALUE, s.round, capValue);
+}
+
+/**
+ * `CapitalFirm.produce` (394–420). Con empleados: trabajadores para la producción = `getRequiredWorkers()`
+ * (`(int) Math.round(Y* / 2)`). Si la empresa no cubrió su demanda de trabajo (`laborDemand` > 0, caso
+ * restringido): trabajadores de I+D = ⌊amountResearch / wᵉ⌋, total = producción + I+D, y los dedicados a
+ * producir = `Math.round(producción / total × empleados)` con **división entera** de Java
+ * (producción / total vale 1 sin I+D y 0 con I+D > 0: así está en JMAB). Producción = trabajadores ×
+ * productividad del trabajo (2). Suma la producción al inventario (`CapitalGood.setQuantity`, que
+ * recalcula el valor contable) y fija el costo unitario = masa salarial / producción. Rezago: producción.
+ * Sin empleados, solo el rezago (0).
+ */
+function capitalProduce(s: CaianiState, k: FirmState): void {
+  let outputQty = 0;
+  if (k.employees.length > 0) {
+    const outputLaborDemand = capitalRequiredWorkersInt(s, k);
+    if (k.laborDemand > 0) {
+      const researchDemandLabor = Math.floor(k.amountResearch / wageExpectation(k));
+      const totalDemandLabor = outputLaborDemand + researchDemandLabor;
+      if (totalDemandLabor === 0) throw new Error(`empresa de capital ${k.id}: 0/0 entero (JMAB: ArithmeticException)`);
+      const actualOutputLabor = Math.trunc(outputLaborDemand / totalDemandLabor) * k.employees.length;
+      outputQty = actualOutputLabor * s.rules.capitalLaborProductivity;
+    } else {
+      outputQty = outputLaborDemand * s.rules.capitalLaborProductivity;
+    }
+    const inventories = k.capitalGoods[0];
+    if (!inventories) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
+    setCapitalGoodQuantity(inventories, inventories.quantity + outputQty);
+    inventories.unitCost = wageBill(s, k) / outputQty;
+  }
+  setLag(k.lags, LAG.PRODUCTION, s.round, outputQty);
+}
+
+/**
+ * Evento 15, `productionTic` (TIC_PRODUCTION): las empresas, en orden de creación (consumo y después
+ * capital; `CopyOfConsumptionFirm2WagesEnd.onTicArrived` 82–84, `CopyOfCapitalFirm2WagesEnd` 78–80). Sin
+ * sorteos ni interacción.
+ */
+export function productionEvent(s: CaianiState): void {
+  for (const c of s.consumptionFirms) consumptionProduce(s, c);
+  for (const k of s.capitalFirms) capitalProduce(s, k);
 }

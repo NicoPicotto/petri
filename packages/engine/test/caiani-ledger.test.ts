@@ -13,7 +13,8 @@ import {
   createLedger,
   credit,
   debit,
-  installment,
+  installments,
+  installmentOf,
   netFinancialWorth,
   open,
   pay,
@@ -142,40 +143,69 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     expectConsistent(w.L, w.cp);
   });
 
-  it('cuotas de capital: redondeo(A·a/L) − redondeo(A·(a−1)/L); la última cierra en cero', () => {
-    // A = 10 µ, L = 3: JMAB pagaría 3,33 por cuota. Acá: 3, 4 (7 − 3) y 3 (10 − 7).
+  /** Paga las cuotas de capital del deudor (sin mover dinero) y envejece los préstamos: un tick. */
+  function tick(L: ReturnType<typeof createLedger>, debtor: number): number[] {
+    const ids = contractIds(L, debtor, 'liabilities', 'loan');
+    const dues = installments(L, debtor, 'loan');
+    ids.forEach((id, i) => (contractOf(L, id).amount -= dues[i]!.principal));
+    for (const id of ids) contractOf(L, id).age += 1;
+    return dues.map((d) => d.principal);
+  }
+
+  it('cuotas de capital con arrastre: A/L redondeado sobre la lista; la última paga el saldo y cierra en cero', () => {
+    // A = 10 µ, L = 3: JMAB pagaría 3,33 por cuota. Edad 1: round(3,33) = 3. Edad 2: pagado 3 contra 3,33
+    // del cronograma (desvío −0,33, trunc 0) → 3. Edad 3 (la última): el saldo, 4.
     const L = createLedger();
     const b = addAgent(L, 'bank');
     const f = addAgent(L, 'capitalFirm');
     const id = open(L, 'loan', b, f, 10, { rate: 0, length: 3, amortization: 'fixedCapital' }, 'loans');
-    const c = contractOf(L, id);
-    expect(installment(c)).toEqual({ interest: 0, principal: 0 }); // edad 0: no se paga
-    const paid: number[] = [];
-    for (let age = 1; age <= 3; age++) {
-      c.age = age;
-      const { principal } = installment(c);
-      paid.push(principal);
-      c.amount -= principal;
-    }
-    expect(paid).toEqual([3, 4, 3]);
-    expect(c.amount).toBe(0);
+    expect(installmentOf(L, id)).toEqual({ interest: 0, principal: 0 }); // edad 0: no se paga
+    contractOf(L, id).age = 1;
+    const paid = [tick(L, f)[0], tick(L, f)[0], tick(L, f)[0]];
+    expect(paid).toEqual([3, 3, 4]);
+    expect(contractOf(L, id).amount).toBe(0);
   });
 
-  it('la suma de las cuotas es exactamente A y cada una difiere de A/L en menos de 1 µ', () => {
+  it('el total de capital de la lista queda a ≤ 1 µ de Σ A/L más las correcciones; cada saldo, a < 2 µ del cronograma', () => {
+    // Tres préstamos con A/L de parte fraccionaria 0,45 (redondeados uno por uno, cada uno perdería 0,45 µ
+    // por tick: 1,35 µ en el total). En la primera cuota no hay correcciones: ≤ 1 µ. Después, el 1.º y el
+    // 3.º de la lista redondean siempre para abajo y se corrigen de a 1 µ (a la vez): ≤ 1 + 2.
     const L = createLedger();
     const b = addAgent(L, 'bank');
     const f = addAgent(L, 'capitalFirm');
-    const A = 123_456_789;
-    const c = contractOf(L, open(L, 'loan', b, f, A, { rate: 0, length: 20, amortization: 'fixedCapital' }, 'loans'));
-    let sum = 0;
-    for (let age = 1; age <= 20; age++) {
-      c.age = age;
-      const p = installment(c).principal;
-      expect(Math.abs(p - A / 20)).toBeLessThan(1);
-      sum += p;
-      c.amount -= p;
+    const A = 123_456_789; // A/20 = 6.172.839,45
+    const ids = [0, 1, 2].map(() => open(L, 'loan', b, f, A, { rate: 0, length: 20, amortization: 'fixedCapital', age: 1 }, 'loans'));
+    for (let a = 1; a <= 20; a++) {
+      const p = tick(L, f);
+      expect(Math.abs(p.reduce((x, y) => x + y, 0) - (3 * A) / 20)).toBeLessThanOrEqual(a === 1 ? 1 : 3);
+      // Saldo después de la cuota de la edad a, contra el cronograma de JMAB A − a·A/L.
+      for (const id of ids) expect(Math.abs(contractOf(L, id).amount - (A - (a * A) / 20))).toBeLessThan(2);
     }
-    expect(sum).toBe(A);
+    for (const id of ids) expect(contractOf(L, id).amount).toBe(0);
+  });
+
+  it('un préstamo solo en la lista no se corre del cronograma (corrección del desvío)', () => {
+    // Solo, el arrastre redondea siempre igual (A/L = …,6 → 1 µ de más por cuota): sin corrección, el
+    // saldo se correría 1 µ por tick. Con la corrección queda a < 2 µ.
+    const L = createLedger();
+    const b = addAgent(L, 'bank');
+    const f = addAgent(L, 'capitalFirm');
+    const A = 200_000_012; // A/20 = 10.000.000,6
+    const id = open(L, 'loan', b, f, A, { rate: 0, length: 20, amortization: 'fixedCapital', age: 1 }, 'loans');
+    for (let a = 1; a <= 20; a++) {
+      tick(L, f);
+      expect(Math.abs(contractOf(L, id).amount - (A - (a * A) / 20))).toBeLessThan(2);
+    }
+    expect(contractOf(L, id).amount).toBe(0);
+  });
+
+  it('intereses con arrastre sobre la lista del deudor', () => {
+    // Tres préstamos de 150 µ al 1%: 1,5 µ cada uno. Arrastre: round(1,5) = 2, round(3) − 2 = 1, round(4,5) − 3 = 2.
+    const L = createLedger();
+    const b = addAgent(L, 'bank');
+    const f = addAgent(L, 'capitalFirm');
+    for (let i = 0; i < 3; i++) open(L, 'loan', b, f, 150, { rate: 0.01, length: 20, amortization: 'fixedCapital', age: 2, initialAmount: 160 }, 'loans');
+    expect(installments(L, f, 'loan').map((d) => d.interest)).toEqual([2, 1, 2]);
   });
 
   it('servicio desde un depósito en otro banco: interés y capital al prestamista, con reservas', () => {
@@ -190,7 +220,7 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     const cp = beginPeriod(w.L);
     contractOf(w.L, loan).age = 1;
     // Interés = 1% · 2.000 = 20; capital = 2.000/20 = 100; total 120.
-    expect(serviceLoan(w.L, loan, w.fDep1)).toEqual({ interest: 20, principal: 100 });
+    expect(serviceLoan(w.L, loan, w.fDep1, installmentOf(w.L, loan))).toEqual({ interest: 20, principal: 100 });
     expect(amt(w.L, w.fDep1)).toBe(380);
     expect(amt(w.L, loan)).toBe(1900);
     expect([amt(w.L, w.res1), amt(w.L, w.res2)]).toEqual([3000 - 120, -1000 + 120]);
@@ -202,7 +232,7 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     const w = world();
     const loan = open(w.L, 'loan', w.b1, w.f, 2000, { rate: 0.01, length: 20, amortization: 'fixedCapital', age: 1 }, 'loans');
     const before = JSON.stringify(w.L);
-    expect(() => serviceLoan(w.L, loan, w.fDep1)).toThrow(/cuota/);
+    expect(() => serviceLoan(w.L, loan, w.fDep1, installmentOf(w.L, loan))).toThrow(/cuota/);
     expect(JSON.stringify(w.L)).toBe(before);
   });
 
@@ -214,9 +244,9 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     const loan = open(w.L, 'loan', w.b1, w.f, 1000, { rate: 0, length: 20, amortization: 'fixedCapital', age: 19 }, 'loans');
     credit(w.L, w.fDep1, 1000, 'loans');
     const cp = beginPeriod(w.L);
-    expect(serviceLoan(w.L, loan, w.fDep1).principal).toBe(50);
+    expect(serviceLoan(w.L, loan, w.fDep1, installmentOf(w.L, loan)).principal).toBe(50);
     cleanup(w.L, w.b1); // edad 20
-    expect(serviceLoan(w.L, loan, w.fDep1).principal).toBe(50);
+    expect(serviceLoan(w.L, loan, w.fDep1, installmentOf(w.L, loan)).principal).toBe(50);
     expect(amt(w.L, loan)).toBe(900);
     const fBefore = netFinancialWorth(w.L, w.f);
     cleanup(w.L, w.b1); // edad 21 > 20: se cierra
@@ -235,7 +265,7 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     const adv = open(w.L, 'advance', w.cb, w.b1, 100, { rate: 0.01, length: 1, amortization: 'onlyInterest' }, 'advances');
     credit(w.L, w.res1, 100, 'advances');
     cleanup(w.L, w.cb); // edad 1
-    expect(serviceLoan(w.L, adv, w.res1)).toEqual({ interest: 1, principal: 100 });
+    expect(serviceLoan(w.L, adv, w.res1, installmentOf(w.L, adv))).toEqual({ interest: 1, principal: 100 });
     expect(amt(w.L, w.res1)).toBe(999);
     cleanup(w.L, w.cb); // saldo 0: se cierra
     expect(contractIds(w.L, w.b1, 'liabilities', 'advance')).toEqual([]);

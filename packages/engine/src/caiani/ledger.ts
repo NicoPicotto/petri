@@ -26,7 +26,7 @@
  *   sin haber modificado nada.
  */
 
-import { assertMicro, assertNonNegativeMicro, type Micro } from './money';
+import { CarryRounder, assertMicro, assertNonNegativeMicro, type Micro } from './money';
 
 export type AgentId = number;
 export type ContractId = number;
@@ -454,45 +454,80 @@ export function payTo(ledger: Ledger, from: ContractId, payee: AgentId, amount: 
 // Préstamos y adelantos
 // ---------------------------------------------------------------------------------------------
 
-/**
- * Cuota de un préstamo o adelanto en su edad actual (`computeDebtPayments` de JMAB):
- * - nada si la edad es 0 (el préstamo se dio este tick);
- * - interés = tasa × saldo;
- * - capital, amortización `fixedCapital`: en JMAB, initialAmount / length por cuota. Acá la cuota
- *   de la edad a es redondeo(A·a/L) − redondeo(A·(a−1)/L), con A = initialAmount y L = length: cada
- *   cuota difiere de A/L en menos de 1 µ y la suma de las cuotas de las edades 1..L es exactamente A,
- *   así que el préstamo cierra en cero (adaptación aprobada por Nico, 2026-11-13; en JMAB el redondeo
- *   de double deja residuos que `cleanSM` borra sin registrar). Los préstamos iniciales, que arrancan
- *   con edad j + 1, tienen saldo A − redondeo(A·j/L) y cierran en cero (docs/inicializacion.md).
- * - capital, `onlyInterest`: todo el saldo cuando la edad llega a length.
- * El capital nunca supera el saldo.
- */
-export function installment(loan: Contract): { interest: Micro; principal: Micro } {
-  if (loan.kind !== 'loan' && loan.kind !== 'advance') throw new Error(`installment: ${loan.kind} no es un préstamo`);
-  if (loan.age <= 0) return { interest: 0, principal: 0 };
-  const L = loan.length as number;
-  const A = loan.initialAmount as number;
-  const interest = Math.round(loan.rate * loan.amount);
-  let principal = 0;
-  if (loan.amortization === 'fixedCapital') {
-    if (loan.age <= L) principal = Math.round((A * loan.age) / L) - Math.round((A * (loan.age - 1)) / L);
-  } else if (loan.age === L) {
-    principal = loan.amount;
-  }
-  return { interest: interest === 0 ? 0 : interest, principal: Math.min(principal, loan.amount) };
+export interface Installment {
+  interest: Micro;
+  principal: Micro;
 }
 
 /**
- * Paga la cuota de un préstamo (o adelanto) desde la cuenta `from`: interés y capital al prestamista
- * (con liquidación si el banco de la cuenta es otro) y baja el saldo del préstamo.
+ * Cuotas de los préstamos (o adelantos) de un deudor en el tick (`computeDebtPayments` de JMAB), en el
+ * orden de su lista de pasivos (el de `contractIds`). En JMAB, por préstamo con edad > 0:
+ * interés = tasa × saldo; capital `FIXED_CAPITAL` = initialAmount / length; `ONLY_INTERESTS`, todo el
+ * saldo cuando la edad llega a length. Con edad 0 (dado este tick), nada.
+ *
+ * En µ, con **redondeo con arrastre** sobre la lista (`CarryRounder`; decisión de Nico, 2026-11-13,
+ * reemplaza al redondeo de cada cuota por separado): un acumulador para los intereses y otro para el
+ * capital. Así el total del deudor (`debtBurden`, `debtInterests`) queda a ≤ 1 µ de la suma de JMAB.
+ * - Capital `fixedCapital` antes de la última cuota: entra al acumulador A/L − c, con A = initialAmount,
+ *   L = length, d = (A − saldo) − A·(a − 1)/L el desvío de lo pagado contra el cronograma de JMAB
+ *   (a = edad) y c = trunc(d) = ±1 si 1 ≤ |d| < 2, si no 0. Sin la corrección, un préstamo que redondea
+ *   siempre para el mismo lado (el primero de la lista, por ejemplo) se correría del cronograma hasta
+ *   ~L/2 µ; con ella el desvío por redondeo queda siempre < 2 µ (cada cuota agrega < 1 µ y la corrección
+ *   saca 1 cuando llega a 1). Un desvío ≥ 2 µ no es de redondeo (p. ej., una quita): no se corrige y el
+ *   préstamo paga A/L, como en JMAB. Desde un estado de JMAB |d| < 1 µ y c = 0: el total queda a ≤ 1 µ
+ *   de la suma de JMAB; en corridas largas, cada corrección mueve el total 1 µ.
+ * - Última cuota (edad = L) con el saldo a < 2 µ de A/L (o sea, en el cronograma salvo redondeo): paga el
+ *   saldo, así el préstamo cierra en cero (adaptación aprobada por Nico, 2026-11-13; en JMAB el redondeo
+ *   de double deja residuos que `cleanSM` borra sin registrar). No pasa por el acumulador. Si el saldo
+ *   está lejos de A/L (un préstamo fuera del cronograma), paga A/L como JMAB y `cleanup` condona el resto
+ *   explícitamente. Los préstamos iniciales arrancan con saldo A − redondeo(A·j/L) (docs/inicializacion.md).
+ * - `onlyInterest`: todo el saldo cuando la edad llega a length.
+ * El capital nunca supera el saldo. La cuota de un préstamo depende de los anteriores de la lista: los
+ * eventos 9 (`debtBurden`) y 20 (pago) usan esta misma función sobre la misma lista.
+ */
+export function installments(ledger: Ledger, debtor: AgentId, kind: 'loan' | 'advance'): Installment[] {
+  const interests = new CarryRounder();
+  const principals = new CarryRounder();
+  return contractIds(ledger, debtor, 'liabilities', kind).map((id) => {
+    const loan = contractOf(ledger, id);
+    if (loan.age <= 0) return { interest: 0, principal: 0 };
+    const L = loan.length as number;
+    const A = loan.initialAmount as number;
+    const interest = interests.add(loan.rate * loan.amount);
+    let principal = 0;
+    if (loan.amortization === 'onlyInterest') {
+      if (loan.age === L) principal = loan.amount;
+    } else if (loan.age === L && Math.abs(loan.amount - A / L) < 2) {
+      principal = loan.amount;
+    } else if (loan.age <= L) {
+      const drift = A - loan.amount - (A * (loan.age - 1)) / L;
+      const correction = Math.abs(drift) >= 1 && Math.abs(drift) < 2 ? Math.trunc(drift) : 0;
+      principal = principals.add(A / L - correction);
+    }
+    return { interest, principal: Math.max(0, Math.min(principal, loan.amount)) };
+  });
+}
+
+/** Cuota de un préstamo del deudor (la de su posición en `installments`). */
+export function installmentOf(ledger: Ledger, loan: ContractId): Installment {
+  const l = contractOf(ledger, loan);
+  if (l.kind !== 'loan' && l.kind !== 'advance') throw new Error(`installmentOf: ${l.kind} no es un préstamo`);
+  const ids = contractIds(ledger, l.issuer, 'liabilities', l.kind);
+  return installments(ledger, l.issuer, l.kind)[ids.indexOf(loan)] as Installment;
+}
+
+/**
+ * Paga la cuota `due` de un préstamo (o adelanto) desde la cuenta `from`: interés y capital al
+ * prestamista (con liquidación si el banco de la cuenta es otro) y baja el saldo del préstamo. La cuota
+ * sale de `installments` (calculada sobre toda la lista del deudor antes de pagar, como JMAB).
  * El chequeo de liquidez es de la regla que llama (en Caiani, la empresa que no llega quiebra).
  * Si `from` no es una cuenta de reservas y no alcanza, tira error sin modificar nada.
  */
-export function serviceLoan(ledger: Ledger, loan: ContractId, from: ContractId): { interest: Micro; principal: Micro } {
+export function serviceLoan(ledger: Ledger, loan: ContractId, from: ContractId, due: Installment): Installment {
   const l = contractOf(ledger, loan);
   const f = contractOf(ledger, from);
   if (f.holder !== l.issuer) throw new Error(`serviceLoan: la cuenta ${from} no es del deudor ${l.issuer}`);
-  const due = installment(l);
+  if (due.principal > l.amount) throw new Error(`serviceLoan: capital ${due.principal} µ mayor que el saldo ${l.amount} µ`);
   if (f.kind !== 'reserves' && f.amount < due.interest + due.principal) {
     throw new Error(`serviceLoan: la cuenta ${from} tiene ${f.amount} µ y la cuota es ${due.interest + due.principal} µ`);
   }
