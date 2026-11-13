@@ -128,12 +128,13 @@ export function lt(site: string, a: number, b: number, tolerance: Tolerance, sca
 /**
  * Redondeo al entero más cercano: la decisión es de qué lado de la mitad k + 0,5 cae x. Quien llama
  * redondea como corresponda a su lugar (`rounded`) y este helper solo lo registra y lo devuelve.
- * Distancia relativa a |x|.
+ * Distancia relativa a max(|x|, |k + 0,5|) (la escala por defecto): con x = 0 exacto (p. ej., I+D nula)
+ * la distancia a 0,5 es 1, no 0 (antes se medía contra |x| y un cero exacto contaba como frágil).
  */
 export function rounding(site: string, x: number, rounded: number, tolerance: Tolerance): number {
   if (active) {
     const half = Math.floor(x) + 0.5;
-    active.record(site, rounded, x, half, decisionDistance(x, half, tolerance, Math.abs(x)), tolerance);
+    active.record(site, rounded, x, half, decisionDistance(x, half, tolerance), tolerance);
   }
   return rounded;
 }

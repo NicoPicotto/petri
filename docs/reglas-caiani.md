@@ -1,6 +1,6 @@
 # Reglas del port de Caiani (P3)
 
-Estado al 2026-11-13: **infraestructura de V3 por evento lista; eventos 0 a 10 portados y verificados en los ticks 1 y 50 (bit a bit en los `double` puros; montos dentro de la tolerancia por redondeos, secs. 9–11); contador de decisiones discretas en el V3.** Para retomar en una sesión nueva, ver la sec. 13. Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
+Estado al 2026-11-13: **infraestructura de V3 por evento lista; eventos 0 a 14 portados y verificados en los ticks 1 y 50 (bit a bit en los `double` puros; montos con la regla general de tolerancia, sec. 1, salvo cuatro campos reportados); contador de decisiones discretas en el V3.** Para retomar en una sesión nueva, ver la sec. 14. Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
 
 Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equivalente al `.jar`, V0), de `paper-launcher/Model/modelFile.xml` y de los volcados del oráculo.
 
@@ -17,13 +17,45 @@ Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equiv
 
 **Orden de despacho.** Dentro de un evento, JMAB llama a los agentes en **orden de creación** (el de suscripción al planificador), no en el de la lista de la población (que las mezclas reordenan). Verificado en los eventos 1 y 2: el paso |N| de cada empresa, despejado de su margen antes y después, coincide a 10⁻¹³ con el registrado en esa posición de la secuencia. Importa porque el oráculo registra las normales sin el id del agente: el port las tiene que pedir en el mismo orden. Los arreglos del estado del port (`households`, `consumptionFirms`, etc.) están en orden de creación.
 
-**Tolerancias** (plan, sec. 4, V3): montos, 2 µ, o tantos µ como redondeos a µ entraron si el monto es una suma de montos redondeados (el arnés lo aplica campo por campo: `totInterestsDeposits`, sec. 9; servicio de la deuda, intereses de la deuda y crédito pedido, sec. 10; préstamos nuevos y sus depósitos, abajo); `double` calculados a partir de montos, 10⁻⁶ relativo; los demás `double`, 10⁻⁹.
+**Tolerancias** (plan, sec. 4, V3). Los `double` calculados a partir de montos, 10⁻⁶ relativo; los demás `double`, 10⁻⁹ (sin cambios). Los montos siguen una **regla general**, igual para todos los campos (pedido de Nico, 2026-11-13; reemplaza las tolerancias que se habían ido agregando campo por campo en los eventos 8 a 10):
+
+- **Evento suelto** (arranca del volcado de JMAB): **2 µ**. Es la verificación estricta. Un monto que el port calcula redondeando una vez un `double` de JMAB difiere en a lo sumo ~1,5 µ: hasta 0,5 µ por pasar la entrada a µ, 0,5 µ por redondear el resultado y 0,5 µ por pasar a µ el valor de JMAB para comparar.
+- **Encadenado** (desde el principio del tick, sin volver a cargar el estado de JMAB): **2 µ por evento corrido**, o sea 2·k µ después de k eventos. Se compara después de **cada** evento, no solo al final. Supuesto de la regla: cada evento agrega como mucho su error estricto a los montos que escribe, y lo que hace con los montos que recibe (sumas y restas de pocos términos, productos por tasas, participaciones o (1 − i/100)) no amplifica el error. Un campo que deriva más rápido indica una amplificación (por ejemplo, una suma sobre muchos montos) o un error del port: se reporta.
+- **Sin casos por campo.** Si un campo no cumple la regla, no se agranda su tolerancia: se reporta (abajo) y se decide qué hacer con él.
+
+Implementación: `V3_AMOUNT_TOL` y `chainedAmountTol(k)` en `test/support/jmab-dump.ts`; `compareState` recibe la tolerancia y devuelve, por tipo de campo, la diferencia máxima y cuántos la superan, que el test imprime en cada corrida.
+
+**Medición con la regla (eventos 0–10, ticks 1 y 50; los eventos 11–14 no mueven montos y dan diferencia 0).** Contratos (depósitos, préstamos), intereses de cada depositante y préstamos nuevos: ≤ 1 µ en el suelto; en el encadenado, hasta 2 µ (tick 1) y 4 µ (tick 50) después del evento 10, contra una tolerancia de 22 µ. Antes, los préstamos nuevos del encadenado tenían una tolerancia propia (3 µ por préstamo de la empresa más 2).
+
+**Campos reportados (no cumplen la regla; esperan decisión de Nico).** El test los lista en `REPORTED_AMOUNT_FIELDS`, que no los tolera: imprime la diferencia y cuántos superan la regla, y no hace fallar la corrida por ellos.
+
+| Campo | Evento | Suelto (tick 1 / 50) | Encadenado |
+|---|---|---|---|
+| `totInterestsDeposits` (banco) | 8 | 33 µ / 11 µ (10 y 8 de 10 bancos) | 33 µ con tolerancia 18 en el tick 1: **no cumple** |
+| `debtBurden` (servicio de la deuda) | 9 | 3 µ / 6 µ (20 y 21 de 120 empresas) | cumple (6 µ, tolerancia 20) |
+| `debtInterests` | 9 | 1 µ / 3 µ (3 de 120 en el tick 50) | cumple |
+| `creditDemanded` | 9 | 2 µ / 5 µ (17 de 120 en el tick 50); arrastra al servicio de la deuda | cumple |
+
+Causa común: el port **suma montos ya redondeados a µ** (un interés por depósito, una cuota por préstamo) y JMAB **suma los `double`**. Con n términos, la diferencia llega a n/2 µ (~800 depósitos por banco; 3 redondeos por préstamo). No es deriva: aparece igual en el evento suelto.
+
+**Lo mismo va a pasar con los pagos** (salarios, impuestos, dividendos, consumo, eventos 17–27): la cuenta que recibe o paga muchos montos redondeados en un evento (el depósito de una empresa que paga 50 salarios, la cuenta del gobierno con 8.000 impuestos, las reservas) va a diferir de JMAB en ~0,3·√n µ típico y hasta n/2 µ. Con la regla estricta, esas cuentas se reportarían en cada evento de pagos.
+
+**Propuesta (a decidir por Nico): redondeo con arrastre.** Cuando un agente recorre una lista de montos que JMAB acumula en `double` (los depósitos de un banco en el evento 8, los préstamos de una empresa en los eventos 9 y 20, los empleados de una empresa en el evento 21, los hogares que pagan impuestos), cada monto se redondea como la diferencia entre la suma acumulada redondeada y la anterior: m_i = round(S_i) − round(S_{i−1}), con S_i la suma acumulada en `double`.
+- Cada monto queda a ≤ 1 µ de su `double` (hoy, ≤ 0,5 µ): sigue dentro de los 2 µ del evento suelto.
+- La suma de cualquier tramo seguido de la lista queda a ≤ 1 µ de la suma en `double`: los agregados (`totInterestsDeposits`, `debtBurden`) y las cuentas que pagan o cobran un tramo seguido cumplen los 2 µ, y siguen siendo **la suma de lo que se acreditó o pagó** (consistencia SFC: no hace falta una variable aparte en `double`).
+- Determinista (el orden es el de la lista de JMAB, que el port ya respeta) y con las cuatro operaciones.
+- Cambia una decisión de P1: `installment` redondea cada cuota por separado ([ledger-contratos.md](ledger-contratos.md)); con arrastre, la cuota depende de las anteriores de la misma empresa, y el evento 20 tiene que usar el mismo cálculo que el 9 (en JMAB, `payInterests` vuelve a calcular `debtBurden` y lo compara con la liquidez antes de pagar, `ConsumptionFirm` 659).
+- No resuelve las cuentas que reciben montos **intercalados** de muchos pagadores (las reservas de un banco en los pagos entre bancos): ahí el error crece como el número de tramos, no como el de pagos. Se mide cuando entren los pagos.
+
+Alternativa descartada por ahora: calcular `debtBurden` y `totInterestsDeposits` en `double`, como JMAB, y redondear una vez. Cumple la regla, pero el agregado deja de ser la suma de lo que se paga (la condición de quiebra del evento 20 compararía la liquidez con un monto que no es el que después se debita), y no sirve para las cuentas de los pagos.
 
 **Decisiones discretas (contador de V3, 2026-11-13, pedido de Nico).** Módulo `caiani/decisions.ts`, test a mano en `test/caiani-decisions.test.ts`.
 - Cada comparación que define una rama en un evento pasa por un helper (`gt`, `ge`, `lt`, `record`, `rounding`) que devuelve lo mismo que la comparación sola. Con un registrador activo (`withDecisions(rec, evento, fn)`) anota, por evento y por lugar, la **distancia al umbral** en la escala de la tolerancia del valor comparado (µ absolutos para montos; relativa para los `double`, a la escala de los operandos o de los términos de los que sale el valor) y el resultado. Si la distancia es ≤ la tolerancia, la decisión es **frágil**: una diferencia que V3 admite alcanzaría para darla vuelta. El registro solo observa: sin registrador, los helpers no hacen nada más que comparar.
 - **Decisiones dadas vuelta:** el V3 corre cada evento suelto (desde el volcado de JMAB, o sea con las entradas de JMAB) y encadenado desde el principio del tick, los dos con registrador; `compareOutcomes` lista las comparaciones con otro resultado en la misma posición. Una que se da vuelta hoy igual hace fallar la comparación de estado aguas abajo; el contador dice dónde empezó.
 - **Qué no se registra:** comparaciones entre enteros exactos (edades, plazos, cantidades de la lista), banderas de actividad que vienen de otro evento (se registran donde se deciden), y la comparación del atractivo del proveedor previo cuando el previo **es** el mejor (es el mismo cálculo dos veces, no puede darse vuelta). El piso de la producción deseada (`max(0, …)`) se mide contra la escala de los términos de la resta, no contra el resultado.
-- **Resultado en los ticks 1 y 50 (eventos 0–10):** ninguna decisión se da vuelta. Frágiles:
+- **Qué no se registra (eventos 11–14):** la referencia micro del salario (vale k/4 exacto, sec. 12) y `laborDemand` contra los empleados (enteros).
+- **`rounding` (corregido el 2026-11-13):** la distancia de x a k + 0,5 se mide relativa a max(|x|, |k + 0,5|); antes era relativa a |x|, y un 0 exacto (la I+D nula del evento 12) contaba como frágil con distancia 0.
+- **Resultado en los ticks 1 y 50 (eventos 0–14):** ninguna decisión se da vuelta. Frágiles:
 
   | Evento | Tick 1 | Tick 50 |
   |---|---|---|
@@ -37,8 +69,12 @@ Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equiv
   | 8 | sin comparaciones | ídem |
   | 9 | 0 de 2.426 | 0 de 2.426 |
   | 10 | 0 de 785 | 0 de 12.641 (rendimiento esperado a 1,1·10⁻⁴ relativo del 0 como mínimo) |
+  | 11 | **6.000 de 8.000**: el desempleo agregado inicial es 0,08, exactamente el umbral (empate exacto; `>` es falso y el salario de los 6.000 ocupados sube) | 0 de 7.772 (distancia mínima 0,29) |
+  | 12 | 0 de 2.140 | 0 de 2.326 |
+  | 13 | sin comparaciones numéricas | ídem |
+  | 14 | 0 de 3.600 (salario más barato; distancia mínima 1,2·10⁻⁶) | 0 de 5.250 (6,8·10⁻⁶) |
 
-  Las frágiles del tick 1 vienen de que la inicialización deja a todas las empresas y bancos de cada tipo iguales y justo en los umbrales. En el tick 50 la distancia más chica es 1,8·10⁻⁴ (redondeo de los trabajadores requeridos).
+  Las frágiles del tick 1 vienen de que la inicialización deja a todas las empresas y bancos de cada tipo iguales y justo en los umbrales (y el desempleo justo en el 8% del umbral de los salarios). En el tick 50 la distancia más chica es 1,8·10⁻⁴ (redondeo de los trabajadores requeridos).
 
 **Ticks de referencia del V3 (Nico, 2026-11-13).** Como el tick 1 tiene decisiones frágiles por la simetría de la inicialización, **las verificaciones V3 de referencia son las que arrancan en los ticks 50, 200 y 399**. El tick 1 es el **caso límite**: se sigue corriendo y se informa, pero una decisión frágil que se dé vuelta ahí no se lee como un error del port sin mirarla primero en los ticks de referencia.
 
@@ -50,9 +86,9 @@ Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equiv
 
 Se pueden correr las dos a la vez (directorios distintos); tardan ~1 y ~4 minutos.
 
-Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y volver a correrlas (~1 y ~3 minutos). Después de portar el tick entero: V3 completo desde t = 1, 50, 200 y 399. El tick 1 es muy simétrico (todas las empresas iguales): el 50 es el que ejercita las ramas.
+**Estructura del test (2026-11-13).** Un `it` por evento, suelto y encadenado (el encadenado comparte el estado entre tests, en orden), y uno final con las decisiones. Después de cada test se cede una macrotarea (`afterEach` con `setImmediate`): entre tests vitest solo espera microtareas y, sin eso, el worker no atiende su RPC durante todo el archivo; con los eventos 11–14 el archivo pasa el minuto y vitest informaba "Timeout calling onTaskUpdate" (un error que hace fallar la corrida aunque los tests pasen).
 
-**Tolerancia de los préstamos nuevos (encadenado, 2026-11-13).** Un préstamo dado en el evento 10 por el total pedido vale el crédito pedido del evento 9, que arrastra los redondeos del servicio de la deuda (sec. 10). En el V3 encadenado el arnés les da al préstamo de edad 0 y al depósito donde se acredita la misma tolerancia que al crédito pedido: 3 µ por préstamo de la empresa más 2. En el tick 50 la diferencia llega a 4 µ. En el V3 de cada evento suelto (desde el volcado de JMAB) la diferencia es ≤ 1 µ.
+Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y volver a correrlas (~1 y ~3 minutos). Después de portar el tick entero: V3 completo desde t = 1, 50, 200 y 399. El tick 1 es muy simétrico (todas las empresas iguales): el 50 es el que ejercita las ramas.
 
 **No finitos en los volcados:** el oráculo escribe NaN e infinitos como cadenas (`"Infinity"`, de `Double.toString`); `readDump` los convierte a number al leer (desde el evento 6, que deja `totalLoanSupply` = +∞).
 
@@ -76,13 +112,13 @@ Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y
 | 5 | `investmentDemandTic` (sin sorteos en los ticks 1 y 50) | **portado, V3 ✓** |
 | 6 | `creditSupplyTic` (10) | **portado, V3 ✓** |
 | 7 | `depSupplyTic` (10) | **portado, V3 ✓** |
-| 8 | `depInterestTic` | **portado, V3 ✓** (total del banco dentro de la tolerancia por redondeos) |
+| 8 | `depInterestTic` | **portado, V3 ✓** (salvo el total del banco: campo reportado, sec. 1) |
 | 9 | `creditDemandTic` | **portado, V3 ✓** |
 | 10 | `creditMarketTic` (201) | **portado, V3 ✓** |
-| 11 | `laborSupplyTic` (8.000) | |
-| 12 | `laborDemandTic` (120) | |
-| 13 | `governmentLaborTic` (1) | |
-| 14 | `laborMarketTic` (768) | |
+| 11 | `laborSupplyTic` (8.000) | **portado, V3 ✓** |
+| 12 | `laborDemandTic` (120) | **portado, V3 ✓** |
+| 13 | `governmentLaborTic` (1) | **portado, V3 ✓** |
+| 14 | `laborMarketTic` (768) | **portado, V3 ✓** |
 | 15 | `productionTic` | |
 | 16 | `rdOutcomeTic` | |
 | 17 | `consumptionDemandTic` | |
@@ -216,11 +252,11 @@ Lo escuchan solo las empresas de capital: `CopyOfCapitalFirm2WagesEnd.onTicArriv
 | Disparo 8 | `Bank.onTicArrived` 196–198 → `payDepositInterests` (392–403) | `depositInterestEvent` |
 | Interés | por depósito del banco, en el orden de su lista: interés = tasa **del contrato** × saldo; `depositor.interestPaid(interés)`, que **asigna** (`Households` 448–451, `ConsumptionFirm` 930–933, `CapitalFirm` 857–860); saldo = saldo·(1 + tasa), sin contrapartida en dinero; `totInterestsDeposits` = suma | interés = `Math.round(saldo µ × tasa)`; `credit(…, 'depositInterest')` (el banco paga con su propio pasivo); `interestReceived` (µ) asignado; total = suma de lo acreditado |
 
-**Unidades del evento 8.** El interés se redondea a µ una vez por depósito (como las ganancias del BC, evento 0) y el saldo nuevo es saldo + interés: difiere de valor·(1 + tasa) de JMAB en menos de 1 µ por depósito. `interestReceived` y `totInterestsDeposits` son lo acreditado (es lo que entra después en las ganancias de las empresas, `ConsumptionFirm` 625 y `CapitalFirm` 682, y en el ingreso bruto de los hogares, `Households` 459). `totInterestsDeposits` en JMAB **no lo lee nadie** (ni agentes ni reportes); su diferencia con JMAB es la acumulación de los redondeos de ~800 depósitos por banco: 33 µ en el tick 1 y 11 µ en el 50, dentro de la tolerancia "un µ por redondeo" del plan.
+**Unidades del evento 8.** El interés se redondea a µ una vez por depósito (como las ganancias del BC, evento 0) y el saldo nuevo es saldo + interés: difiere de valor·(1 + tasa) de JMAB en menos de 1 µ por depósito. `interestReceived` y `totInterestsDeposits` son lo acreditado (es lo que entra después en las ganancias de las empresas, `ConsumptionFirm` 625 y `CapitalFirm` 682, y en el ingreso bruto de los hogares, `Households` 459). `totInterestsDeposits` en JMAB **no lo lee nadie** (ni agentes ni reportes); su diferencia con JMAB es la acumulación de los redondeos de ~800 depósitos por banco: 33 µ en el tick 1 y 11 µ en el 50. No cumple la regla general de tolerancia: es un campo reportado (sec. 1), con la propuesta del redondeo con arrastre.
 
 **Verificación:**
 - A mano: tasa de depósitos que baja y que sube según la liquidez, techo 0,005; evento 7 sobre el estado inicial (un sorteo por banco, activo en depósitos); evento 8 sobre el estado inicial, con una tasa de contrato distinta de la del banco (se usa la del contrato), saldos nuevos, interés del depositante y total.
-- V3, ticks 1 y 50, suelto y encadenado: evento 7 **diferencia 0**; evento 8 **diferencia 0** en los 36.000–37.000 contratos y en los intereses de cada depositante; el total del banco, dentro de la tolerancia (arriba). En el tick 1 la decisión de la tasa de depósitos es un empate (sec. 1, decisiones): los 10 bancos tienen el mismo ratio de liquidez.
+- V3, ticks 1 y 50, suelto y encadenado: evento 7 **diferencia 0**; evento 8 **diferencia 0** en los 36.000–37.000 contratos y en los intereses de cada depositante; el total del banco no cumple la regla general (campo reportado, sec. 1). En el tick 1 la decisión de la tasa de depósitos es un empate (sec. 1, decisiones): los 10 bancos tienen el mismo ratio de liquidez.
 
 ## 10. Evento 9: demanda de crédito (`creditDemandTic`)
 
@@ -238,13 +274,13 @@ Lo escuchan solo las empresas de capital: `CopyOfCapitalFirm2WagesEnd.onTicArriv
 | Requerimiento, capital | N·wᵉ + ⌊I+D / wᵉ⌋·wᵉ + servicio − intereses cobrados + **dividendos + impuestos** (en ese orden) − Sᵉ nominal + 1·N·wᵉ (XML 1548) | igual |
 | Crédito | `PeckingOrderTheory` (XML 1855 y 2152, `stocksId` = [SM_DEP, SM_CASH]): max(requerimiento − depósitos − efectivo, 0); si es > 0, activa en crédito | `peckingOrderCreditDemand`: requerimiento a µ y resta en µ |
 
-**Hallazgo (diferencia del código, para registrar):** la inversión del requerimiento de la empresa de consumo se valúa al precio del **primer vendedor visto** en el evento 3 (`selectedCapitalGoodSuppliers.get(0)`), no al del proveedor elegido en el evento 5, al que se le calcula la demanda real. El port lo reproduce.
+**Hallazgo (diferencia paper ↔ código, registrada en [caiani-referencia.md](caiani-referencia.md) el 2026-11-13; la extensión según el paper queda para después de V4, ver [pendientes.md](pendientes.md)):** la inversión del requerimiento de la empresa de consumo se valúa al precio del **primer vendedor visto** en el evento 3 (`selectedCapitalGoodSuppliers.get(0)`), no al del proveedor elegido en el evento 5, al que se le calcula la demanda real (el paper, sec. 3.1.4, dice el del elegido). En los ticks 1 y 50 no coinciden en 95 y 96 de las 100 empresas. El port reproduce el código.
 
-**Unidades.** `debtBurden`, `debtInterests` y `creditDemanded` están en µ. El servicio de la deuda es la suma de las cuotas de `installment` (redondeadas a µ), que difiere de la de JMAB en menos de ~1,5 µ por préstamo; el arnés tolera 3 µ por préstamo de la empresa, y 2 más en el crédito pedido. Diferencias medidas (evento suelto): servicio 3 y 6 µ, intereses 1 y 3 µ, crédito pedido 2 y 5 µ (ticks 1 y 50).
+**Unidades.** `debtBurden`, `debtInterests` y `creditDemanded` están en µ. El servicio de la deuda es la suma de las cuotas de `installment` (redondeadas a µ), que difiere de la de JMAB en menos de ~1,5 µ por préstamo. Diferencias medidas (evento suelto): servicio 3 y 6 µ, intereses 1 y 3 µ, crédito pedido 2 y 5 µ (ticks 1 y 50): campos reportados por la regla general (sec. 1).
 
 **Verificación:**
 - A mano: servicio de la deuda con un préstamo de edad 0 (no paga), uno de capital fijo y uno de solo intereses que vence; `PeckingOrderTheory` con depósito y efectivo (pide la diferencia; con requerimiento igual a la liquidez o negativo, 0); requerimientos de una empresa de consumo (con una añada de edad −1 que no amortiza y la inversión al precio del primer vendedor) y de una de capital (con I+D y `Math.round` de 10,5 = 11), calculados término por término; evento sobre el estado inicial.
-- V3, ticks 1 y 50, suelto y encadenado: dentro de la tolerancia (arriba); todo lo demás, diferencia 0. En el tick 1 piden crédito las 120 empresas; en el 50, 111 (las dos ramas).
+- V3, ticks 1 y 50, suelto y encadenado: servicio de la deuda, intereses de la deuda y crédito pedido no cumplen la regla general en el suelto (campos reportados, sec. 1); en el encadenado, sí. Todo lo demás, diferencia 0. En el tick 1 piden crédito las 120 empresas; en el 50, 111 (las dos ramas).
 
 ## 11. Evento 10: mercado de crédito (`creditMarketTic`)
 
@@ -267,9 +303,42 @@ Lo escuchan solo las empresas de capital: `CopyOfCapitalFirm2WagesEnd.onTicArriv
 
 **Verificación:**
 - A mano: tasa máxima entre la del banco y la de bonos; probabilidad logística (y los bordes con monto 0); oferta contra el cálculo directo de JMAB con `Math.pow`/`Math.exp` en tres flujos de caja (presta todo, recorta, no presta) y con la aversión de las empresas de capital; mercado cerrado sin mezclas; préstamo acreditado en el depósito existente y depósito nuevo en otro banco, con su tasa.
-- V3, ticks 1 y 50: evento suelto, diferencia ≤ 1 µ (montos de los préstamos nuevos); encadenado desde el principio del tick, dentro de la tolerancia de los préstamos nuevos (sec. 1). Listas del mercado, prestamistas previos y banderas: diferencia 0.
+- V3, ticks 1 y 50: evento suelto, diferencia ≤ 1 µ (montos de los préstamos nuevos); encadenado desde el principio del tick, hasta 4 µ, dentro de la regla general (sec. 1). Listas del mercado, prestamistas previos y banderas: diferencia 0.
 
-## 12. Estado agregado al port en P3 hasta ahora
+## 12. Eventos 11 a 14: mercado de trabajo (`laborSupplyTic`, `laborDemandTic`, `governmentLaborTic`, `laborMarketTic`)
+
+**Qué cambia en JMAB** (diff de volcados, tick 50). Evento 11: el salario de los 8.000 hogares (y la bandera de trabajo de los desocupados, que en el 50 ya estaba). Evento 12: listas de empleados, `laborDemand` y bandera de trabajo de las 120 empresas; empleador y bandera de los despedidos (548). Evento 13: lo mismo para el gobierno (68 despedidos). Evento 14: el orden de las dos listas del mercado de trabajo, las contrataciones (593 hogares), `laborDemand` a 0 y las banderas. Sorteos en el tick 50: evento 11, 8.000 `fn`; evento 12, 165 `shuffleEmp` (120 de la rotación y 45 de la rama de despidos); evento 13, 1; evento 14, 560 mezclas del mezclador y 7 del gobierno (tick 1: 8.000; 120; 1; 632 + 136).
+
+| Qué | JMAB | Port |
+|---|---|---|
+| Disparo 11 | `Households.onTicArrived` 186–188 → `computeWage` (203–209): salario con la estrategia y, si no tiene empleador, activo en trabajo | `laborSupplyEvent`, hogares en orden de creación |
+| Salario | `AdaptiveWageStrategy.computeWage` (XML 2800–2806): si la referencia micro > 0,49, w −= 1·w·\|N(0; 0,0094)\|; si no, y la macro ≤ 0,08, w += 1·w·\|N\|; si no, igual. Piso `getWageLowerBound` = 0 (`Households` 375–378) | `adaptiveWage`; un sorteo solo si cambia |
+| Referencia micro | `Households.getMicroReferenceVariableForWage` (393–403): ocupado, 0; desocupado, (1 + Σ_{i=1}^{3} `LAG_EMPLOYED`(t − i)) / 4 (`employmentWageLag` = 4, XML 2701) | `wageMicroReference` (con `getLag`) |
+| Referencia macro | `getMacroReferenceVariableForWage` (423–428): desocupado, 0; ocupado, `getAggregateValue(LAG_AGGUNEMPLOYMENT, 1)` | `wageMacroReference` |
+| Disparo 12 | `CopyOfConsumptionFirm2WagesEnd.onTicArrived` 79–81 → `computeLaborDemand` (166–190); `CopyOfCapitalFirm2WagesEnd` 75–77 → 163–189. Orden de creación: primero consumo, después capital (lo confirma el orden de los sorteos) | `laborDemandEvent` |
+| Rotación | `Collections.shuffle(employees)` y `fireAgent` de los primeros, `for (i = 0; i < turnoverLabor·N; i++)` con `turnoverLabor` = 0,05 (XML 2018–2020): despide ⌈0,05·N⌉ (con N = 40, 0,05·40 = 2 exacto: 2) | `adjustWorkforce`, la misma comparación en `double` |
+| Despido | `AbstractFirm.fireAgent` (129–133): sin empleador, activo en trabajo; `cleanEmployeeList` (215–223) saca de la lista a los que no tienen empleador | `fire`, `cleanEmployeeList` |
+| Requeridos | consumo: `getRequiredWorkers()` (267–298, redondeado); capital: `getRequiredWorkers()` (535–537) + `(int) Math.round(amountResearch / wᵉ)` (0 sin I+D) | `consumptionRequiredWorkersInt`, `capitalRequiredWorkersInt` |
+| Ajuste | si requeridos > N: `laborDemand` = diferencia, activo; si no: `laborDemand` = 0, inactivo, **otra** `Collections.shuffle` (aunque no haya que despedir a nadie) y despide a los primeros N − requeridos | igual |
+| Disparo 13 | `GovernmentAntiCyclical.onTicArrived` 75–77 → `computeLaborDemand` (146–167): lo mismo con requeridos = `fixedLaborDemand` = 1.360 (XML 2870); la mezcla de la rotación se hace aunque no tenga empleados (tick 1) | `governmentLaborEvent` |
+| Disparo 14 | `SimpleMarketSimulation` (XML 345–378) con `nbRuns` = 8.000: `step` repite el mezclador mientras no esté cerrado (`AbstractMarketMixer.closed`: algún comprador activo con algún vendedor activo) | `laborMarketEvent` |
+| Mezclador | `SelectionRandomRobinBuyerMixer` (`nbSellers` = 10, XML 377): por ronda, mezcla los compradores (empresas de capital y de consumo y gobierno, lista propia del mercado); para cada uno activo en trabajo, mezcla los hogares y toma los primeros 10 activos | `selectSellers` del evento 3 |
+| Empresa | `ConsumptionFirm.onAgentArrival` 239–243, `CapitalFirm` 274–278: `SelectCheapestWorkerStrategy.selectWorker`, **un** trabajador por llegada: el de menor salario (el primero si hay empate) | `cheapestWorker` |
+| Gobierno | `Government.onAgentArrival` 159–168: `SelectRandomWorkerStrategy.selectWorkers(vistos, laborDemand)`: mezcla una copia de los vistos y toma min(`laborDemand`, vistos) | igual |
+| Contratación | `UnconstrainedLaborMechanism.execute`: el hogar pasa a tener empleador, `addEmployee` (`laborDemand` − 1, al final de la lista), hogar inactivo; empleador inactivo si `laborDemand` llega a 0 | `hire` |
+
+**Hallazgo (diferencia paper ↔ código, para registrar si Nico está de acuerdo).** La regla del salario está **invertida para los desocupados**. La referencia micro se llama `averageUnemployment` y arranca en 1 (el trimestre actual, desocupado), pero suma los rezagos de `LAG_EMPLOYED`, que valen 1 cuando el hogar **tenía** empleador (`Households.updateExpectations`). Así, un desocupado de los cuatro trimestres da 1/4 ≤ 0,49 y pasa a la rama macro, donde su referencia es 0 ≤ 0,08: **sube** su salario siempre. Uno que trabajó en alguno de los tres trimestres anteriores da ≥ 1/2 y lo **baja**. El paper (sec. 3.4, eq. 3.15) dice lo contrario: baja el que estuvo desocupado más de dos de los últimos cuatro trimestres. Medido sobre los volcados (semilla 12345), con la lectura corregida (contar trimestres desocupado en vez de ocupado): en el tick 1 los 2.000 desocupados suben en el código y bajarían con la corrección; en el tick 50 el código y la corrección eligen otra rama en 384 de los 455 desocupados. Para el desocupado de larga data, el código no deja que su salario de reserva baje; como las empresas contratan al más barato de los que ven, eso lo deja atrás en la fila. El port reproduce el código; plan, sec. 2 (R2), describe la regla del paper.
+
+**Otros detalles de JMAB que el port reproduce:**
+- `laborDemand` inicial: el inicializador contrata con `addEmployee`, que resta 1, así que las empresas arrancan con −(empleados) (−50 las de consumo). Lo detectó V1 al comparar el campo; no tiene efecto (el evento 12 lo pisa antes de leerlo).
+- Con requeridos = N (nadie que despedir), la rama de despidos igual mezcla la lista: consume un sorteo y cambia el orden de los empleados (que después usa el pago de salarios).
+- `SelectCheapestWorkerStrategy.selectWorkers` (la versión de varios trabajadores, con `maxWage` = +∞ y un `TreeMap` por salario que pisa los salarios repetidos) **no se usa** en el base: las empresas llaman a `selectWorker`.
+
+**Verificación:**
+- A mano: referencia micro (1/4, 1/2, 0 para el ocupado); salario que baja (recién despedido), que sube (desocupado de larga data, aun con 50% de desempleo; ocupado con desempleo igual al umbral), que queda igual sin sorteo (desempleo apenas por encima) y piso 0; rotación con 0,05·50 = 2,5 (despide 3) y 0,05·40 = 2 (despide 2), demanda de trabajo y activa; rama de despidos con su segunda mezcla; gobierno sin empleados (mezcla igual, pide 1.360); mercado cerrado sin mezclas; la empresa contrata al más barato de los 10 primeros activos (no ve al 11.º); el gobierno contrata min(demanda, vistos) en rondas hasta que se cierra por falta de vendedores.
+- V3, ticks 1 y 50, suelto y encadenado: **diferencia 0** en salarios, empleadores, listas de empleados (en orden), `laborDemand`, banderas y listas del mercado. En el tick 1 contratan el gobierno (1.360, al azar) y las empresas; en el 50, 16 empresas de capital, 59 de consumo y el gobierno (68). Ramas: en el tick 50 aparecen las dos del salario que lo cambian (baja: 228 desocupados; sube: el resto), las dos del ajuste de planta y las dos llegadas (empresa y gobierno). **Sin cobertura de V3:** la rama que deja el salario igual (desempleo del período anterior > 8%; en el tick 50 es 5,7%) y el piso 0 del salario: solo casos a mano.
+
+## 13. Estado agregado al port en P3 hasta ahora
 
 - Todos los agentes (`AgentFlags`): `active[MKT_*]`, `defaulted`.
 - Empresas: `desiredOutput`, `bailoutCost` (µ), `markUp`, `expectedVariableCosts`.
@@ -279,14 +348,15 @@ Lo escuchan solo las empresas de capital: `CopyOfCapitalFirm2WagesEnd.onTicArriv
 - Rezagos: `setLag` con la eviction de `TreeMapPassedValues` (4 observaciones) y `getLag`.
 - Empresas de consumo: `selectedCapitalSuppliers` (evento 3), `desiredCapacityGrowth`, `desiredRealCapitalDemand` (evento 5). Empresas de capital: `amountResearch` (evento 4).
 - Empresas: `debtBurden`, `debtInterests`, `creditDemanded` (µ, evento 9).
-- Parámetros (`RULES`, con su línea del XML): participación del inventario objetivo, tasa de adelantos del BC, margen (umbral, paso, σ, iniciales), productividad del trabajo en capital, vendedores por comprador en el mercado de capital, `researchShare`, λ y `payOrReceive` del cambio de proveedor de capital, tasas iniciales de los bancos, estrategias de las tasas de préstamos y de depósitos (paso, sentido, σ) y techo de la tasa de depósitos; impuesto a las ganancias, `profitShare` y `shareOfExpIncomeAsDeposit` de las empresas (evento 9); plazo de los préstamos, vendedores del mercado de crédito, λ y `payOrReceive` del cambio de prestamista, aversiones al riesgo, quita y tasa de bonos inicial del banco (evento 10).
+- Empresas y gobierno: `laborDemand` (eventos 12–14; el inicializador lo deja en −empleados).
+- Parámetros (`RULES`, con su línea del XML): participación del inventario objetivo, tasa de adelantos del BC, margen (umbral, paso, σ, iniciales), productividad del trabajo en capital, vendedores por comprador en el mercado de capital, `researchShare`, λ y `payOrReceive` del cambio de proveedor de capital, tasas iniciales de los bancos, estrategias de las tasas de préstamos y de depósitos (paso, sentido, σ) y techo de la tasa de depósitos; impuesto a las ganancias, `profitShare` y `shareOfExpIncomeAsDeposit` de las empresas (evento 9); plazo de los préstamos, vendedores del mercado de crédito, λ y `payOrReceive` del cambio de prestamista, aversiones al riesgo, quita y tasa de bonos inicial del banco (evento 10); estrategia del salario (umbrales micro y macro, pasos, σ, `employmentWageLag`), rotación, empleo público objetivo, vendedores y rondas del mercado de trabajo (eventos 11–14).
 - `OracleCaianiRng`: opción `agentId` (sec. 1).
 
 Cada campo nuevo va en `state.ts`, en `initialize` (valor del constructor de JMAB), en `stateFromDump` y en `compareState` (`test/support/jmab-dump.ts`).
 
-## 13. Para retomar en una sesión nueva
+## 14. Para retomar en una sesión nueva
 
 1. Leer este documento (sec. 1: método; sec. 2: mapa) y [inicializacion.md](inicializacion.md).
-2. Siguiente: **evento 11, `laborSupplyTic`** (8.000 sorteos en el tick 1), **12, `laborDemandTic`** (120), **13, `governmentLaborTic`** (1) y **14, `laborMarketTic`** (768). Los volcados de los eventos 11–14 ya están en las dos corridas de referencia (sec. 1); para el 15 en adelante hay que volver a correrlas (conviene agregar varios de una vez).
+2. Siguiente: **evento 15, `productionTic`**, y después 16–28 (consumo y pagos). Antes de los pagos (evento 21 en adelante), decidir la propuesta del redondeo con arrastre (sec. 1, "Campos reportados"). Los volcados de las corridas de referencia llegan hasta el evento 14: para el 15 en adelante hay que volver a correrlas con `DUMP_EVENTS` hasta el último evento que se vaya a portar (conviene agregar varios de una vez; sec. 1).
 3. Por cada evento: agregar `t:e` a las dos corridas de referencia y correrlas; diff de volcados; leer el código de los agentes que escuchan el evento (`activeTicEvents`); portar en `events.ts` con la línea de JMAB al lado; casos a mano y V3 en `caiani-events.test.ts` (agregar el evento a la tabla `EVENTS`); cada comparación que define una rama, con los helpers de `decisions.ts`; registrar acá.
 4. Norma operativa: no editar los scripts de `reference/tools` mientras corre algo largo ([arquitectura.md](arquitectura.md), "Corridas largas").

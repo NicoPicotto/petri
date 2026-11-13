@@ -34,7 +34,7 @@ Hay tres versiones distintas, y no son iguales:
 | Petri (enfoque anterior) | Caiani (clase activa en la configuración del paper) | Destino |
 |---|---|---|
 | R1 precio y cantidad (CATS) | Producción = ventas esperadas + 10% de inventario objetivo − inventario (`TargetExpectedInventoriesOutputStrategy`). Precio = margen sobre el costo laboral unitario esperado; el margen sube o baja con un paso \|N(0; 0,0094)\| según inventario/ventas contra 0,1 (`AdaptiveMarkUpOnAC`) | Se reemplaza. Traslada costos a precios |
-| R2 salarios (sin fuente) | Salario de reserva por hogar: si estuvo desocupado más de 0,49 de los últimos 4 trimestres, baja; si está ocupado y el desempleo agregado es ≤ 8%, sube; paso \|N(0; 0,0094)\| (`AdaptiveWageStrategy`) | Se reemplaza. Un salario por trabajador, no por empresa |
+| R2 salarios (sin fuente) | Salario de reserva por hogar: si estuvo desocupado más de 0,49 de los últimos 4 trimestres, baja; si está ocupado y el desempleo agregado es ≤ 8%, sube; paso \|N(0; 0,0094)\| (`AdaptiveWageStrategy`). Así lo describe el paper; el código lo invierte para los desocupados (cuenta trimestres ocupado): ver [reglas-caiani.md](reglas-caiani.md), sec. 12 | Se reemplaza. Un salario por trabajador, no por empresa |
 | R3 demanda de trabajo | Trabajadores según producción y añadas de capital (Leontief, relación capital/trabajo 6,4), rotación al azar del 5%, despido del excedente | Se reemplaza |
 | R4 mercado de trabajo | La empresa toma a los más baratos de una muestra de 10 (`SelectCheapestWorkerStrategy`); el gobierno contrata 1.360 al azar | Se reemplaza |
 | R5 consumo (SIMEX) | C real = 0,385808·YD/pᵉ + 0,25·riqueza/pᵉ (`ConsumptionFixedPropensitiesOOIWWithPersistency`, persistencia 0) | Se reemplaza |

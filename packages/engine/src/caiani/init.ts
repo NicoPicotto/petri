@@ -193,11 +193,17 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   const hPop = rng.shuffle(SITE_INIT, 'initHouseholds', hIds.slice(), idOf);
 
   let hWorkerCounter = 0;
-  const hire = (employer: AgentId, employees: AgentId[]): void => {
+  /**
+   * `hh.setEmployer(e)` + `e.addEmployee(hh)` (`SFCSSMacroAgentInitialiser` 214–216, 340–342, 496–498):
+   * `addEmployee` también resta 1 a `laborDemand`, así que los empleadores arrancan con −(empleados). No
+   * tiene efecto: el evento 12 (13 para el gobierno) lo pisa antes de leerlo.
+   */
+  const hire = (employer: { id: AgentId; employees: AgentId[]; laborDemand: number }): void => {
     const hh = hhOf(hPop[hWorkerCounter] as AgentId);
-    hh.employer = employer;
+    hh.employer = employer.id;
     setLag(hh.lags, LAG.EMPLOYED, 0, 1);
-    employees.push(hh.id);
+    employer.laborDemand -= 1;
+    employer.employees.push(hh.id);
     hWorkerCounter++;
   };
 
@@ -247,6 +253,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     debtBurden: 0,
     debtInterests: 0,
     creditDemanded: 0,
+    laborDemand: 0,
     lags: {},
     expectations: {},
   });
@@ -278,7 +285,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       obsolete: false,
     };
     k.capitalGoods.push(inv);
-    for (let j = 0; j < kEmpl; j++) hire(k.id, k.employees);
+    for (let j = 0; j < kEmpl; j++) hire(k);
     const bankIdx = idiv(i, kFirmPerBank);
     open(ledger, 'deposit', k.id, bIds[bankIdx] as AgentId, toMicro(kDep), { rate: P.iDep }, 'deposits');
     k.previousBank = bIds[bankIdx] as AgentId;
@@ -350,7 +357,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       c.capitalGoods.push(g);
     }
     c.previousCapitalSupplier = kFirm;
-    for (let j = 0; j < cEmpl; j++) hire(c.id, c.employees);
+    for (let j = 0; j < cEmpl; j++) hire(c);
     const bankIdx = idiv(i, cFirmPerBank);
     open(ledger, 'deposit', c.id, bIds[bankIdx] as AgentId, toMicro(cDep), { rate: P.iDep }, 'deposits');
     c.previousBank = bIds[bankIdx] as AgentId;
@@ -444,8 +451,8 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   }
 
   // Gobierno
-  const government = { ...newFlags(), id: gov, employees: [] as AgentId[] };
-  for (let i = 0; i < P.gEmpl; i++) hire(gov, government.employees);
+  const government = { ...newFlags(), id: gov, employees: [] as AgentId[], laborDemand: 0 };
+  for (let i = 0; i < P.gEmpl; i++) hire(government);
   open(ledger, 'reserves', gov, cb, 0, { rate: 0 }, 'deposits');
 
   // Banco central

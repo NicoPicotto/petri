@@ -185,6 +185,8 @@ export interface FirmState extends AgentFlags {
   debtInterests: Micro;
   /** `creditDemanded` (evento 9, `PeckingOrderTheory`): crédito pedido en el tick; lo baja el mercado de crédito. */
   creditDemanded: Micro;
+  /** `AbstractFirm.laborDemand` (evento 12): puestos que faltan cubrir; cada contratación del evento 14 le resta 1. */
+  laborDemand: number;
   lags: Lags;
   expectations: Expectations;
 }
@@ -220,7 +222,10 @@ export interface BankState extends AgentFlags {
 
 export interface GovernmentState extends AgentFlags {
   id: AgentId;
+  /** Orden de JMAB (`Government.employees`); se mezcla al despedir y al pagar salarios. */
   employees: AgentId[];
+  /** `Government.laborDemand` (evento 13): puestos públicos que faltan cubrir (evento 14). */
+  laborDemand: number;
 }
 
 export interface CentralBankState extends AgentFlags {

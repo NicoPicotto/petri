@@ -33,7 +33,9 @@ describe('decisiones discretas: casos a mano', () => {
       expect(gt('m', 5, 4, 'amount')).toBe(true); // 1 µ ≤ 2: frágil
       expect(gt('r', 0.2, 0.19, 'fromAmounts')).toBe(true);
       expect(rounding('round', 2.5000000000001, 3, 'pure')).toBe(3); // a 4e-14 de la mitad: frágil
+      expect(rounding('round0', 0, 0, 'pure')).toBe(0); // 0 exacto: a 0,5 de la mitad (distancia 1), no frágil
     });
+    expect(rec.log[3]!['round0']!.fragile).toBe(0);
     const x = rec.log[3]!['x']!;
     expect([x.comparisons, x.fragile, x.outcomes]).toEqual([2, 1, [1, 1]]);
     expect(x.examples[0]!.index).toBe(0);

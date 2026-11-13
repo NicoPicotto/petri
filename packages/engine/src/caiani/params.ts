@@ -218,6 +218,26 @@ export interface RuleParams {
   creditSupplyHaircut: number; // 1889
   /** `Bank.bondInterestRate` inicial (propiedad del prototipo del banco); lo actualiza el mercado de bonos. */
   initialBankBondInterestRate: number; // 2298
+  /**
+   * `AdaptiveWageStrategy` de los hogares (`householdsWageStrategy`, evento 11): umbrales micro (ocupación
+   * pasada del desocupado) y macro (desempleo agregado del período anterior), pasos y desvío de
+   * `foldedNormal1` (2982).
+   */
+  wageMicroThreshold: number; // 2802
+  wageMacroThreshold: number; // 2803
+  wageMicroAdaptive: number; // 2805
+  wageMacroAdaptive: number; // 2804
+  wageSigma: number; // 2982
+  /** `Households.employmentWageLag`: trimestres que mira la referencia micro del salario. */
+  employmentWageLag: number; // 2701
+  /** `turnoverLabor` (`turnoverVal`, 2018–2020) de las empresas (1550, 2012) y del gobierno (2871): rotación por tick. */
+  laborTurnover: number;
+  /** `GovernmentAntiCyclical.fixedLaborDemand`: empleo público objetivo. */
+  governmentLaborDemand: number; // 2870
+  /** `SelectionRandomRobinBuyerMixer.nbSellers` del mercado de trabajo: hogares que ve cada empleador (evento 14). */
+  laborMarketSellers: number; // 377
+  /** `SimpleMarketSimulation.nbRuns` del mercado de trabajo: rondas del mezclador, mientras no se cierre. */
+  laborMarketRuns: number; // 364
 }
 
 /**
@@ -262,4 +282,14 @@ export const RULES: Readonly<RuleParams> = {
   riskAversionK: 21.513347,
   creditSupplyHaircut: 0.5,
   initialBankBondInterestRate: 0.0025,
+  wageMicroThreshold: 0.49,
+  wageMacroThreshold: 0.08,
+  wageMicroAdaptive: 1,
+  wageMacroAdaptive: 1,
+  wageSigma: 0.0094,
+  employmentWageLag: 4,
+  laborTurnover: 0.05,
+  governmentLaborDemand: 1360,
+  laborMarketSellers: 10,
+  laborMarketRuns: 8000,
 };

@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { Rng } from '../src/rng';
 import {
   LAG,
@@ -25,6 +25,12 @@ import {
   depositInterestEvent,
   creditDemandEvent,
   creditMarketEvent,
+  laborSupplyEvent,
+  laborDemandEvent,
+  governmentLaborEvent,
+  laborMarketEvent,
+  adaptiveWage,
+  wageMicroReference,
   expectedReturnCreditSupply,
   logisticDefaultProbability,
   loanInterestRate,
@@ -59,7 +65,7 @@ import {
   type CaianiState,
   type FirmState,
 } from '../src/caiani';
-import { compareState, idMaps, readDump, stateFromDump } from './support/jmab-dump';
+import { chainedAmountTol, compareState, idMaps, readDump, stateFromDump, type CompareResult } from './support/jmab-dump';
 
 describe('evento 0 (computeExpectations): casos a mano', () => {
   it('producción deseada: Y* = max(0, Sᵉ + 0,1·Sᵉ − inventario)', () => {
@@ -616,6 +622,182 @@ describe('evento 10 (mercado de crédito): casos a mano', () => {
   });
 });
 
+describe('eventos 11 a 14 (mercado de trabajo): casos a mano', () => {
+  /**
+   * Rng para seguir a mano: las mezclas no reordenan y se anotan (qué y de quién); las normales plegadas
+   * salen de una lista fija; cualquier otro sorteo tira error.
+   */
+  function laborRng(log: string[], normals: number[] = []): CaianiRng {
+    let k = 0;
+    const no = () => {
+      throw new Error('no se esperaba este sorteo');
+    };
+    return {
+      foldedNormal: () => {
+        log.push('fn');
+        const x = normals[k++];
+        if (x === undefined) throw new Error('no quedan normales');
+        return x;
+      },
+      bernoulli: no,
+      shuffle: <T,>(_site: string, what: string, items: T[]) => {
+        log.push(what);
+        return items;
+      },
+      shuffleEmployees: <T,>(_site: string, owner: number, items: T[]) => {
+        log.push(`emp ${owner} (${items.length})`);
+        return items;
+      },
+      sample: no,
+      uniform01: no,
+    };
+  }
+
+  /** Estado inicial en la ronda 5, con el rezago de ocupación de un hogar y el desempleo agregado de la ronda 4. */
+  function wageState(employedPast: [number, number, number], aggregateUnemployment: number) {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 5;
+    const h = s.households.find((x) => x.employer === null)!;
+    h.lags[LAG.EMPLOYED] = { 4: employedPast[0], 3: employedPast[1], 2: employedPast[2] };
+    s.aggregateLags[LAG.AGGUNEMPLOYMENT] = { 4: aggregateUnemployment };
+    return { s, h };
+  }
+
+  it('evento 11, referencia micro: (1 + Σ ocupado en t−1..t−3) / 4 para el desocupado; 0 para el ocupado', () => {
+    // Así está en JMAB (`averageUnemployment` arranca en 1 y suma rezagos de OCUPADO): desocupado los
+    // cuatro trimestres → 1/4; trabajó uno de los tres anteriores → 2/4.
+    expect(wageMicroReference(wageState([0, 0, 0], 0.1).s, wageState([0, 0, 0], 0.1).h)).toBe(0.25);
+    const { s, h } = wageState([1, 0, 0], 0.1);
+    expect(wageMicroReference(s, h)).toBe(0.5);
+    const employed = s.households.find((x) => x.employer !== null)!;
+    expect(wageMicroReference(s, employed)).toBe(0);
+  });
+
+  it('evento 11, salario: baja si la micro > 0,49; si no, sube si el desempleo agregado ≤ 0,08; piso 0', () => {
+    // Recién despedido (micro 0,5): baja 5·0,01.
+    let { s, h } = wageState([1, 0, 0], 0.5);
+    h.wage = 5;
+    expect(adaptiveWage(s, h, laborRng([], [0.01]))).toBe(5 - 1 * 5 * 0.01);
+    // Desocupado de larga data (micro 0,25): referencia macro 0 ≤ 0,08 → SUBE (aunque el desempleo sea 50%).
+    ({ s, h } = wageState([0, 0, 0], 0.5));
+    h.wage = 5;
+    expect(adaptiveWage(s, h, laborRng([], [0.01]))).toBe(5 + 1 * 5 * 0.01);
+    // Ocupado: sube con desempleo 0,08 (igual al umbral) y queda igual, sin sorteo, con 0,0800001.
+    ({ s } = wageState([0, 0, 0], 0.08));
+    const e = s.households.find((x) => x.employer !== null)!;
+    e.wage = 5;
+    expect(adaptiveWage(s, e, laborRng([], [0.02]))).toBe(5 + 5 * 0.02);
+    s.aggregateLags[LAG.AGGUNEMPLOYMENT] = { 4: 0.0800001 };
+    const log: string[] = [];
+    expect(adaptiveWage(s, e, laborRng(log))).toBe(5);
+    expect(log).toEqual([]);
+    // Piso: un paso mayor que 1 dejaría el salario negativo.
+    ({ s, h } = wageState([1, 1, 1], 0.5));
+    h.wage = 5;
+    expect(adaptiveWage(s, h, laborRng([], [1.5]))).toBe(0);
+  });
+
+  it('evento 12: rotación (i < 0,05·N en double), demanda de trabajo y despidos del excedente con otra mezcla', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    computeExpectationsEvent(s); // producción deseada → 50 trabajadores requeridos por empresa de consumo
+    const c = s.consumptionFirms[0]!;
+    expect(c.employees.length).toBe(50);
+    const first3 = c.employees.slice(0, 3);
+    const rest = c.employees.slice(3);
+    const log: string[] = [];
+    laborDemandEvent({ ...s, consumptionFirms: [c], capitalFirms: [] }, laborRng(log));
+    // 0,05·50 = 2,5: despide i = 0, 1, 2 (los primeros después de la mezcla, que acá no reordena).
+    expect(log).toEqual([`emp ${c.id} (50)`]);
+    expect(c.employees).toEqual(rest);
+    for (const id of first3) {
+      const h = s.households.find((x) => x.id === id)!;
+      expect(h.employer).toBeNull();
+      expect(h.active[MKT.LABOR]).toBe(true);
+    }
+    expect(c.laborDemand).toBe(3);
+    expect(c.active[MKT.LABOR]).toBe(true);
+
+    // Con 40 requeridos: rotación de 3 (quedan 47); 40 ≤ 47 → otra mezcla, inactiva, despide 47 − 40 = 7.
+    const d = s.consumptionFirms[1]!;
+    d.desiredOutput = 40 * 6.4; // 40 trabajadores con añadas de productividad 1 y capital/trabajo 6,4
+    const log2: string[] = [];
+    laborDemandEvent({ ...s, consumptionFirms: [d], capitalFirms: [] }, laborRng(log2));
+    expect(log2).toEqual([`emp ${d.id} (50)`, `emp ${d.id} (47)`]);
+    expect(d.employees.length).toBe(40);
+    expect(d.laborDemand).toBe(0);
+    expect(d.active[MKT.LABOR]).toBe(false);
+
+    // 0,05·40 = 2 exacto en double: despide 2 (i = 0, 1), no 3.
+    const k = s.capitalFirms[0]!;
+    k.employees = k.employees.slice(0, 40);
+    const before = k.employees.length;
+    k.desiredOutput = 2 * 100; // 100 requeridos
+    laborDemandEvent({ ...s, consumptionFirms: [], capitalFirms: [k] }, laborRng([]));
+    expect(before).toBe(40);
+    expect(k.employees.length).toBe(38);
+    expect(k.laborDemand).toBe(62);
+  });
+
+  it('evento 13: el gobierno mezcla aunque no tenga empleados y pide los 1.360', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const log: string[] = [];
+    governmentLaborEvent(s, laborRng(log));
+    expect(log).toEqual([`emp ${s.government.id} (0)`]);
+    expect(s.government.laborDemand).toBe(1360);
+    expect(s.government.active[MKT.LABOR]).toBe(true);
+  });
+
+  it('evento 14: la empresa contrata al más barato de los 10 primeros activos; el gobierno, min(demanda, vistos); rondas hasta cerrar', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    for (const f of [...s.consumptionFirms, ...s.capitalFirms]) f.active[MKT.LABOR] = false;
+    for (const h of s.households) h.active[MKT.LABOR] = false;
+    s.government.active[MKT.LABOR] = false;
+    // Cerrado: nadie activo, ni una mezcla.
+    const log0: string[] = [];
+    laborMarketEvent(s, laborRng(log0));
+    expect(log0).toEqual([]);
+
+    // 12 desocupados activos (en el orden de la lista del mercado); el 3.º es el más barato de los 10
+    // primeros; el 11.º, más barato todavía, no llega a verse.
+    const sellers = s.markets.labor.sellers;
+    const free = sellers.slice(0, 12).map((id) => s.households.find((x) => x.id === id)!);
+    for (const [i, h] of free.entries()) {
+      h.employer = null;
+      h.active[MKT.LABOR] = true;
+      h.wage = i === 2 ? 4 : i === 10 ? 3 : 5;
+    }
+    const c = s.consumptionFirms[0]!;
+    c.active[MKT.LABOR] = true;
+    c.laborDemand = 1;
+    const n0 = c.employees.length;
+    const log: string[] = [];
+    laborMarketEvent(s, laborRng(log));
+    // Ronda 1: mezcla compradores y vendedores; contrata al 3.º y queda inactiva (demanda 0): cerrado.
+    expect(log).toEqual(['buyers', 'sellers']);
+    expect(c.employees.length).toBe(n0 + 1);
+    expect(c.employees[n0]).toBe(free[2]!.id);
+    expect(free[2]!.employer).toBe(c.id);
+    expect(free[2]!.active[MKT.LABOR]).toBe(false);
+    expect(c.laborDemand).toBe(0);
+    expect(c.active[MKT.LABOR]).toBe(false);
+
+    // Gobierno con demanda 15: ve 10 (de los 11 activos que quedan) y contrata a los 10 (la mezcla de la copia
+    // no reordena acá); ronda 2: ve 1 y lo contrata; ronda 3: sin vendedores activos, cerrado. Demanda 4.
+    const g = s.government;
+    g.active[MKT.LABOR] = true;
+    g.laborDemand = 15;
+    const log2: string[] = [];
+    laborMarketEvent(s, laborRng(log2));
+    expect(log2).toEqual(['buyers', 'sellers', 'workers', 'buyers', 'sellers', 'workers']);
+    expect(g.employees.length).toBe(11);
+    expect(g.laborDemand).toBe(4);
+    expect(g.active[MKT.LABOR]).toBe(true); // sigue activo: el mercado se cerró por falta de vendedores
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–14. */
@@ -637,8 +819,18 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   { e: 8, run: (s) => depositInterestEvent(s) },
   { e: 9, run: (s) => creditDemandEvent(s) },
   { e: 10, run: creditMarketEvent },
+  { e: 11, run: laborSupplyEvent },
+  { e: 12, run: laborDemandEvent },
+  { e: 13, run: governmentLaborEvent },
+  { e: 14, run: laborMarketEvent },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
+
+/**
+ * Montos que no cumplen la regla general de tolerancia y quedan reportados (no se agranda la tolerancia):
+ * se informan en cada corrida y esperan una decisión. Ver reglas-caiani.md, sec. 1, "Tolerancias".
+ */
+const REPORTED_AMOUNT_FIELDS: string[] = ['intereses pagados a depósitos', 'servicio de la deuda', 'intereses de la deuda', 'crédito pedido'];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;
@@ -657,10 +849,29 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     rng.tick = tick;
     return rng;
   };
-  const check = (s: CaianiState, name: string, label: string) => {
-    const r = compareState(s, dumpOf(name));
+  /**
+   * Compara contra el volcado y devuelve las diferencias que superan la tolerancia. Los montos de los
+   * campos de `REPORTED_AMOUNT_FIELDS` que la superan se informan aparte y no hacen fallar el test
+   * (reglas-caiani.md, sec. 1, "Tolerancias": campos reportados).
+   */
+  const check = (s: CaianiState, name: string, label: string, amountTol?: number) => {
+    const r = compareState(s, dumpOf(name), { amountTol });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
-    expect(r.diffs).toEqual([]);
+    report(label, r);
+    const unexpected = r.diffs.filter((d) => !REPORTED_AMOUNT_FIELDS.some((f) => d.includes(f)));
+    expect(unexpected).toEqual([]);
+    // `diffs` guarda solo las primeras 40: si se llenó con reportados, el total tiene que cuadrar con ellos.
+    const reportedOver = Object.entries(r.amountFields)
+      .filter(([k]) => REPORTED_AMOUNT_FIELDS.some((f) => k.includes(f)))
+      .reduce((a, [, v]) => a + v.over, 0);
+    expect(r.total - reportedOver).toBe(unexpected.length);
+  };
+  /** Montos con diferencia > 0, por tipo de campo: máximo, cuántos superan la tolerancia y de cuántos. */
+  const report = (label: string, r: CompareResult) => {
+    const rows = Object.entries(r.amountFields)
+      .filter(([, v]) => v.max > 0)
+      .map(([k, v]) => `${k}: máx ${v.max} µ${v.over > 0 ? `, ${v.over} de ${v.n} sobre la tolerancia` : ''}`);
+    if (rows.length > 0) console.log(`Montos, tick ${tick}, ${label}:\n  ${rows.join('\n  ')}`);
   };
   /** Registro de decisiones de cada modalidad (lo llenan los dos tests de abajo; vitest los corre en orden). */
   const single = new DecisionRecorder();
@@ -673,29 +884,39 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     expect(r.counts.maxAmountDiff).toBe(0);
   }, 120_000);
 
-  it.skipIf(!available)(`cada evento desde el volcado anterior (0–${LAST})`, () => {
-    for (const { e, run: ev } of EVENTS) {
-      const s = stateFromDump(dumpOf(e === 0 ? before : after(e - 1)));
-      const rng = drawsOf(e);
-      withDecisions(single, e, () => ev(s, rng));
-      expect(rng.remaining).toBe(0);
-      check(s, after(e), `evento ${e}`);
-    }
-    console.log(`Decisiones, tick ${tick}, cada evento suelto:\n  ${summarizeDecisions(single.log).join('\n  ')}`);
+  // Entre test y test vitest solo espera microtareas: sin ceder una macrotarea, el worker no atiende los
+  // mensajes de su RPC durante todo el archivo y, pasado el minuto (con los eventos 11–14), vence el
+  // temporizador de una llamada ("Timeout calling onTaskUpdate") aunque los tests pasen.
+  afterEach(() => new Promise<void>((resolve) => setImmediate(resolve)));
+
+  // Un test por evento (vitest los corre en orden dentro del describe).
+  it.skipIf(!available).each(EVENTS.map((x) => [x.e, x.run] as const))('evento %i desde el volcado anterior', (e, ev) => {
+    const s = stateFromDump(dumpOf(e === 0 ? before : after(e - 1)));
+    const rng = drawsOf(e);
+    withDecisions(single, e, () => ev(s, rng));
+    expect(rng.remaining).toBe(0);
+    check(s, after(e), `evento ${e}`);
   }, 120_000);
 
-  it.skipIf(!available)(`eventos 0–${LAST} encadenados desde el principio del tick`, () => {
-    const s = stateFromDump(dumpOf(before));
-    for (const { e, run: ev } of EVENTS) {
-      const rng = drawsOf(e);
-      withDecisions(chained, e, () => ev(s, rng));
-      expect(rng.remaining).toBe(0);
-    }
-    check(s, after(LAST), `eventos 0–${LAST}`);
+  /** Estado del encadenado: arranca del volcado del principio del tick y lo avanza cada test de abajo. */
+  let chainedState: CaianiState | undefined;
+  it.skipIf(!available).each([...EVENTS.entries()])('encadenado desde el principio del tick, hasta el evento %#', (k, { e, run: ev }) => {
+    if (k === 0) chainedState = stateFromDump(dumpOf(before));
+    const s = chainedState;
+    if (!s) throw new Error('falta el estado del encadenado (falló un evento anterior)');
+    const rng = drawsOf(e);
+    withDecisions(chained, e, () => ev(s, rng));
+    expect(rng.remaining).toBe(0);
+    // Después de cada evento, con la tolerancia de la cadena (k + 1 eventos corridos).
+    check(s, after(e), `encadenado 0–${e}`, chainedAmountTol(k + 1));
+  }, 120_000);
+
+  it.skipIf(!available)('decisiones: frágiles por evento y dadas vuelta entre el suelto y el encadenado', () => {
+    console.log(`Decisiones, tick ${tick}, cada evento suelto:\n  ${summarizeDecisions(single.log).join('\n  ')}`);
     console.log(`Decisiones, tick ${tick}, encadenados:\n  ${summarizeDecisions(chained.log).join('\n  ')}`);
     // Decisiones que se dan vuelta entre el encadenado y el evento suelto (que arranca del estado de JMAB).
     const { flips, lengthMismatch } = compareOutcomes(single.log, chained.log);
     console.log(`Decisiones dadas vuelta, tick ${tick}: ${flips.length}`, JSON.stringify(flips.slice(0, 10)), lengthMismatch);
     expect(lengthMismatch).toEqual([]);
-  }, 120_000);
+  });
 });

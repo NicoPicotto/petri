@@ -35,6 +35,8 @@ import {
   type CapitalGoodStock,
   type Expectations,
   type FirmState,
+  type GovernmentState,
+  type HouseholdState,
 } from './state';
 
 /** Índices de los eventos de comportamiento (orden de modelFile.xml, líneas 43–80). */
@@ -50,6 +52,10 @@ export const EVENT = {
   DEPOSIT_INTEREST: 8,
   CREDIT_DEMAND: 9,
   CREDIT_MARKET: 10,
+  LABOR_SUPPLY: 11,
+  LABOR_DEMAND: 12,
+  GOVERNMENT_LABOR: 13,
+  LABOR_MARKET: 14,
 } as const;
 
 /**
@@ -806,8 +812,7 @@ export function capitalFinancialRequirement(s: CaianiState, k: FirmState): numbe
   if (!inventories) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
   const uc = inventories.unitCost;
   const inv = Math.trunc(inventories.quantity);
-  const x = k.desiredOutput / r.capitalLaborProductivity;
-  const nbWorkers = rounding('CapitalFirm.getRequiredWorkers Math.round(Y*/productividad)', x, javaRoundToInt(x), 'pure');
+  const nbWorkers = capitalRequiredWorkersInt(s, k);
   const expWages = wageExpectation(k);
   const expRevenues = expectationOf(k, EXPECTATION.NOMINALSALES);
   const interestReceived = toUnits(k.interestReceived);
@@ -825,6 +830,12 @@ export function capitalFinancialRequirement(s: CaianiState, k: FirmState): numbe
     expRevenues +
     r.shareOfExpIncomeAsDepositCapital * (nbWorkers * expWages)
   );
+}
+
+/** `CapitalFirm.getRequiredWorkers` (535–537): `(int) Math.round(Y* / laborProductivity)`. */
+function capitalRequiredWorkersInt(s: CaianiState, k: FirmState): number {
+  const x = k.desiredOutput / s.rules.capitalLaborProductivity;
+  return rounding('CapitalFirm.getRequiredWorkers Math.round(Y*/productividad)', x, javaRoundToInt(x), 'pure');
 }
 
 /**
@@ -1045,5 +1056,228 @@ export function creditMarketEvent(s: CaianiState, rng: CaianiRng): void {
       rng,
     );
     creditTransaction(s, f, lender, consumption);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Eventos 11 a 14: mercado de trabajo
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_WAGE = 'AdaptiveWageStrategy.computeWage';
+
+function householdById(s: CaianiState, id: AgentId): HouseholdState {
+  const h = s.households[id - s.households[0]!.id];
+  if (!h || h.id !== id) throw new Error(`el agente ${id} no es un hogar`);
+  return h;
+}
+
+/**
+ * `Households.getMicroReferenceVariableForWage` (393–403). Ocupado: 0. Desocupado:
+ *   (1 + Σ_{i=1}^{L−1} LAG_EMPLOYED(t − i)) / L,  L = `employmentWageLag` = 4.
+ * Así está en JMAB: la variable se llama `averageUnemployment` y arranca en 1 (el desocupado de hoy),
+ * pero suma los rezagos de **ocupado** (`LAG_EMPLOYED` = 1 si tenía empleador). Un desocupado de los
+ * cuatro trimestres da 1/4; uno que trabajó en alguno de los tres anteriores, ≥ 1/2 (reglas-caiani.md,
+ * sec. 12, hallazgo). Los valores son k/4 exactos: la comparación con el umbral no se registra.
+ */
+export function wageMicroReference(s: CaianiState, h: HouseholdState): number {
+  if (h.employer !== null) return 0;
+  const L = s.rules.employmentWageLag;
+  let averageUnemployment = 1;
+  for (let i = 1; i < L; i++) averageUnemployment += getLag(h.lags, LAG.EMPLOYED, s.round, i);
+  return averageUnemployment / L;
+}
+
+/**
+ * `Households.getMacroReferenceVariableForWage` (423–428): desocupado, 0; ocupado, el desempleo agregado
+ * del período anterior (`getAggregateValue(LAG_AGGUNEMPLOYMENT, 1)`).
+ */
+export function wageMacroReference(s: CaianiState, h: HouseholdState): number {
+  return h.employer === null ? 0 : getLag(s.aggregateLags, LAG.AGGUNEMPLOYMENT, s.round, 1);
+}
+
+/**
+ * `AdaptiveWageStrategy.computeWage` (XML 2800–2806): si la referencia micro supera 0,49, el salario baja
+ * w·|N(0; 0,0094)|; si no, y la referencia macro es ≤ 0,08, sube w·|N|; si no, queda igual. Piso:
+ * `getWageLowerBound` = 0 (`Households` 375–378). Un sorteo solo en las ramas que cambian el salario.
+ */
+export function adaptiveWage(s: CaianiState, h: HouseholdState, rng: CaianiRng): number {
+  const r = s.rules;
+  let wage = h.wage;
+  if (wageMicroReference(s, h) > r.wageMicroThreshold) {
+    wage -= r.wageMicroAdaptive * wage * rng.foldedNormal(SITE_WAGE, r.wageSigma);
+  } else if (!gt(`${SITE_WAGE} desempleo agregado > umbral`, wageMacroReference(s, h), r.wageMacroThreshold, 'pure')) {
+    wage += r.wageMacroAdaptive * wage * rng.foldedNormal(SITE_WAGE, r.wageSigma);
+  }
+  return Math.max(wage, 0);
+}
+
+/**
+ * Evento 11, `laborSupplyTic` (TIC_LABORSUPPLY): los hogares, en orden de creación
+ * (`Households.onTicArrived` 186–188 → `computeWage` 203–209): salario de reserva con `adaptiveWage` y,
+ * si no tiene empleador, activo en el mercado de trabajo (acá nunca se desactiva).
+ */
+export function laborSupplyEvent(s: CaianiState, rng: CaianiRng): void {
+  for (const h of s.households) {
+    h.wage = adaptiveWage(s, h, rng);
+    if (h.employer === null) h.active[MKT.LABOR] = true;
+  }
+}
+
+/** Empleador en el mercado de trabajo: empresa o gobierno. */
+type Employer = FirmState | GovernmentState;
+
+/** `AbstractFirm.fireAgent` (129–133), `Government.fireAgent` (312–): sin empleador y activo en trabajo. */
+function fire(s: CaianiState, worker: AgentId): void {
+  const h = householdById(s, worker);
+  h.employer = null;
+  h.active[MKT.LABOR] = true;
+}
+
+/** `cleanEmployeeList` (`AbstractFirm` 215–223, `Government` 298–306): saca a los que no tienen empleador, conserva el orden. */
+function cleanEmployeeList(s: CaianiState, e: Employer): void {
+  e.employees = e.employees.filter((id) => householdById(s, id).employer !== null);
+}
+
+/**
+ * Ajuste de la planta, común a `computeLaborDemand` de las empresas de consumo
+ * (`CopyOfConsumptionFirm2WagesEnd` 166–190), de capital (`CopyOfCapitalFirm2WagesEnd` 163–189) y del
+ * gobierno (`GovernmentAntiCyclical` 146–167):
+ * 1. Rotación: `Collections.shuffle(employees)` y despide a los primeros, `for (i = 0; i < turnover·N; i++)`
+ *    con la comparación en `double` (con N = 50 y turnover = 0,05 despide 3: i = 0, 1, 2 < 2,5). La mezcla
+ *    se pide aunque la lista esté vacía (JMAB la registra igual).
+ * 2. `cleanEmployeeList`; N = empleados que quedan; requeridos = `required()` (se calcula después de la
+ *    rotación, como en JMAB).
+ * 3. Si requeridos > N: `laborDemand` = requeridos − N, activo en trabajo. Si no: `laborDemand` = 0,
+ *    inactivo, **otra mezcla** (aunque no haya que despedir a nadie) y despide a los primeros N − requeridos.
+ * 4. `cleanEmployeeList`.
+ */
+function adjustWorkforce(s: CaianiState, e: Employer, site: string, required: () => number, rng: CaianiRng): void {
+  const turnover = s.rules.laborTurnover;
+  let currentWorkers = e.employees.length;
+  rng.shuffleEmployees(site, e.id, e.employees, ownId);
+  for (let i = 0; i < turnover * currentWorkers; i++) fire(s, e.employees[i]!);
+  cleanEmployeeList(s, e);
+  currentWorkers = e.employees.length;
+  const nbWorkers = required();
+  if (nbWorkers > currentWorkers) {
+    e.laborDemand = nbWorkers - currentWorkers;
+    e.active[MKT.LABOR] = true;
+  } else {
+    e.laborDemand = 0;
+    e.active[MKT.LABOR] = false;
+    rng.shuffleEmployees(site, e.id, e.employees, ownId);
+    for (let i = 0; i < currentWorkers - nbWorkers; i++) fire(s, e.employees[i]!);
+  }
+  cleanEmployeeList(s, e);
+}
+
+export const SITE_LABOR_DEMAND_CONSUMPTION = 'CopyOfConsumptionFirm2WagesEnd.computeLaborDemand';
+export const SITE_LABOR_DEMAND_CAPITAL = 'CopyOfCapitalFirm2WagesEnd.computeLaborDemand';
+export const SITE_LABOR_DEMAND_GOVERNMENT = 'GovernmentAntiCyclical.computeLaborDemand';
+
+/**
+ * Evento 12, `laborDemandTic` (TIC_LABORDEMAND): las empresas, en orden de creación (primero las de consumo,
+ * después las de capital: verificado con el orden de los sorteos del oráculo), con `adjustWorkforce`.
+ * Requeridos: consumo, `getRequiredWorkers()` (267–298, redondeado); capital, `getRequiredWorkers()`
+ * (535–537) + `(int) Math.round(amountResearch / salario esperado)` (0 sin I+D).
+ */
+export function laborDemandEvent(s: CaianiState, rng: CaianiRng): void {
+  for (const c of s.consumptionFirms) adjustWorkforce(s, c, SITE_LABOR_DEMAND_CONSUMPTION, () => consumptionRequiredWorkersInt(c), rng);
+  for (const k of s.capitalFirms) {
+    adjustWorkforce(
+      s,
+      k,
+      SITE_LABOR_DEMAND_CAPITAL,
+      () => {
+        const x = k.amountResearch / wageExpectation(k);
+        return capitalRequiredWorkersInt(s, k) + rounding('CopyOfCapitalFirm2WagesEnd.computeLaborDemand Math.round(I+D/salario)', x, javaRoundToInt(x), 'pure');
+      },
+      rng,
+    );
+  }
+}
+
+/**
+ * Evento 13, `governmentLaborTic` (TIC_GOVERNMENTLABOR): `GovernmentAntiCyclical.computeLaborDemand`
+ * (146–167) con `adjustWorkforce` y requeridos = `fixedLaborDemand` (1.360).
+ */
+export function governmentLaborEvent(s: CaianiState, rng: CaianiRng): void {
+  adjustWorkforce(s, s.government, SITE_LABOR_DEMAND_GOVERNMENT, () => s.rules.governmentLaborDemand, rng);
+}
+
+export const SITE_LABOR_MIXER = 'SelectionRandomRobinBuyerMixer.invokeInteractions';
+export const SITE_GOVERNMENT_WORKERS = 'SelectRandomWorkerStrategy.selectWorkers';
+
+/**
+ * `UnconstrainedLaborMechanism.execute`: el hogar pasa a tener empleador, el empleador lo agrega al final
+ * de su lista (`addEmployee`: `laborDemand` − 1), el hogar queda inactivo en trabajo y, si la demanda llegó
+ * a 0, también el empleador.
+ */
+function hire(s: CaianiState, e: Employer, worker: AgentId): void {
+  const h = householdById(s, worker);
+  h.employer = e.id;
+  e.laborDemand -= 1;
+  e.employees.push(worker);
+  h.active[MKT.LABOR] = false;
+  if (e.laborDemand === 0) e.active[MKT.LABOR] = false;
+}
+
+/**
+ * `SelectCheapestWorkerStrategy.selectWorker`: el de menor salario de reserva entre los vistos (el primero
+ * en caso de empate; si todos son NaN, el primero).
+ */
+function cheapestWorker(s: CaianiState, workers: readonly AgentId[]): AgentId {
+  let minWage = Infinity;
+  let cheapest = workers[0]!;
+  for (const id of workers) {
+    const w = householdById(s, id).wage;
+    if (lt('SelectCheapestWorkerStrategy más barato', w, minWage, 'pure')) {
+      minWage = w;
+      cheapest = id;
+    }
+  }
+  return cheapest;
+}
+
+/**
+ * Evento 14, `laborMarketTic` (TIC_LABORMARKET): `SimpleMarketSimulation` del trabajo (XML 345–378), con
+ * listas propias (`s.markets.labor`: compradores = empresas de capital, de consumo y el gobierno;
+ * vendedores = hogares) y `nbRuns` = 8.000: repite el mezclador mientras el mercado no esté cerrado
+ * (`AbstractMarketMixer.closed`: algún comprador activo y algún vendedor activo). En cada ronda,
+ * `SelectionRandomRobinBuyerMixer` mezcla los compradores y, para cada uno activo en trabajo, mezcla los
+ * vendedores y toma los primeros 10 activos (`selectSellers`). Llegada:
+ * - empresa (`ConsumptionFirm` 239–243, `CapitalFirm` 274–278): contrata **uno**, el más barato
+ *   (`cheapestWorker`);
+ * - gobierno (`Government.onAgentArrival` 159–168, `SelectRandomWorkerStrategy`): mezcla una copia de los
+ *   vistos y contrata a los primeros min(`laborDemand`, vistos).
+ */
+export function laborMarketEvent(s: CaianiState, rng: CaianiRng): void {
+  const m = s.markets.labor;
+  const employerOf = new Map<AgentId, Employer>();
+  for (const f of s.consumptionFirms) employerOf.set(f.id, f);
+  for (const f of s.capitalFirms) employerOf.set(f.id, f);
+  employerOf.set(s.government.id, s.government);
+  const employer = (id: AgentId): Employer => {
+    const e = employerOf.get(id);
+    if (!e) throw new Error(`el agente ${id} no es empleador`);
+    return e;
+  };
+  const sellerActive = (id: AgentId) => householdById(s, id).active[MKT.LABOR]!;
+  const closed = () => !(m.buyers.some((id) => employer(id).active[MKT.LABOR]) && m.sellers.some(sellerActive));
+  for (let run = 0; run < s.rules.laborMarketRuns && !closed(); run++) {
+    rng.shuffle(SITE_LABOR_MIXER, 'buyers', m.buyers, ownId);
+    for (const id of m.buyers) {
+      const e = employer(id);
+      if (!e.active[MKT.LABOR]) continue;
+      const selected = selectSellers(m.sellers, s.rules.laborMarketSellers, sellerActive, rng, SITE_LABOR_MIXER);
+      if (selected.length === 0) continue;
+      if (e === s.government) {
+        rng.shuffle(SITE_GOVERNMENT_WORKERS, 'workers', selected, ownId);
+        const n = Math.min(e.laborDemand, selected.length);
+        for (let i = 0; i < n; i++) hire(s, e, selected[i]!);
+      } else {
+        hire(s, e, cheapestWorker(s, selected));
+      }
+    }
   }
 }
