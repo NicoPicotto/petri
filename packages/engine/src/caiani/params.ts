@@ -165,6 +165,17 @@ export interface RuleParams {
    */
   capitalSwitchingLambda: number;
   capitalSwitchingPayOrReceive: boolean; // 1794
+  /** `Bank.bankInterestRate` inicial (propiedad del prototipo del banco). */
+  initialBankInterestRate: number; // 2288
+  /**
+   * `CopyOfAdaptiveInterestRateAverageThreshold` de la tasa de préstamos (`banksBankSpecificLoanInterestStrategy`,
+   * evento 6): paso adaptivo, sentido (`increase` = false: con ratio de capital por encima del promedio la
+   * tasa baja) y desvío de la normal plegada (`foldedNormal1`, 2982). El `threshold` del XML (2447) no se
+   * usa: la estrategia lo pisa con el promedio de los bancos antes de leerlo.
+   */
+  loanRateAdaptive: number; // 2446
+  loanRateIncrease: boolean; // 2444
+  loanRateSigma: number; // 2982
 }
 
 /**
@@ -187,4 +198,8 @@ export const RULES: Readonly<RuleParams> = {
   researchShare: 0,
   capitalSwitchingLambda: LN2 / 0.2,
   capitalSwitchingPayOrReceive: true,
+  initialBankInterestRate: 0.0075,
+  loanRateAdaptive: 1,
+  loanRateIncrease: false,
+  loanRateSigma: 0.0094,
 };

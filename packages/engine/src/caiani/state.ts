@@ -187,6 +187,13 @@ export interface BankState extends AgentFlags {
   bailoutCost: Micro;
   /** `AbstractBank.currentNonPerformingLoans` del tick. */
   currentNonPerformingLoans: Micro;
+  /** `Bank.bankInterestRate`: tasa genérica de los préstamos (evento 6). */
+  bankInterestRate: number;
+  /**
+   * `Bank.totalLoanSupply`: crédito que el banco está dispuesto a dar en el tick (evento 6). En unidades
+   * de Caiani y en double, no en µ: con `InfiniteSupplyCreditStrategy` (el base) vale +∞.
+   */
+  totalLoanSupply: number;
 }
 
 export interface GovernmentState extends AgentFlags {

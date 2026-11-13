@@ -16,7 +16,7 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { contractIds, contractOf, firstAsset, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { contractIds, contractOf, firstAsset, netFinancialWorth, type AgentId, type ContractKind, type Ledger } from './ledger';
 import { toUnits, type Micro } from './money';
 import { expNeg } from '../detmath';
 import type { CaianiRng } from './rng';
@@ -41,6 +41,7 @@ export const EVENT = {
   CAPITAL_MARKET_1: 3,
   RD_DECISION: 4,
   INVESTMENT_DEMAND: 5,
+  CREDIT_SUPPLY: 6,
 } as const;
 
 /**
@@ -486,5 +487,78 @@ export function investmentDemandEvent(s: CaianiState, rng: CaianiRng): void {
     }
     c.desiredRealCapitalDemand = realCapitalDemand(c, offered(c.previousCapitalSupplier!));
     if (c.desiredRealCapitalDemand > 0) c.active[MKT.CAPGOOD] = true;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 6: oferta de crédito de los bancos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_INTEREST_RATE = 'CopyOfAdaptiveInterestRateAverageThreshold.computeInterestRate';
+
+/**
+ * `CopyOfAdaptiveInterestRateAverageThreshold.computeInterestRate` con `mktId` = MKT_CREDIT (64–102):
+ * - promedios sobre los bancos con préstamos (saldo ≠ 0) y patrimonio > 0, en el orden de la lista de la
+ *   población (`banks.getAgents()`; importa para la suma en double): umbral = ratio de capital medio,
+ *   tasa media = `LAG_LOANINTEREST` del período anterior (`getPassedValue(…, 1)`). Sin ninguno, 0/0 = NaN;
+ * - referencia = ratio de capital del banco (evento 0);
+ * - con `increase` = false: si la referencia supera el umbral, tasa = media − a·media·|N|; si no,
+ *   media + a·media·|N|. Un sorteo por banco en cualquier rama;
+ * - acotada a [0, +∞) (`Bank.getInterestRateLowerBound` / `UpperBound` del crédito). `Math.max`/`min`
+ *   de Java y de JS propagan NaN igual.
+ * `eligible` son los bancos que entran en los promedios, ya en el orden de la población.
+ */
+export function adaptiveLoanRate(
+  referenceVariable: number,
+  eligible: readonly { capitalRatio: number; pastLoanRate: number }[],
+  rng: CaianiRng,
+  r: { loanRateAdaptive: number; loanRateIncrease: boolean; loanRateSigma: number },
+): number {
+  let tot = 0;
+  let inter = 0;
+  for (const b of eligible) {
+    tot += b.capitalRatio;
+    inter += b.pastLoanRate;
+  }
+  const n = eligible.length;
+  const threshold = tot / n;
+  const avInterest = inter / n;
+  // `adaptiveParameter*avInterest*distribution.nextDouble()`: se evalúa de izquierda a derecha.
+  const step = () => r.loanRateAdaptive * avInterest * rng.foldedNormal(SITE_INTEREST_RATE, r.loanRateSigma);
+  let iR: number;
+  if (referenceVariable > threshold) iR = r.loanRateIncrease ? avInterest + step() : avInterest - step();
+  else iR = r.loanRateIncrease ? avInterest - step() : avInterest + step();
+  return Math.min(Math.max(iR, 0), Infinity);
+}
+
+/**
+ * Evento 6, `creditSupplyTic` (TIC_CREDITSUPPLY): solo los bancos, en orden de creación
+ * (`Bank.onTicArrived` 199–202):
+ * 1. `determineBankGenericInterestRate` (273–277): `bankInterestRate` con `adaptiveLoanRate`. Los
+ *    promedios leen el ratio de capital del evento 0 y la tasa rezagada: no dependen de las tasas que
+ *    ya fijaron los otros bancos en este evento.
+ * 2. `determineCreditSupply` (378–387): `InfiniteSupplyCreditStrategy` → +∞; se guarda en
+ *    `totalLoanSupply` y en el rezago `LAG_BANKTOTLOANSUPPLY` del período, y el banco queda activo en
+ *    el mercado de crédito si la oferta es > 0 (siempre, con +∞).
+ */
+export function creditSupplyEvent(s: CaianiState, rng: CaianiRng): void {
+  const L = s.ledger;
+  const firstB = s.banks[0]!.id;
+  const bank = (id: AgentId) => {
+    const b = s.banks[id - firstB];
+    if (!b || b.id !== id) throw new Error(`el agente ${id} no es un banco`);
+    return b;
+  };
+  // `getNumericBalanceSheet()[0][SM_LOAN] != 0 && getNetWealth() > 0`. No cambia dentro del evento.
+  const eligible = s.populations.banks
+    .map(bank)
+    .filter((b) => sumContracts(L, b.id, 'assets', 'loan') !== 0 && netFinancialWorth(L, b.id) > 0)
+    .map((b) => ({ capitalRatio: b.capitalRatio, pastLoanRate: getLag(b.lags, LAG.LOANINTEREST, s.round, 1) }));
+  for (const b of s.banks) {
+    b.bankInterestRate = adaptiveLoanRate(b.capitalRatio, eligible, rng, s.rules);
+    const loanSupply = Infinity; // InfiniteSupplyCreditStrategy.computeCreditSupply
+    b.totalLoanSupply = loanSupply;
+    setLag(b.lags, LAG.BANKTOTLOANSUPPLY, s.round, loanSupply);
+    if (b.totalLoanSupply > 0) b.active[MKT.CREDIT] = true;
   }
 }

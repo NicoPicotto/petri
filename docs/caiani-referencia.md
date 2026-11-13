@@ -61,6 +61,8 @@ Texto extraído en `reference/p0/paper-wp.txt` (`pdftotext -layout`). Secuencia 
 | Quiebra por impuestos | no se menciona | sí |
 | Empleados públicos iniciales | 1.360, con desempleo inicial u₀ = 0,08 (cuadro 3) | 0 en t = 0 (`gEmpl` no está en el XML); los 1.360 se contratan en el tick 1 y el desempleo queda en 8% ([inicializacion.md](inicializacion.md), sec. 6) |
 | Tasa de los préstamos | eq. 3.12, ajuste según el ratio de capital contra el promedio | igual; el premio por empresa está comentado |
+| Cambio de proveedor de capital | la empresa cambia al proveedor más atractivo con una probabilidad creciente en la diferencia de atractivo | **probabilidad siempre 0.** La estrategia (`BestQualityPriceCapitalSupplierWithSwitching` + `SwitchingStrategySimple`) está configurada como pago (`payOrReceive` = true, XML 1794), que solo da p > 0 si el candidato es *menor* que el previo; pero se consulta solo cuando el candidato es más atractivo (más es mejor). La empresa cambia de proveedor únicamente si el previo quedó inactivo en el mercado. Verificado con el oráculo: el evento 5 no tiene sorteos ([reglas-caiani.md](reglas-caiani.md), sec. 7). Registrado el 2026-11-13 (Nico) |
+| Obsolescencia de las añadas de capital | — | condición **invertida** en 2015 (corregida en git en 2017; plan, sec. 0): una añada queda obsoleta si la **vieja** tiene más productividad que la nueva y ese ahorro supera el precio. Sin I+D todas las añadas tienen la misma productividad y nunca se activa en el escenario base. El port reproduce la condición de 2015. Registrado el 2026-11-13 (Nico) |
 
 **Pendiente de leer con detalle:** sección 5 (resultados y hechos estilizados), para fijar los objetivos de V4 además de las tablas xlsx.
 

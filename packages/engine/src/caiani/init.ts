@@ -393,6 +393,8 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       capitalRatio: 0,
       bailoutCost: 0,
       currentNonPerformingLoans: 0,
+      bankInterestRate: R.initialBankInterestRate, // propiedad del prototipo (XML 2288)
+      totalLoanSupply: 0, // valor por defecto del campo en Java
     };
     open(ledger, 'cash', b.id, cb, toMicro(bCash), {}, 'deposits');
     open(ledger, 'reserves', b.id, cb, toMicro(bRes), { rate: 0 }, 'deposits');

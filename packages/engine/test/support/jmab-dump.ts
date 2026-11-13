@@ -52,12 +52,19 @@ export interface Dump {
   agents: Map<number, J>;
 }
 
+/**
+ * El oráculo escribe los double no finitos como cadenas (`Double.toString`: "NaN", "Infinity",
+ * "-Infinity"; StateDump.java). Se pasan a number al leer. Ningún campo de texto de JMAB toma esos valores.
+ */
+const NON_FINITE: Record<string, number> = { NaN: NaN, Infinity: Infinity, '-Infinity': -Infinity };
+const reviveNonFinite = (_k: string, v: unknown): unknown => (typeof v === 'string' && Object.hasOwn(NON_FINITE, v) ? NON_FINITE[v] : v);
+
 export function readDump(path: string): Dump {
   const lines = readFileSync(path, 'utf8').split('\n').filter((l) => l.length > 0);
-  const meta = JSON.parse(lines[0]!).meta as DumpMeta;
+  const meta = JSON.parse(lines[0]!, reviveNonFinite).meta as DumpMeta;
   const agents = new Map<number, J>();
   for (const line of lines.slice(1)) {
-    const d = JSON.parse(line) as { id: number; agent: J };
+    const d = JSON.parse(line, reviveNonFinite) as { id: number; agent: J };
     agents.set(d.id, d.agent);
   }
   return { meta, agents };
@@ -301,6 +308,8 @@ export function stateFromDump(d: Dump): CaianiState {
       capitalRatio: j['capitalRatio'],
       bailoutCost: toMicro(j['bailoutCost']),
       currentNonPerformingLoans: toMicro(j['AbstractBank.currentNonPerformingLoans']),
+      bankInterestRate: j['bankInterestRate'],
+      totalLoanSupply: j['totalLoanSupply'],
     };
   });
   const gov = firstOf('government');
@@ -599,6 +608,8 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
     close(`${w} ratio de capital`, b.capitalRatio, j['capitalRatio'], true);
     amount(`${w} costo de rescate`, b.bailoutCost, j['bailoutCost']);
     amount(`${w} morosidad del tick`, b.currentNonPerformingLoans, j['AbstractBank.currentNonPerformingLoans']);
+    close(`${w} tasa de préstamos`, b.bankInterestRate, j['bankInterestRate']);
+    close(`${w} oferta de crédito`, b.totalLoanSupply, j['totalLoanSupply'], true);
     lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues']);
     expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
   }
