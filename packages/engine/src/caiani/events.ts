@@ -16,8 +16,8 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { contractIds, contractOf, credit, firstAsset, installments, netFinancialWorth, open, pay, serviceLoan, type AgentId, type ContractKind, type Ledger } from './ledger';
-import { CarryRounder, MICRO_PER_UNIT, toMicro, toUnits, type Micro } from './money';
+import { agentOf, contractIds, delistFromIssuer, contractOf, credit, firstAsset, installments, netFinancialWorth, open, rawInstallments, writeDown, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { CarryRounder, MICRO_PER_UNIT, allocateLargestRemainder, toMicro, toUnits, type Micro } from './money';
 import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
@@ -735,8 +735,9 @@ export function depositInterestEvent(s: CaianiState): void {
  * `computeDebtPayments` (`ConsumptionFirm` 355–396, `CapitalFirm` 490–530): por cada préstamo de la
  * empresa (sus pasivos), con edad > 0, interés = tasa × saldo y capital según la amortización; con edad 0
  * (dado en este tick), nada. Devuelve el servicio total (`debtBurden`) y los intereses (`debtInterests`).
- * En µ, con `installments` del ledger (las mismas cuotas que se pagan en el evento 20, con redondeo con
- * arrastre sobre la lista): los totales quedan a ≤ 1 µ de los de JMAB (ledger-contratos.md; reglas-caiani.md, sec. 10).
+ * En µ, con `installments` del ledger (redondeo con arrastre sobre la lista; el evento 20 la usa igual para
+ * `debtBurden`, y paga los montos sin redondear con redondeo controlado): los totales quedan a ≤ 1 µ de los de JMAB
+ * (ledger-contratos.md; reglas-caiani.md, sec. 10).
  */
 export function debtPayments(L: Ledger, firm: AgentId): { burden: Micro; interests: Micro } {
   let burden = 0;
@@ -1521,10 +1522,16 @@ export function averageEmployedWage(s: CaianiState): number {
  * `getNetWealth` del hogar (`SimpleAbstractAgent.getNumericBalanceSheet`): activos − pasivos. Los financieros
  * salen del ledger (µ, exactos) y los bienes de consumo que compró en el tick, de su valor (`double`).
  */
-export function householdNetWealth(s: CaianiState, h: HouseholdState): number {
+export function householdNetWealth(s: CaianiState, h: HouseholdState, balance?: (contract: number) => number): number {
   let goods = 0;
   for (const g of h.consumptionGoods) goods += g.value;
-  return toUnits(netFinancialWorth(s.ledger, h.id)) + goods;
+  if (!balance) return toUnits(netFinancialWorth(s.ledger, h.id)) + goods;
+  // Con pagos pendientes de un lote (`PaymentBatch.balance`), en µ como `double`.
+  const a = agentOf(s.ledger, h.id);
+  let nw = 0;
+  for (const list of a.assets) for (const id of list) nw += balance(id);
+  for (const list of a.liabilities) for (const id of list) nw -= balance(id);
+  return nw / MICRO_PER_UNIT + goods;
 }
 
 /** `Households.getGrossIncome` (458–460): salario si tiene empleador (`AbstractHousehold` 67–74) + intereses + dividendos. */
@@ -1879,25 +1886,147 @@ export function capitalMarketSecondStepEvent(s: CaianiState, rng: CaianiRng): Se
 // ---------------------------------------------------------------------------------------------
 
 export const SITE_PAY_INTERESTS = 'ConsumptionFirm/CapitalFirm.payInterests';
+export const SITE_BANKRUPTCY = 'FirmBankruptcyFireSales.bankrupt';
+
+/** Lo que una quiebra deja para después de cerrar el lote de pagos del evento (con los saldos ya redondeados). */
+type AfterSettle = (() => void)[];
+
+/**
+ * Saldo de una cuenta del agente con los pagos pendientes del lote, en µ: tiene que ser entero (la quiebra
+ * reparte la liquidez por restos mayores; los pagos que la preceden en el evento son traspasos de saldos enteros).
+ */
+function integerBalance(batch: PaymentBatch, contract: number, what: string): Micro {
+  const v = batch.balance(contract);
+  if (!Number.isSafeInteger(v)) throw new Error(`${SITE_BANKRUPTCY}: ${what} no es entero en µ (${v}): no portado`);
+  return v;
+}
+
+/**
+ * Quiebra de una empresa, `FirmBankruptcyFireSales.bankrupt` (XML 1883–1886 y 2177–2180; quita `haircutVal` = 0,5,
+ * 1888–1890, el mismo bean que la oferta de crédito). Propuesta aprobada por Nico (2026-11-13; reglas-caiani.md,
+ * sec. 19). Los pagos van al lote del evento; lo que JMAB hace con `setValue(0)` va a `after` (después del cierre):
+ * 1. **Dos depósitos:** pasa todo el segundo al primero (`transfer`) y saca el segundo **solo de la lista del
+ *    banco** (`delistFromIssuer`): la empresa lo conserva (en 0) hasta que lo suelta en el mercado de depósitos o lo
+ *    vuelve a usar. Tiene efecto en JMAB (el oráculo lo muestra con saldo y fuera de la lista del banco durante
+ *    trimestres): se reproduce (reglas-caiani.md, sec. 19).
+ * 2. **Efectivo** al primer depósito.
+ * 3. **Liquidez** = el primer depósito. Deuda = Σ saldos de los préstamos (en el orden de su lista).
+ * 4. Si la deuda no es 0: **reparto** de la liquidez entre los préstamos en proporción a su saldo, por **restos
+ *    mayores** con desempate por id del préstamo (ledger-contratos.md, sec. 2.1); si la liquidez alcanza, cada uno
+ *    cobra su saldo. Cada parte baja el depósito y el préstamo (`repay`, con reservas si el prestamista es otro
+ *    banco). **El depósito queda en 0** (`setValue(0)`): si la liquidez superaba la deuda, el excedente se borra
+ *    con una quita explícita (`writeOff`: ganancia del banco, pérdida de la empresa; rareza de JMAB).
+ * 5. Empresa de consumo: **aporte de los dueños**. D = min(quita × Σ valor de las añadas, pérdida de los bancos)
+ *    va a `bailoutCost`; cada hogar (en el orden de la población), por cada préstamo, paga
+ *    D × patrimonio del hogar / patrimonio total × pérdida del préstamo / pérdida total, con el patrimonio del
+ *    hogar recalculado en cada pago y las pérdidas actualizadas después de cada uno (como JMAB). Va al lote como
+ *    `bailout` (categoría `ownersBailout`, redondeo controlado). Lo que supere el saldo de un préstamo va como
+ *    sobrepago (`bailoutExcess`). Un depósito de hogar que quedaría negativo es un error explícito (JMAB no lo
+ *    chequea; no pasa en los 400 trimestres de la corrida base).
+ * 6. Lo que queda de cada préstamo se condona (`writeOff`) y suma a `currentNonPerformingLoans` del prestamista,
+ *    menos el sobrepago (la pérdida negativa de JMAB).
+ * Si la deuda es 0, JMAB no hace nada más (ni pone el depósito en 0).
+ */
+function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after: AfterSettle): void {
+  const L = s.ledger;
+  f.defaulted = true; // ConsumptionFirm/CapitalFirm.bankruptcy: antes de la estrategia
+  const deposits = contractIds(L, f.id, 'assets', 'deposit');
+  const deposit = deposits[0]!;
+  if (deposits.length === 2) {
+    const second = deposits[1]!;
+    batch.pay(second, deposit, batch.balance(second), 'deposits');
+    delistFromIssuer(L, second); // deposit2.getLiabilityHolder().removeItemStockMatrix(deposit2, …): solo el banco
+  }
+  const cash = contractIds(L, f.id, 'assets', 'cash')[0]!;
+  if (batch.balance(cash) > 0) batch.pay(cash, deposit, batch.balance(cash), 'deposits');
+  const liquidity = integerBalance(batch, deposit, `la liquidez de la empresa ${f.id}`);
+  const loans = [...contractIds(L, f.id, 'liabilities', 'loan')];
+  const debts = loans.map((id) => integerBalance(batch, id, `el préstamo ${id}`));
+  let totalDebt = 0;
+  for (const d of debts) totalDebt += d;
+  if (totalDebt === 0) return;
+  const paid = ge(`${SITE_BANKRUPTCY} liquidez ≥ deuda`, liquidity, totalDebt, 'amount')
+    ? debts
+    : allocateLargestRemainder(liquidity, debts, loans);
+  loans.forEach((loan, i) => batch.payLoan('repay', deposit, loan, paid[i]!));
+  let surplus = liquidity;
+  for (const p of paid) surplus -= p;
+  if (surplus > 0) after.push(() => writeDown(L, deposit, surplus));
+  // Pérdidas de los bancos, en unidades de Caiani como en JMAB (banksLosses, totalBanksLoss).
+  const losses = loans.map((_, i) => toUnits(debts[i]! - paid[i]!));
+  /** Índices en el lote de los sobrepagos de cada préstamo (para la morosidad, con los montos ya redondeados). */
+  const excess: number[][] = [];
+  let totalLoss = 0;
+  for (const x of losses) totalLoss += x;
+  if (s.consumptionFirms.includes(f)) {
+    let capitalValue = 0;
+    for (const g of f.capitalGoods) capitalValue += goodValue(g, f.id) * s.rules.creditSupplyHaircut;
+    const owners = gt(`${SITE_BANKRUPTCY} valor del capital > pérdida`, capitalValue, totalLoss, 'fromAmounts') ? totalLoss : capitalValue;
+    f.bailoutCost = toMicro(owners);
+    const wealth = (h: HouseholdState) => householdNetWealth(s, h, (id) => batch.balance(id));
+    // Lo que todavía puede bajar cada préstamo con los aportes (µ). Por el orden de JMAB (el patrimonio del hogar y
+    // las pérdidas se actualizan entre préstamo y préstamo), los aportes a un préstamo pueden superar su saldo: en
+    // JMAB el préstamo queda negativo hasta el `setValue(0)` y la morosidad suma una pérdida negativa. El port lo
+    // reproduce con un sobrepago explícito (decisión de Nico, 2026-11-13): el aporte cancela el préstamo hasta su
+    // saldo y lo que sobra llega igual al prestamista (`bailoutExcess`).
+    const room = loans.map((_, i) => debts[i]! - paid[i]!);
+    for (const [i] of loans.entries()) excess[i] = [];
+    let totalWealth = 0;
+    for (const id of s.populations.households) totalWealth += wealth(householdById(s, id));
+    for (const id of s.populations.households) {
+      const h = householdById(s, id);
+      const target = firstAsset(L, h.id, 'deposit');
+      if (!target) throw new Error(`hogar ${h.id} sin depósito (JMAB: NullPointerException)`);
+      loans.forEach((loan, i) => {
+        const amount = (((owners * wealth(h)) / totalWealth) * losses[i]!) / totalLoss;
+        if (!(amount >= 0)) throw new Error(`${SITE_BANKRUPTCY}: aporte ${amount} del hogar ${h.id} (patrimonio negativo o NaN: no portado)`);
+        const micro = amount * MICRO_PER_UNIT;
+        if (batch.balance(target.id) < micro) {
+          throw new Error(`${SITE_BANKRUPTCY}: el depósito del hogar ${h.id} quedaría negativo (JMAB no lo chequea; no portado, reglas-caiani.md, sec. 19)`);
+        }
+        // No se registra como decisión: el reparto entre el préstamo y el sobrepago es continuo (part + sobrepago =
+        // aporte), así que un vuelco no cambia nada más allá de la diferencia que lo provoca.
+        const part = micro <= room[i]! ? micro : room[i]!;
+        batch.payLoan('bailout', target.id, loan, part);
+        room[i] = room[i]! - part;
+        if (micro > part) excess[i]!.push(batch.payLoan('bailoutExcess', target.id, loan, micro - part));
+        losses[i] = losses[i]! - amount;
+        totalLoss -= amount;
+      });
+    }
+  }
+  after.push(() => {
+    loans.forEach((loan, i) => {
+      const c = contractOf(L, loan);
+      const rest = c.amount;
+      writeDown(L, loan, rest);
+      // banksLosses[i] de JMAB: lo que queda del préstamo, menos lo que los hogares pagaron de más (sobrepago).
+      let over = 0;
+      for (const k of excess[i] ?? []) over += batch.settledAmount(k);
+      bankById(s, c.holder).currentNonPerformingLoans += rest - over;
+    });
+  });
+}
 
 /**
  * `payInterests` de la empresa (`ConsumptionFirm` 634–673, `CapitalFirm` 303–348; iguales salvo que la de capital
  * vuelve a poner `defaulted` = true después de la quiebra):
- * 1. `computeDebtPayments`: cuotas de todos los préstamos (`installments`, la misma función y la misma lista que
- *    el evento 9) y `debtBurden`, `debtInterests`;
+ * 1. `computeDebtPayments`: `debtBurden` y `debtInterests` con `installments` (la misma función y la misma lista
+ *    que el evento 9);
  * 2. si tiene **exactamente dos** depósitos, pasa todo el segundo al primero (`transfer`: pago entre bancos);
  * 3. si tiene efectivo > 0, lo pasa al primer depósito (el efectivo del banco sube en espejo);
- * 4. si el primer depósito ≥ `debtBurden`: paga cada préstamo en el orden de su lista (interés + capital desde
- *    el depósito, con reservas si el prestamista es otro banco; el préstamo baja en el capital);
- * 5. si no, quiebra (`FirmBankruptcyFireSales`): **no portada todavía** (error explícito; reglas-caiani.md, sec. 19).
- * Todos los montos son enteros (cuotas en µ, saldos enteros): no hace falta el redondeo controlado.
+ * 4. si el primer depósito ≥ `debtBurden`: paga cada préstamo en el orden de su lista, interés y capital desde
+ *    el depósito (con reservas si el prestamista es otro banco; el préstamo baja en el capital). Los montos son
+ *    los de JMAB en `double` (`rawInstallments`: tasa × saldo, A/L − c o el saldo en la última cuota) y van al
+ *    lote del evento: redondeo controlado al cerrarlo (decisión de Nico, 2026-11-13). La cuota pagada de un
+ *    préstamo puede diferir en 1 µ de la de `installments`; el total de la empresa, en < 1 µ;
+ * 5. si no, quiebra (`firmBankruptcy`).
  */
-function payLoanInterests(s: CaianiState, f: FirmState): void {
+function payLoanInterests(s: CaianiState, f: FirmState, batch: PaymentBatch, after: AfterSettle): void {
   const L = s.ledger;
-  const dues = installments(L, f.id, 'loan');
   let burden = 0;
   let interests = 0;
-  for (const due of dues) {
+  for (const due of installments(L, f.id, 'loan')) {
     burden += due.interest + due.principal;
     interests += due.interest;
   }
@@ -1906,23 +2035,143 @@ function payLoanInterests(s: CaianiState, f: FirmState): void {
   const deposits = contractIds(L, f.id, 'assets', 'deposit');
   const deposit = deposits[0];
   if (deposit === undefined) throw new Error(`empresa ${f.id} sin depósito (JMAB: IndexOutOfBoundsException)`);
-  if (deposits.length === 2) pay(L, deposits[1]!, deposit, contractOf(L, deposits[1]!).amount, 'deposits');
+  if (deposits.length === 2) batch.pay(deposits[1]!, deposit, batch.balance(deposits[1]!), 'deposits');
   const cash = contractIds(L, f.id, 'assets', 'cash')[0];
   if (cash === undefined) throw new Error(`empresa ${f.id} sin efectivo (JMAB: IndexOutOfBoundsException)`);
-  if (contractOf(L, cash).amount > 0) pay(L, cash, deposit, contractOf(L, cash).amount, 'deposits');
-  const liquidity = contractOf(L, deposit).amount;
+  if (batch.balance(cash) > 0) batch.pay(cash, deposit, batch.balance(cash), 'deposits');
+  const liquidity = batch.balance(deposit);
   if (ge(`${SITE_PAY_INTERESTS} liquidez ≥ servicio`, liquidity, burden, 'amount')) {
-    contractIds(L, f.id, 'liabilities', 'loan').forEach((loan, i) => serviceLoan(L, loan, deposit, dues[i]!));
+    const raw = rawInstallments(L, f.id, 'loan');
+    contractIds(L, f.id, 'liabilities', 'loan').forEach((loan, i) => {
+      const due = raw[i]!;
+      batch.payLoan('interest', deposit, loan, due.interest);
+      batch.payLoan('repay', deposit, loan, Math.min(due.principal, contractOf(L, loan).amount));
+    });
   } else {
-    throw new Error(`empresa ${f.id}: quiebra por el servicio de la deuda (FirmBankruptcyFireSales no portada; reglas-caiani.md, sec. 19)`);
+    firmBankruptcy(s, f, batch, after);
   }
 }
 
 /**
  * Evento 20, `creditInterestsTic` (TIC_CREDINTERESTS): solo las empresas, en orden de creación (consumo, después
  * capital): `CopyOfConsumptionFirm2WagesEnd.onTicArrived` 88–89 y `CopyOfCapitalFirm2WagesEnd` 87–88 →
- * `payInterests`. Sin sorteos. La matriz `debtPayments` de JMAB es de trabajo y no se porta.
+ * `payInterests`. Sin sorteos. La matriz `debtPayments` de JMAB es de trabajo y no se porta. Los pagos van a un
+ * lote (`PaymentBatch`) que se cierra al final con redondeo controlado; después, lo que las quiebras dejan en 0.
  */
-export function creditInterestsEvent(s: CaianiState): void {
-  for (const f of [...s.consumptionFirms, ...s.capitalFirms]) payLoanInterests(s, f);
+export function creditInterestsEvent(s: CaianiState): SettleReport {
+  const batch = new PaymentBatch(s.ledger);
+  const after: AfterSettle = [];
+  for (const f of [...s.consumptionFirms, ...s.capitalFirms]) payLoanInterests(s, f, batch, after);
+  const report = batch.settle();
+  for (const fn of after) fn();
+  return report;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 21: pago de salarios y del seguro de desempleo
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_PAY_WAGES_CONSUMPTION = 'CopyOfConsumptionFirm2WagesEnd.payWages';
+export const SITE_PAY_WAGES_CAPITAL = 'CopyOfCapitalFirm2WagesEnd.payWages';
+export const SITE_PAY_WAGES_GOVERNMENT = 'Government.payWages';
+
+/**
+ * `payWages` de la empresa (`CopyOfConsumptionFirm2WagesEnd` 105–155, `CopyOfCapitalFirm2WagesEnd` 106–155, iguales),
+ * si tiene empleados:
+ * 1. junta los dos depósitos y el efectivo en el primero, como en el evento 20 (al lote, saldos enteros);
+ * 2. masa salarial W = Σ salarios de los empleados (`getWageBill`, en el orden de la lista);
+ * 3. si W > depósito (descuento = depósito / W < `minWageDiscount` = 1): mezcla los empleados
+ *    (`Collections.shuffle`), les reparte el depósito en partes iguales (JMAB: W × descuento / n a cada uno) y lo pone
+ *    en 0; después **quiebra** (`firmBankruptcy`, con liquidez 0). El reparto es por **restos mayores** con desempate
+ *    por id del hogar (ledger-contratos.md, sec. 2.1: reparto proporcional de la liquidez de una empresa quebrada): la
+ *    suma es exactamente el depósito y queda en 0, como el `setValue(0)` de JMAB;
+ * 4. si no: mezcla los empleados y le paga a cada uno su salario **solo si salario < depósito** (estricto, con el
+ *    depósito que va bajando; el que no cobra no se despide). Los pagos van al lote en `double` (redondeo controlado).
+ */
+function payFirmWages(s: CaianiState, f: FirmState, site: string, batch: PaymentBatch, after: AfterSettle, rng: CaianiRng): void {
+  if (f.employees.length === 0) return;
+  const L = s.ledger;
+  const deposits = contractIds(L, f.id, 'assets', 'deposit');
+  const deposit = deposits[0];
+  if (deposit === undefined) throw new Error(`empresa ${f.id} sin depósito (JMAB: IndexOutOfBoundsException)`);
+  if (deposits.length === 2) batch.pay(deposits[1]!, deposit, batch.balance(deposits[1]!), 'deposits');
+  const cash = contractIds(L, f.id, 'assets', 'cash')[0];
+  if (cash === undefined) throw new Error(`empresa ${f.id} sin efectivo (JMAB: IndexOutOfBoundsException)`);
+  if (batch.balance(cash) > 0) batch.pay(cash, deposit, batch.balance(cash), 'deposits');
+  let wageBill = 0;
+  for (const id of f.employees) wageBill += householdById(s, id).wage;
+  const payable = (worker: AgentId) => {
+    const d = firstAsset(L, worker, 'deposit');
+    if (!d) throw new Error(`hogar ${worker} sin depósito (JMAB: NullPointerException)`);
+    return d.id;
+  };
+  if (gt(`${site} masa salarial > depósito`, wageBill * MICRO_PER_UNIT, batch.balance(deposit), 'amount')) {
+    rng.shuffleEmployees(site, f.id, f.employees, ownId);
+    const liquidity = integerBalance(batch, deposit, `el depósito de la empresa ${f.id}`);
+    const shares = liquidity === 0 ? f.employees.map(() => 0) : allocateLargestRemainder(liquidity, f.employees.map(() => 1), f.employees);
+    f.employees.forEach((worker, i) => batch.pay(deposit, payable(worker), shares[i]!, 'wages'));
+    firmBankruptcy(s, f, batch, after);
+  } else {
+    rng.shuffleEmployees(site, f.id, f.employees, ownId);
+    for (const worker of f.employees) {
+      const wage = householdById(s, worker).wage * MICRO_PER_UNIT;
+      if (lt(`${site} salario < depósito`, wage, batch.balance(deposit), 'amount')) batch.pay(deposit, payable(worker), wage, 'wages');
+    }
+  }
+}
+
+/**
+ * Gobierno (`GovernmentAntiCyclical.onTicArrived`, TIC_WAGEPAYMENT, 89–92):
+ * - `payWages` (169–174 → `Government.payWages` 283–296), si tiene empleados: mezcla los empleados y le paga a cada uno
+ *   su salario desde su cuenta en el BC, **sin mirar el saldo** (la cuenta puede quedar negativa: es como el gobierno
+ *   registra el déficit); `wageBill` = Σ salarios;
+ * - `payUnemploymentBenefits` (112–140): salario medio de los ocupados (en el orden de la población) × 0,4 a cada
+ *   desocupado, en el orden de la población; `doleExpenditure` = Σ.
+ * Los dos totales se guardan en µ (`toMicro` de la suma en `double`, como los de las empresas en el evento 9).
+ */
+function payGovernmentWagesAndDole(s: CaianiState, batch: PaymentBatch, rng: CaianiRng): void {
+  const L = s.ledger;
+  const g = s.government;
+  const account = contractIds(L, g.id, 'assets', 'reserves')[0];
+  if (account === undefined) throw new Error('gobierno sin cuenta en el BC');
+  const payable = (worker: AgentId) => {
+    const d = firstAsset(L, worker, 'deposit');
+    if (!d) throw new Error(`hogar ${worker} sin depósito (JMAB: NullPointerException)`);
+    return d.id;
+  };
+  if (g.employees.length > 0) {
+    rng.shuffleEmployees(SITE_PAY_WAGES_GOVERNMENT, g.id, g.employees, ownId);
+    let wages = 0;
+    for (const worker of g.employees) {
+      const wage = householdById(s, worker).wage;
+      batch.pay(account, payable(worker), wage * MICRO_PER_UNIT, 'wages');
+      wages += wage;
+    }
+    g.wageBill = toMicro(wages);
+  }
+  const benefit = averageEmployedWage(s) * s.rules.unemploymentBenefit;
+  let dole = 0;
+  for (const id of s.populations.households) {
+    const h = householdById(s, id);
+    if (h.employer !== null) continue;
+    batch.pay(account, payable(h.id), benefit * MICRO_PER_UNIT, 'unemploymentBenefits');
+    dole += benefit;
+  }
+  g.doleExpenditure = toMicro(dole);
+}
+
+/**
+ * Evento 21, `payWageTic` (TIC_WAGEPAYMENT): en orden de creación, las empresas de consumo, las de capital y el
+ * gobierno. Los pagos van a un lote (`PaymentBatch`) que se cierra al final con redondeo controlado; después, lo que
+ * las quiebras dejan en 0 (como en el evento 20).
+ */
+export function wagePaymentEvent(s: CaianiState, rng: CaianiRng): SettleReport {
+  const batch = new PaymentBatch(s.ledger);
+  const after: AfterSettle = [];
+  for (const f of s.consumptionFirms) payFirmWages(s, f, SITE_PAY_WAGES_CONSUMPTION, batch, after, rng);
+  for (const f of s.capitalFirms) payFirmWages(s, f, SITE_PAY_WAGES_CAPITAL, batch, after, rng);
+  payGovernmentWagesAndDole(s, batch, rng);
+  const report = batch.settle();
+  for (const fn of after) fn();
+  return report;
 }

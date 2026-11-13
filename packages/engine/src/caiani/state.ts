@@ -241,6 +241,10 @@ export interface GovernmentState extends AgentFlags {
   employees: AgentId[];
   /** `Government.laborDemand` (evento 13): puestos públicos que faltan cubrir (evento 14). */
   laborDemand: number;
+  /** `Government.wageBill` (µ): salarios públicos pagados en el tick (evento 21). */
+  wageBill: Micro;
+  /** `GovernmentAntiCyclical.doleExpenditure` (µ): seguro de desempleo pagado en el tick (evento 21). */
+  doleExpenditure: Micro;
 }
 
 export interface CentralBankState extends AgentFlags {

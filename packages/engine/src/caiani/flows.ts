@@ -12,7 +12,8 @@
  *    saldo al final − saldo al principio = variación registrada por las operaciones. Atrapa
  *    cualquier cambio de saldo que no haya pasado por una operación.
  * 3. Columnas: para cada agente, variación del patrimonio financiero = flujos corrientes cobrados −
- *    flujos corrientes pagados. Atrapa operaciones mal clasificadas o con patas que no cierran.
+ *    flujos corrientes pagados. Atrapa operaciones mal clasificadas o con patas que no cierran. Es el patrimonio
+ *    económico (`netFinancialWorths`: un contrato fuera de la lista de su emisor sigue siendo su pasivo).
  */
 
 import {
@@ -21,7 +22,7 @@ import {
   SECTORS,
   agentOf,
   movementIndex,
-  netFinancialWorth,
+  netFinancialWorths,
   type FlowCategory,
   type FlowRecord,
   type Ledger,
@@ -50,7 +51,7 @@ export function beginPeriod(ledger: Ledger): Checkpoint {
   ledger.flowLog = [];
   ledger.movements = new Array<number>(MOVEMENT_CELLS).fill(0);
   return {
-    netWorth: ledger.agents.map((a) => netFinancialWorth(ledger, a.id)),
+    netWorth: netFinancialWorths(ledger),
     stocks: stockCells(ledger),
   };
 }
@@ -105,9 +106,10 @@ export function checkFlows(ledger: Ledger, cp: Checkpoint): string[] {
     expected[r.payer] = (expected[r.payer] as number) - r.amount;
     expected[r.payee] = (expected[r.payee] as number) + r.amount;
   }
+  const nw = netFinancialWorths(ledger);
   for (const a of ledger.agents) {
     const before = cp.netWorth[a.id] ?? 0; // agentes creados durante el período arrancan en 0
-    const delta = netFinancialWorth(ledger, a.id) - before;
+    const delta = (nw[a.id] as number) - before;
     if (delta !== expected[a.id]) {
       errors.push(`agente ${a.id} (${a.sector}): Δ patrimonio ${delta} µ, flujos corrientes netos ${expected[a.id]} µ`);
     }

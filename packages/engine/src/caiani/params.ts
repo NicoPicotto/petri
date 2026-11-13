@@ -250,6 +250,11 @@ export interface RuleParams {
   inventoriesLostShare: number; // 1841
   /** `GovernmentAntiCyclical.unemploymentBenefit`: seguro de desempleo, como fracción del salario medio de los ocupados. */
   unemploymentBenefit: number; // 2872
+  /**
+   * `minWageDiscount` de las empresas (capital 1549, consumo 2014; los dos 1): si el depósito cubre menos que esta
+   * parte de la masa salarial, la empresa reparte el depósito entre sus empleados y quiebra (evento 21).
+   */
+  minWageDiscount: number;
   /** `IncomeWealthTaxStrategy` de los hogares: alícuotas sobre el ingreso bruto y sobre el patrimonio (eventos 17 y 24). */
   householdIncomeTaxRate: number; // 2810
   householdWealthTaxRate: number; // 2811
@@ -330,6 +335,7 @@ export const RULES: Readonly<RuleParams> = {
   laborMarketRuns: 8000,
   inventoriesLostShare: 0,
   unemploymentBenefit: 0.4,
+  minWageDiscount: 1,
   householdIncomeTaxRate: 0.18,
   householdWealthTaxRate: 0,
   consumptionPersistency: 0,

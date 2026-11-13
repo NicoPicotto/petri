@@ -24,6 +24,7 @@ import {
   contractOf,
   createLedger,
   toMicro,
+  MICRO_PER_UNIT,
   type AgentFlags,
   type AgentId,
   type BankState,
@@ -173,7 +174,17 @@ function capitalGoodOf(it: J, fromJ: (j: number) => AgentId): CapitalGoodStock {
  * Los contratos se emparejan por "@oid" (el mismo objeto en la lista del tenedor y en la del emisor)
  * y cada lista conserva el orden de JMAB. Los saldos pasan a µ con `toMicro`.
  */
+/** Saldo de JMAB (en µ, `double` sin redondear) de cada contrato de un estado reconstruido con `stateFromDump`. */
+export const INPUT_VALUES = new WeakMap<CaianiState, Map<number, number>>();
+
 export function stateFromDump(d: Dump): CaianiState {
+  const inputValues = new Map<number, number>();
+  const s = buildStateFromDump(d, inputValues);
+  INPUT_VALUES.set(s, inputValues);
+  return s;
+}
+
+function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiState {
   const { meta, agents } = d;
   const { toJ, fromJ, jmabIds } = idMaps(meta);
   const agentOf = (id: AgentId): J => {
@@ -231,6 +242,7 @@ export function stateFromDump(d: Dump): CaianiState {
           c.maturity = it['maturity'];
         }
         ledger.contracts[next] = c;
+        inputValues.set(next, (it['AbstractItem.value'] as number) * MICRO_PER_UNIT);
         (ledger.agents[id]!.assets[KIND_INDEX[kind]] as number[]).push(next);
         byOid.set(oid, next);
         next++;
@@ -249,6 +261,16 @@ export function stateFromDump(d: Dump): CaianiState {
         (ledger.agents[id]!.liabilities[KIND_INDEX[kind]] as number[]).push(cid);
       }
     }
+  }
+  // Contratos que el tenedor tiene y el emisor no lista: el segundo depósito de una empresa que quebró
+  // (`FirmBankruptcyFireSales` lo saca solo de la lista del banco; reglas-caiani.md, sec. 19).
+  const listed = new Set<number>();
+  for (const a of ledger.agents) for (const list of a.liabilities) for (const cid of list) listed.add(cid);
+  for (let cid = 0; cid < next; cid++) {
+    if (listed.has(cid)) continue;
+    const c = ledger.contracts[cid]!;
+    if (c.kind !== 'deposit') throw new Error(`el ${c.kind} ${cid} de ${toJ(c.holder)} no está en la lista de su emisor ${toJ(c.issuer)}`);
+    c.delisted = true;
   }
   const problems = checkLedger(ledger);
   if (problems.length > 0) throw new Error(`ledger reconstruido inválido: ${problems.slice(0, 5).join('; ')}`);
@@ -365,6 +387,8 @@ export function stateFromDump(d: Dump): CaianiState {
       id: gov,
       employees: (jg['Government.employees'] as J[]).map((e) => fromJ(ref(e)!)),
       laborDemand: jg['Government.laborDemand'],
+      wageBill: toMicro(jg['Government.wageBill']),
+      doleExpenditure: toMicro(jg['doleExpenditure']),
     },
     centralBank: {
       ...flagsOf(jc),
@@ -427,6 +451,13 @@ export interface CompareOptions {
    * montos si es ≤ max(10⁻⁶ relativo, ρ·S). Los `double` puros no cambian. Sin `scale`, la regla de siempre.
    */
   scale?: ScaleSource;
+  /**
+   * Evento suelto: error de entrada de cada contrato (µ; port − JMAB: el redondeo de su saldo inicial y el que le
+   * llegó por traspasos de saldos enteros). Con esta opción, los montos se comparan contra el valor de JMAB en
+   * `double` (sin pasarlo a µ) y a la diferencia de un contrato se le descuenta su error de entrada (decisiones de
+   * Nico, 2026-11-13; ver `InputCarry`, test/support/input-carry.ts).
+   */
+  carry?: (contract: number) => number;
 }
 
 /** Escalas S(v) del encadenado (las da `ChainScales`, test/support/chain-scale.ts). */
@@ -497,7 +528,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   };
   /** Montos: la misma tolerancia para todos (`amountTol`, arriba). */
   const amount = (what: string, port: number, java: number, contract?: number) => {
-    const dd = Math.abs(port - toMicro(java));
+    const carried = contract !== undefined && opts.carry ? opts.carry(contract) : 0;
+    const dd = Math.abs(port - carried - (opts.carry ? java * MICRO_PER_UNIT : toMicro(java)));
     counts.maxAmountDiff = Math.max(counts.maxAmountDiff, dd);
     const k = fieldKind(what);
     const st = (amountFields[k] ??= { max: 0, n: 0, over: 0 });
@@ -745,6 +777,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   flags('gobierno', s.government, jg);
   same('empleados públicos', s.government.employees.map(toJ).join(), (jg['Government.employees'] as J[]).map(ref).join());
   same('demanda de trabajo del gobierno', s.government.laborDemand, jg['Government.laborDemand']);
+  amount('gobierno masa salarial', s.government.wageBill, jg['Government.wageBill']);
+  amount('gobierno seguro de desempleo', s.government.doleExpenditure, jg['doleExpenditure']);
   const jcb = agentJ(s.centralBank.id);
   flags('BC', s.centralBank, jcb);
   amount('BC intereses de adelantos', s.centralBank.interestsOnAdvances, jcb['interestsOnAdvances']);

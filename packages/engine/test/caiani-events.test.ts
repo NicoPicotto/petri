@@ -36,7 +36,13 @@ import {
   consumptionMarketEvent,
   capitalMarketSecondStepEvent,
   creditInterestsEvent,
+  wagePaymentEvent,
   installments,
+  rawInstallments,
+  closeContract,
+  beginPeriod,
+  assertFlows,
+  assertLedger,
   desiredCapacityGrowth,
   setLag,
   pay,
@@ -81,6 +87,7 @@ import {
   type FirmState,
 } from '../src/caiani';
 import { ChainScales } from './support/chain-scale';
+import { InputCarry } from './support/input-carry';
 import { V3_CHAIN_RHO, chainedAmountTol, compareState, idMaps, readDump, stateFromDump, type CompareResult, type ScaleSource } from './support/jmab-dump';
 
 describe('evento 0 (computeExpectations): casos a mano', () => {
@@ -1203,10 +1210,20 @@ describe('evento 19 (segunda etapa del mercado de capital): casos a mano', () =>
 });
 
 describe('evento 20 (servicio de la deuda): casos a mano', () => {
-  it('junta los dos depósitos en el primero, paga las cuotas de installments (interés + capital) y actualiza debtBurden', () => {
+  /** Las demás empresas, sin cuotas este tick (edad 0): no mueven nada. */
+  const quietOthers = (s: CaianiState, keep: FirmState) => {
+    for (const f of [...s.consumptionFirms, ...s.capitalFirms]) {
+      if (f === keep) continue;
+      for (const id of contractIds(s.ledger, f.id, 'liabilities', 'loan')) contractOf(s.ledger, id).age = 0;
+    }
+  };
+  const reserves = (s: CaianiState, b: number) => contractOf(s.ledger, contractIds(s.ledger, b, 'assets', 'reserves')[0]!).amount;
+
+  it('junta los dos depósitos en el primero y paga las cuotas de JMAB en double, con redondeo controlado; debtBurden de installments', () => {
     const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
     const L = s.ledger;
     const c = s.consumptionFirms[0]!;
+    quietOthers(s, c);
     const d0 = firstAsset(L, c.id, 'deposit')!;
     const otherBank = s.banks.find((b) => b.id !== d0.issuer)!;
     const d1 = open(L, 'deposit', c.id, otherBank.id, 0, { rate: 0 }, 'deposits');
@@ -1214,19 +1231,24 @@ describe('evento 20 (servicio de la deuda): casos a mano', () => {
     const total = d0.amount + contractOf(L, d1).amount;
     const loans = contractIds(L, c.id, 'liabilities', 'loan');
     const dues = installments(L, c.id, 'loan');
+    const raw = rawInstallments(L, c.id, 'loan');
     const burden = dues.reduce((a, d) => a + d.interest + d.principal, 0);
+    const rawTotal = raw.reduce((a, d) => a + d.interest + d.principal, 0);
     const before = loans.map((id) => contractOf(L, id).amount);
     expect(burden).toBeGreaterThan(0);
-    // Para el caso, todas las demás empresas sin deuda que pagar no importan: corre el evento entero.
-    creditInterestsEvent(s);
+    const cp = beginPeriod(L);
+    const report = creditInterestsEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(report.payments).toBe(1 + 2 * loans.length); // el traspaso del segundo depósito, interés y capital por préstamo
     expect(contractOf(L, d1).amount).toBe(0);
-    expect(d0.amount).toBe(total - burden);
-    loans.forEach((id, i) => expect(contractOf(L, id).amount).toBe(before[i]! - dues[i]!.principal));
+    // Lo que paga la empresa queda a < 1 µ de la suma de JMAB en double; cada préstamo, a < 1 µ de su capital.
+    expect(Math.abs(total - d0.amount - rawTotal)).toBeLessThan(1);
+    loans.forEach((id, i) => expect(Math.abs(before[i]! - contractOf(L, id).amount - raw[i]!.principal)).toBeLessThan(1));
     expect(c.debtBurden).toBe(burden);
     expect(c.debtInterests).toBe(dues.reduce((a, d) => a + d.interest, 0));
   });
 
-  it('préstamo de otro banco: las reservas pasan del banco del depósito al prestamista', () => {
+  it('préstamo de otro banco: las reservas pasan del banco del depósito al prestamista (a < 1 µ de la suma en double)', () => {
     const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
     const L = s.ledger;
     const c = s.consumptionFirms[0]!;
@@ -1234,32 +1256,204 @@ describe('evento 20 (servicio de la deuda): casos a mano', () => {
     const lender = s.banks.find((b) => b.id !== d0.issuer)!;
     // Un préstamo de 20 a 20 trimestres, edad 1, tasa 0,01, del otro banco: cuota 0,2 de interés + 1 de capital.
     const loan = open(L, 'loan', lender.id, c.id, 20_000_000, { rate: 0.01, length: 20, amortization: 'fixedCapital', age: 1, initialAmount: 20_000_000 }, 'loans');
-    const res = (b: number) => contractOf(L, contractIds(L, b, 'assets', 'reserves')[0]!).amount;
-    const [rd, rl] = [res(d0.issuer), res(lender.id)];
-    const dues = installments(L, c.id, 'loan');
-    expect(dues[dues.length - 1]).toEqual({ interest: 200_000, principal: 1_000_000 });
-    // Cada cuota de un préstamo de un banco que no es el del depósito mueve reservas (la de este y las de los
-    // préstamos iniciales). Las demás empresas, sin cuotas este tick (edad 0), para que no muevan nada.
+    const [rd, rl] = [reserves(s, d0.issuer), reserves(s, lender.id)];
+    const raw = rawInstallments(L, c.id, 'loan');
+    expect(raw[raw.length - 1]).toEqual({ interest: 200_000, principal: 1_000_000, exactPrincipal: false });
     const ids = contractIds(L, c.id, 'liabilities', 'loan');
-    const moved = (bank: number) => ids.reduce((a, id, i) => a + (contractOf(L, id).holder === bank ? dues[i]!.interest + dues[i]!.principal : 0), 0);
-    const toLender = moved(lender.id);
-    const out = ids.reduce((a, id, i) => a + (contractOf(L, id).holder !== d0.issuer ? dues[i]!.interest + dues[i]!.principal : 0), 0);
-    for (const f of [...s.consumptionFirms.slice(1), ...s.capitalFirms]) for (const id of contractIds(L, f.id, 'liabilities', 'loan')) contractOf(L, id).age = 0;
+    const toLender = ids.reduce((a, id, i) => a + (contractOf(L, id).holder === lender.id ? raw[i]!.interest + raw[i]!.principal : 0), 0);
+    const out = ids.reduce((a, id, i) => a + (contractOf(L, id).holder !== d0.issuer ? raw[i]!.interest + raw[i]!.principal : 0), 0);
+    quietOthers(s, c);
     creditInterestsEvent(s);
     expect(contractOf(L, loan).amount).toBe(19_000_000);
     expect(toLender).toBeGreaterThanOrEqual(1_200_000);
-    expect(res(lender.id)).toBe(rl + toLender);
-    expect(res(d0.issuer)).toBe(rd - out);
+    expect(Math.abs(reserves(s, lender.id) - (rl + toLender))).toBeLessThan(1);
+    expect(Math.abs(reserves(s, d0.issuer) - (rd - out))).toBeLessThan(1);
   });
 
-  it('sin liquidez para el servicio: quiebra (FirmBankruptcyFireSales), por ahora error explícito', () => {
+  /**
+   * Quiebra de una empresa de consumo por el servicio de la deuda. La empresa queda con dos préstamos (30 del banco
+   * de su depósito y 10 de otro, edad 1, tasa 0,01, 20 trimestres: servicio 0,3 + 1,5 + 0,1 + 0,5 = 2,4), 1 en el
+   * primer depósito y 0,9 en un segundo depósito en el otro banco (liquidez 1,9 < 2,4), y una añada de valor 20.
+   */
+  const bankruptConsumptionFirm = (capitalValue: number) => {
     const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
     const L = s.ledger;
     const c = s.consumptionFirms[0]!;
+    quietOthers(s, c);
+    for (const id of [...contractIds(L, c.id, 'liabilities', 'loan')]) {
+      contractOf(L, id).amount = 0; // fuera del caso (sin flujos: el caso arranca de este estado)
+      closeContract(L, id);
+    }
     const d0 = firstAsset(L, c.id, 'deposit')!;
-    const sink = firstAsset(L, s.consumptionFirms[1]!.id, 'deposit')!;
-    pay(L, d0.id, sink.id, d0.amount, 'deposits');
-    expect(() => creditInterestsEvent(s)).toThrow(/quiebra por el servicio de la deuda/);
+    const other = s.banks.find((b) => b.id !== d0.issuer)!;
+    const terms = { rate: 0.01, length: 20, amortization: 'fixedCapital' as const, age: 1 };
+    const loanA = open(L, 'loan', d0.issuer, c.id, 30_000_000, { ...terms, initialAmount: 30_000_000 }, 'loans');
+    const loanB = open(L, 'loan', other.id, c.id, 10_000_000, { ...terms, initialAmount: 10_000_000 }, 'loans');
+    const d1 = open(L, 'deposit', c.id, other.id, 0, { rate: 0 }, 'deposits');
+    pay(L, d0.id, d1, 900_000, 'deposits');
+    pay(L, d0.id, firstAsset(L, s.consumptionFirms[1]!.id, 'deposit')!.id, d0.amount - 1_000_000, 'deposits');
+    c.capitalGoods = [{ ...c.capitalGoods[0]!, quantity: 20, value: capitalValue }];
+    return { s, L, c, d0, d1, loanA, loanB, bankA: bankById(s, d0.issuer), bankB: bankById(s, other.id) };
+  };
+  const bankById = (s: CaianiState, id: number) => s.banks.find((b) => b.id === id)!;
+
+  it('quiebra de una empresa de consumo: reparto de la liquidez por restos mayores, aporte de los dueños, quitas', () => {
+    const { s, L, c, d0, d1, loanA, loanB, bankA, bankB } = bankruptConsumptionFirm(20);
+    const hDeps = s.households.map((h) => firstAsset(L, h.id, 'deposit')!);
+    const w = hDeps[0]!.amount / 1e6; // todos los hogares arrancan con el mismo depósito y sin bienes
+    expect(new Set(hDeps.map((d) => d.amount)).size).toBe(1);
+    const hBefore = hDeps.reduce((a, d) => a + d.amount, 0);
+    const [nplA, nplB] = [bankA.currentNonPerformingLoans, bankB.currentNonPerformingLoans];
+    const cp = beginPeriod(L);
+    creditInterestsEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(c.defaulted).toBe(true);
+    // Liquidez 1,9 en proporción a 30 y 10: 1,425 y 0,475 (restos 0). El depósito queda en 0; el segundo, en 0, sigue
+    // en la lista de la empresa y sale de la del banco.
+    expect(d0.amount).toBe(0);
+    expect(contractIds(L, c.id, 'assets', 'deposit')).toEqual([d0.id, d1]);
+    expect(contractOf(L, d1)).toMatchObject({ amount: 0, delisted: true });
+    expect(contractIds(L, bankB.id, 'liabilities', 'deposit')).not.toContain(d1);
+    // Pérdida de los bancos 28,575 + 9,525 = 38,1; D = min(0,5 × 20, 38,1) = 10.
+    expect(c.bailoutCost).toBe(10_000_000);
+    // Los préstamos quedan en 0; lo que no cubrieron la liquidez ni los hogares va a la morosidad del prestamista.
+    expect(contractOf(L, loanA).amount).toBe(0);
+    expect(contractOf(L, loanB).amount).toBe(0);
+    const lossA = bankA.currentNonPerformingLoans - nplA;
+    const lossB = bankB.currentNonPerformingLoans - nplB;
+    const households = hBefore - hDeps.reduce((a, d) => a + d.amount, 0);
+    expect(1_425_000 + 475_000 + households + lossA + lossB).toBe(40_000_000);
+    // Primer hogar (todos con patrimonio w, W = 8.000·w): paga 10·w/W·28,575/38,1 = 0,0009375 al préstamo A y,
+    // con su patrimonio y las pérdidas ya actualizados, 10·(w − 0,0009375)/W·9,525/(38,1 − 0,0009375) al B.
+    const first = s.populations.households[0]!;
+    const payA = 0.00125 * (28.575 / 38.1);
+    const payB = (((10 * (w - payA)) / (8000 * w)) * 9.525) / (38.1 - payA);
+    expect(Math.abs(w * 1e6 - firstAsset(L, first, 'deposit')!.amount - (payA + payB) * 1e6)).toBeLessThan(1);
+    // El total de los hogares queda apenas por debajo de D (cada hogar paga el segundo préstamo con su patrimonio ya
+    // reducido), y la morosidad se reparte casi como las pérdidas (28,575 : 9,525 = 0,75; por lo mismo, el préstamo B
+    // recibe un poco menos: ~4·10⁻⁶).
+    expect(households).toBeLessThanOrEqual(10_000_000);
+    expect(households).toBeGreaterThan(10_000_000 * (1 - 1e-4));
+    expect(Math.abs(lossA / (lossA + lossB) - 0.75)).toBeLessThan(1e-5);
+  });
+
+  it('quiebra con el depósito de un hogar que no alcanza para su aporte: error explícito (JMAB no lo chequea)', () => {
+    const { s } = bankruptConsumptionFirm(200); // D = min(100, 38,1) = 38,1
+    const h = s.households[0]!;
+    h.consumptionGoods = [{ quantity: 1, value: 1e9, price: 1e9, unitCost: 0, age: 0, producer: s.consumptionFirms[2]!.id, duration: 1 }];
+    expect(() => creditInterestsEvent(s)).toThrow(/depósito del hogar .* quedaría negativo/);
+  });
+
+  it('quiebra de una empresa de capital con liquidez mayor que la deuda: paga todo y el excedente se borra (writeOff)', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const L = s.ledger;
+    const k = s.capitalFirms[0]!;
+    quietOthers(s, k);
+    for (const id of [...contractIds(L, k.id, 'liabilities', 'loan')]) {
+      contractOf(L, id).amount = 0;
+      closeContract(L, id);
+    }
+    const dep = firstAsset(L, k.id, 'deposit')!;
+    // Última cuota de un préstamo de 20 (saldo 1) con tasa 0,5: servicio 1 + 0,5 = 1,5 > liquidez 1,2 ≥ deuda 1.
+    const loan = open(L, 'loan', dep.issuer, k.id, 1_000_000, { rate: 0.5, length: 20, amortization: 'fixedCapital', age: 20, initialAmount: 20_000_000 }, 'loans');
+    pay(L, dep.id, firstAsset(L, s.capitalFirms[1]!.id, 'deposit')!.id, dep.amount - 1_200_000, 'deposits');
+    const bank = s.banks.find((b) => b.id === dep.issuer)!;
+    const npl = bank.currentNonPerformingLoans;
+    const cp = beginPeriod(L);
+    creditInterestsEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(k.defaulted).toBe(true);
+    expect(contractOf(L, loan).amount).toBe(0);
+    expect(dep.amount).toBe(0);
+    expect(bank.currentNonPerformingLoans).toBe(npl);
+    expect(k.bailoutCost).toBe(0); // sin aporte de los dueños (solo las empresas de consumo)
+    const writeOffs = L.flowLog.filter((r) => r.category === 'writeOff');
+    expect(writeOffs.map((r) => [r.payer, r.payee, r.amount])).toEqual([[k.id, bank.id, 200_000]]);
+  });
+});
+
+describe('evento 21 (salarios y seguro de desempleo): casos a mano', () => {
+  /** Estado inicial con el tick 1 y el saldo del primer depósito de la empresa de consumo 0 fijado en µ. */
+  const setup = (deposit: number | null) => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    const c = s.consumptionFirms[0]!;
+    const dep = firstAsset(L, c.id, 'deposit')!;
+    if (deposit !== null) pay(L, dep.id, firstAsset(L, s.consumptionFirms[1]!.id, 'deposit')!.id, dep.amount - deposit, 'deposits');
+    const hDep = (id: number) => firstAsset(L, id, 'deposit')!;
+    return { s, L, c, dep, hDep };
+  };
+
+  it('la empresa le paga a cada empleado su salario (4 × 50 = 200 < depósito 250); el depósito baja en la masa salarial', () => {
+    // Con los salarios iniciales (5 × 50 = 250, justo el depósito) el último no cobraría (caso de abajo): salarios de 4.
+    const { s, L, c, dep, hDep } = setup(null);
+    expect(c.employees.length).toBe(50);
+    for (const id of c.employees) s.households.find((h) => h.id === id)!.wage = 4;
+    const before = new Map(c.employees.map((id) => [id, hDep(id).amount]));
+    const d0 = dep.amount;
+    const cp = beginPeriod(L);
+    wagePaymentEvent(s, new PrngCaianiRng(Rng.fromSeed(2)));
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(dep.amount).toBe(d0 - 200_000_000);
+    for (const id of c.employees) expect(hDep(id).amount).toBe(before.get(id)! + 4_000_000);
+  });
+
+  it('con el depósito justo igual a la masa salarial, el último de la mezcla no cobra (salario < depósito es estricto)', () => {
+    const { s, c, dep, hDep } = setup(250_000_000);
+    const before = new Map(c.employees.map((id) => [id, hDep(id).amount]));
+    wagePaymentEvent(s, new PrngCaianiRng(Rng.fromSeed(2)));
+    // La mezcla reordena la lista en el lugar: el último de la lista es el que no cobró, y no se lo despide.
+    const last = c.employees[c.employees.length - 1]!;
+    expect(dep.amount).toBe(5_000_000);
+    expect(hDep(last).amount).toBe(before.get(last)!);
+    expect(c.employees.slice(0, -1).every((id) => hDep(id).amount === before.get(id)! + 5_000_000)).toBe(true);
+    expect(c.employees.length).toBe(50);
+    expect(c.defaulted).toBe(false);
+  });
+
+  it('masa salarial mayor que el depósito: reparte el depósito por restos mayores (10 µ entre 50: 1 µ a los 10 de id más chico) y quiebra', () => {
+    const { s, L, c, dep } = setup(10);
+    const cp = beginPeriod(L);
+    wagePaymentEvent(s, new PrngCaianiRng(Rng.fromSeed(2)));
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(c.defaulted).toBe(true);
+    expect(dep.amount).toBe(0);
+    const wages = L.flowLog.filter((r) => r.category === 'wages' && r.payer === c.id);
+    const paidTo = wages.map((r) => [r.payee, r.amount]);
+    const smallest = [...c.employees].sort((a, b) => a - b).slice(0, 10);
+    expect(paidTo.map((x) => x[1])).toEqual(new Array(10).fill(1));
+    expect(paidTo.map((x) => x[0]).sort((a, b) => a! - b!)).toEqual(smallest);
+    // La quiebra (liquidez 0) condona todos los préstamos.
+    for (const id of contractIds(L, c.id, 'liabilities', 'loan')) expect(contractOf(L, id).amount).toBe(0);
+  });
+
+  it('gobierno: salarios sin mirar el saldo (la cuenta puede quedar negativa) y seguro de desempleo = 0,4 × salario medio', () => {
+    const { s, L, hDep } = setup(null);
+    const g = s.government;
+    const unemployed = s.households.filter((h) => h.employer === null);
+    const [h1, h2] = [unemployed[0]!, unemployed[1]!];
+    for (const h of [h1, h2]) h.employer = g.id;
+    h2.wage = 7;
+    g.employees = [h1.id, h2.id];
+    const account = contractIds(L, g.id, 'assets', 'reserves')[0]!;
+    const a0 = contractOf(L, account).amount;
+    const employed = s.households.filter((h) => h.employer !== null);
+    const average = employed.reduce((a, h) => a + h.wage, 0) / employed.length;
+    const nUnemployed = s.households.length - employed.length;
+    const b1 = hDep(h1.id).amount;
+    const cp = beginPeriod(L);
+    wagePaymentEvent(s, new PrngCaianiRng(Rng.fromSeed(2)));
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(g.wageBill).toBe(12_000_000);
+    expect(hDep(h1.id).amount).toBe(b1 + 5_000_000);
+    expect(Math.abs(g.doleExpenditure - 0.4 * average * nUnemployed * 1e6)).toBeLessThan(1);
+    // La cuenta del gobierno baja en salarios + seguro (a < 1 µ del total en double).
+    expect(Math.abs(a0 - contractOf(L, account).amount - (12_000_000 + 0.4 * average * nUnemployed * 1e6))).toBeLessThan(1);
+    const dole = L.flowLog.filter((r) => r.category === 'unemploymentBenefits');
+    expect(dole.length).toBe(nUnemployed);
   });
 });
 
@@ -1269,7 +1463,16 @@ const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', impor
 const RUNS = [
   { run: 'p3-t1', tick: 1 },
   { run: 'p3-t50', tick: 50 },
+  // Una quiebra por deuda en el evento 20 (empresa 8168) y cuatro por salarios en el 21.
+  { run: 'p3-t81', tick: 81 },
 ];
+
+/**
+ * Ramas que el V3 alcanza y que esperan una decisión de Nico: el evento tira un error explícito y el test verifica
+ * que sea ese (y no otro). Se sacan de acá cuando la rama se porta. Hoy, ninguna.
+ */
+const PENDING: { tick: number; event: number; error: RegExp; why: string }[] = [];
+const pendingOf = (tick: number, event: number) => PENDING.find((p) => p.tick === tick && p.event === event);
 
 /** Eventos portados, en orden; `rng` = el evento sortea (si no, se verifica que el registro no tenga sorteos). */
 const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
@@ -1305,7 +1508,20 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
       console.log(`evento 19, cierre del lote: ${JSON.stringify(r)}`);
     },
   },
-  { e: 20, run: (s) => creditInterestsEvent(s) },
+  {
+    e: 20,
+    run: (s) => {
+      const r = creditInterestsEvent(s);
+      console.log(`evento 20, cierre del lote: ${JSON.stringify(r)}`);
+    },
+  },
+  {
+    e: 21,
+    run: (s, rng) => {
+      const r = wagePaymentEvent(s, rng);
+      console.log(`evento 21, cierre del lote: ${JSON.stringify(r)}`);
+    },
+  },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
@@ -1320,13 +1536,7 @@ const LAST = EVENTS[EVENTS.length - 1]!.e;
  *   hogar en su segunda compra). El error absoluto es el de las demandas del encadenado (~10⁻⁶), pero relativo
  *   a un residuo chico pasa el 10⁻⁶. En el evento suelto son bit a bit. Ver reglas-caiani.md, sec. 17.
  */
-const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [
-  // Evento 20 suelto (2026-11-13): las reservas suman cientos de cuotas redondeadas por separado (arrastre por
-  // empresa, `installments`), sin control por banco: hasta 6 µ en el tick 50. Espera decisión de Nico
-  // (reglas-caiani.md, sec. 19). No se agrandó ninguna tolerancia.
-  { field: '# assets reserves[#] saldo', chainedOnly: false, events: [20] },
-  { field: '# liabilities reserves[#] saldo', chainedOnly: false, events: [20] },
-];
+const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;
@@ -1350,9 +1560,9 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
    * `REPORTED_FIELDS` (en su modalidad) que la superan se informan aparte y no hacen fallar el test
    * (reglas-caiani.md, sec. 1, "Tolerancias": campos reportados). Sin `amountTol`, es el evento suelto.
    */
-  const check = (s: CaianiState, name: string, label: string, event: number, amountTol?: number, scale?: ScaleSource) => {
+  const check = (s: CaianiState, name: string, label: string, event: number, amountTol?: number, scale?: ScaleSource, carry?: InputCarry) => {
     const chained = amountTol !== undefined;
-    const r = compareState(s, dumpOf(name), { amountTol, scale });
+    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     report(label, r);
     const scaledRows = Object.entries(r.scaled)
@@ -1401,9 +1611,19 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
   it.skipIf(!available).each(EVENTS.map((x) => [x.e, x.run] as const))('evento %i desde el volcado anterior', (e, ev) => {
     const s = stateFromDump(dumpOf(e === 0 ? before : after(e - 1)));
     const rng = drawsOf(e);
+    const pending = pendingOf(tick, e);
+    if (pending) {
+      expect(() => ev(s, rng)).toThrow(pending.error);
+      console.log(`V3 tick ${tick}, evento ${e}: pendiente de decisión (${pending.why})`);
+      return;
+    }
+    const carry = new InputCarry(s);
     withDecisions(single, e, () => ev(s, rng));
     expect(rng.remaining).toBe(0);
-    check(s, after(e), `evento ${e}`, e);
+    carry.fromLog(s.ledger.flowLog);
+    const cs = carry.summary();
+    if (cs.contracts > 0) console.log(`V3 tick ${tick}, evento ${e}: error de entrada descontado en ${cs.contracts} contratos, máx ${cs.max.toFixed(3)} µ`);
+    check(s, after(e), `evento ${e}`, e, undefined, undefined, carry);
   }, 120_000);
 
   /** Estado del encadenado: arranca del volcado del principio del tick y lo avanza cada test de abajo. */
@@ -1423,6 +1643,12 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const sc = scales;
     if (!s || !sc) throw new Error('falta el estado del encadenado (falló un evento anterior)');
     const rng = drawsOf(e);
+    const pending = pendingOf(tick, e);
+    if (pending) {
+      expect(() => ev(s, rng)).toThrow(pending.error);
+      chainedState = undefined; // la cadena se corta acá
+      return;
+    }
     const snap = sc.snapshot();
     withDecisions(chained, e, () => ev(s, rng));
     expect(rng.remaining).toBe(0);

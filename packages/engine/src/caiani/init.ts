@@ -455,7 +455,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   }
 
   // Gobierno
-  const government = { ...newFlags(), id: gov, employees: [] as AgentId[], laborDemand: 0 };
+  const government = { ...newFlags(), id: gov, employees: [] as AgentId[], laborDemand: 0, wageBill: 0, doleExpenditure: 0 };
   for (let i = 0; i < P.gEmpl; i++) hire(government);
   open(ledger, 'reserves', gov, cb, 0, { rate: 0 }, 'deposits');
 

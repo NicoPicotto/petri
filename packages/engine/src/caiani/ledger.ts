@@ -89,6 +89,13 @@ export interface Contract {
   quantity?: number;
   price?: number;
   maturity?: number;
+  /**
+   * El emisor lo sacó de su lista de pasivos y el tenedor lo conserva (`delistFromIssuer`): el segundo depósito de
+   * una empresa que quiebra (`FirmBankruptcyFireSales`, reglas-caiani.md, sec. 19). Sigue siendo un pasivo del
+   * emisor para las invariantes (`netFinancialWorths`), pero las reglas que recorren las listas del emisor (sus
+   * depósitos, sus intereses) no lo ven, como en JMAB.
+   */
+  delisted?: boolean;
 }
 
 export interface ContractTerms {
@@ -130,6 +137,11 @@ export const FLOW_CATEGORIES = {
   centralBankProfits: 'current',
   /** Pérdida del tenedor y ganancia del emisor: quiebras, quitas, préstamos que vencen con saldo. */
   writeOff: 'current',
+  /**
+   * Aporte de los dueños en la quiebra de una empresa de consumo (`FirmBankruptcyFireSales`): transferencia
+   * corriente de los hogares a la empresa, que cancela deuda (decisión de Nico, 2026-11-13).
+   */
+  ownersBailout: 'current',
   loans: 'financial',
   advances: 'financial',
   bonds: 'financial',
@@ -146,6 +158,8 @@ export interface FlowRecord {
   amount: Micro;
   /** Contratos cuyo saldo cambió en esta operación. */
   contracts: ContractId[];
+  /** Variación de cada uno (mismo orden que `contracts`). */
+  deltas: Micro[];
 }
 
 export interface LedgerStats {
@@ -231,7 +245,11 @@ export function firstAsset(ledger: Ledger, agent: AgentId, kind: ContractKind): 
   return id === undefined ? undefined : contractOf(ledger, id);
 }
 
-/** Activos financieros − pasivos financieros (los bienes reales no están en el ledger). */
+/**
+ * Activos financieros − pasivos financieros (los bienes reales no están en el ledger), **por las listas** del
+ * agente: lo que ve JMAB (`getNumericBalanceSheet`). Un contrato fuera de la lista de su emisor (`delisted`) no
+ * cuenta como pasivo del emisor; para las invariantes, `netFinancialWorths`.
+ */
 export function netFinancialWorth(ledger: Ledger, agent: AgentId): Micro {
   const a = agentOf(ledger, agent);
   let nw = 0;
@@ -307,7 +325,7 @@ function commitLegs(
     const cell = movementIndex(c.kind, agentOf(ledger, c.holder).sector, agentOf(ledger, c.issuer).sector);
     ledger.movements[cell] = (ledger.movements[cell] as number) + d;
   }
-  ledger.flowLog.push({ category, payer, payee, amount, contracts: merged.map((l) => l[0]) });
+  ledger.flowLog.push({ category, payer, payee, amount, contracts: merged.map((l) => l[0]), deltas: merged.map((l) => l[1]) });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -460,15 +478,83 @@ export function paymentLegs(ledger: Ledger, from: ContractId, to: ContractId, am
   return [[from, -amount], [to, amount], ...settlementLegs(ledger, f.issuer, t.issuer, via, amount)];
 }
 
+/**
+ * Tipo de un pago de un lote (payments.ts):
+ * - `account`: de cuenta a cuenta (`pay`); `to` es la cuenta que cobra.
+ * - `interest`: interés de un préstamo, desde la cuenta `from` al prestamista (`payTo`); `to` es el préstamo
+ *   (no cambia su saldo).
+ * - `repay`: capital de un préstamo desde una cuenta del deudor: `payTo` al prestamista y baja el préstamo
+ *   (`serviceLoan`, categoría `loans`); `to` es el préstamo.
+ * - `bailout`: aporte de los dueños en la quiebra de una empresa de consumo (`FirmBankruptcyFireSales`): el
+ *   hogar paga desde su depósito y el préstamo de la empresa baja. Dos registros: una transferencia corriente
+ *   hogar → empresa (`ownersBailout`) y la cancelación del préstamo (`loans`). `to` es el préstamo.
+ * - `bailoutExcess`: la parte del aporte que supera el saldo del préstamo (sobrepago; en JMAB el préstamo queda
+ *   negativo hasta el `setValue(0)`; decisión de Nico, 2026-11-13): el hogar paga igual al prestamista. Dos
+ *   registros: la transferencia hogar → empresa (`ownersBailout`) y una quita empresa → prestamista (`writeOff`,
+ *   sin patas: la ganancia del banco). El préstamo no cambia. `to` es el préstamo.
+ */
+export type PaymentKind = 'account' | 'interest' | 'repay' | 'bailout' | 'bailoutExcess';
+
 export interface IntegerPayment {
   from: ContractId;
   to: ContractId;
   amount: Micro;
   category: FlowCategory;
+  /** Por defecto, `account`. */
+  kind?: PaymentKind;
+}
+
+/** Un registro de flujo de un pago de lote, con sus patas. */
+export interface PaymentRecord {
+  legs: [ContractId, number][];
+  category: FlowCategory;
+  payer: AgentId;
+  payee: AgentId;
 }
 
 /**
- * Aplica un lote de pagos de cuenta a cuenta (los de `pay`), en el orden dado, de forma **atómica**: valida
+ * Registros (patas incluidas) de un pago de un lote, con el monto dado (`double` para llevar los pendientes,
+ * entero al registrar). Ver `PaymentKind`.
+ */
+export function paymentRecords(
+  ledger: Ledger,
+  kind: PaymentKind,
+  from: ContractId,
+  to: ContractId,
+  amount: number,
+  category: FlowCategory,
+): PaymentRecord[] {
+  const f = contractOf(ledger, from);
+  if (kind === 'account') {
+    return [{ legs: paymentLegs(ledger, from, to, amount), category, payer: f.holder, payee: contractOf(ledger, to).holder }];
+  }
+  assertMoney(f, 'la cuenta que paga');
+  const loan = contractOf(ledger, to);
+  if (loan.kind !== 'loan' && loan.kind !== 'advance') throw new Error(`pago ${kind}: el contrato ${to} es ${loan.kind}, no un préstamo`);
+  const via = f.kind === 'cash' ? 'cash' : 'reserves';
+  const toLender: [ContractId, number][] = [[from, -amount], ...settlementLegs(ledger, f.issuer, loan.holder, via, amount)];
+  if (kind === 'interest') return [{ legs: toLender, category, payer: f.holder, payee: loan.holder }];
+  if (kind === 'repay') {
+    if (f.holder !== loan.issuer) throw new Error(`pago repay: la cuenta ${from} no es del deudor ${loan.issuer}`);
+    return [
+      { legs: toLender, category, payer: f.holder, payee: loan.holder },
+      { legs: [[to, -amount]], category, payer: loan.holder, payee: loan.issuer },
+    ];
+  }
+  if (kind === 'bailoutExcess') {
+    return [
+      { legs: toLender, category, payer: f.holder, payee: loan.issuer },
+      { legs: [], category: 'writeOff', payer: loan.issuer, payee: loan.holder },
+    ];
+  }
+  return [
+    { legs: toLender, category, payer: f.holder, payee: loan.issuer },
+    { legs: [[to, -amount]], category: 'loans', payer: loan.issuer, payee: loan.holder },
+  ];
+}
+
+/**
+ * Aplica un lote de pagos (los de `paymentRecords`), en el orden dado, de forma **atómica**: valida
  * primero los saldos finales de todas las cuentas que toca el lote y, si alguno quedaría con un signo
  * prohibido, tira un error sin modificar nada. Los saldos intermedios no se validan: el lote es el cierre de
  * un evento (redondeo controlado, payments.ts), y el orden de los montos redondeados no tiene por qué
@@ -476,23 +562,21 @@ export interface IntegerPayment {
  * Cada pago queda en el registro de flujos con su categoría, como con `pay`.
  */
 export function applyPayments(ledger: Ledger, payments: readonly IntegerPayment[]): void {
-  const perPayment: Leg[][] = [];
-  const all: Leg[] = [];
+  const perPayment: { legs: Leg[]; category: FlowCategory; payer: AgentId; payee: AgentId }[][] = [];
+  const net = new Map<ContractId, number>();
   for (const p of payments) {
     assertNonNegativeMicro(p.amount, 'monto del pago');
-    const legs = p.amount === 0 ? [] : mergeLegs(paymentLegs(ledger, p.from, p.to, p.amount));
-    perPayment.push(legs);
-    all.push(...legs);
+    const recs =
+      p.amount === 0
+        ? []
+        : paymentRecords(ledger, p.kind ?? 'account', p.from, p.to, p.amount, p.category).map((r) => ({ ...r, legs: mergeLegs(r.legs) }));
+    perPayment.push(recs);
+    // Fusión del lote entero por contrato (lineal: `mergeLegs` busca en la lista y el lote puede ser grande).
+    for (const r of recs) for (const [id, d] of r.legs) net.set(id, (net.get(id) ?? 0) + d);
   }
-  // Fusión del lote entero por contrato (lineal: `mergeLegs` busca en la lista y el lote puede ser grande).
-  const net = new Map<ContractId, number>();
-  for (const [id, d] of all) net.set(id, (net.get(id) ?? 0) + d);
   checkLegs(ledger, [...net.entries()], 'lote de pagos');
   payments.forEach((p, k) => {
-    if (p.amount === 0) return;
-    const f = contractOf(ledger, p.from);
-    const t = contractOf(ledger, p.to);
-    commitLegs(ledger, perPayment[k] as Leg[], p.category, f.holder, t.holder, p.amount);
+    for (const r of perPayment[k]!) commitLegs(ledger, r.legs, r.category, r.payer, r.payee, p.amount);
   });
 }
 
@@ -545,28 +629,55 @@ export interface Installment {
  *   explícitamente. Los préstamos iniciales arrancan con saldo A − redondeo(A·j/L) (docs/inicializacion.md).
  * - `onlyInterest`: todo el saldo cuando la edad llega a length.
  * El capital nunca supera el saldo. La cuota de un préstamo depende de los anteriores de la lista: los
- * eventos 9 (`debtBurden`) y 20 (pago) usan esta misma función sobre la misma lista.
+ * eventos 9 y 20 calculan `debtBurden` con esta misma función sobre la misma lista; el pago del evento 20 usa los
+ * montos sin redondear (`rawInstallments`) con redondeo controlado (decisión de Nico, 2026-11-13).
  */
 export function installments(ledger: Ledger, debtor: AgentId, kind: 'loan' | 'advance'): Installment[] {
   const interests = new CarryRounder();
   const principals = new CarryRounder();
+  const ids = contractIds(ledger, debtor, 'liabilities', kind);
+  return rawInstallments(ledger, debtor, kind).map((raw, k) => {
+    const loan = contractOf(ledger, ids[k] as ContractId);
+    if (loan.age <= 0) return { interest: 0, principal: 0 };
+    const interest = interests.add(raw.interest);
+    const principal = raw.exactPrincipal ? raw.principal : principals.add(raw.principal);
+    return { interest, principal: Math.max(0, Math.min(principal, loan.amount)) };
+  });
+}
+
+/** Cuota de un préstamo en µ como `double`, antes de redondear (la de JMAB, salvo las dos reglas de abajo). */
+export interface RawInstallment {
+  /** Tasa × saldo (µ, `double`). */
+  interest: number;
+  /** A/L − c, o el saldo entero en la última cuota y en `onlyInterest` (µ). */
+  principal: number;
+  /** El capital ya es un entero que no pasa por el redondeo (última cuota, `onlyInterest`). */
+  exactPrincipal: boolean;
+}
+
+/**
+ * Cuotas sin redondear de los préstamos (o adelantos) del deudor, en el orden de su lista: las mismas reglas
+ * que `installments` (corrección del desvío c, última cuota que paga el saldo), con los montos en `double`.
+ * `installments` las redondea con arrastre; el evento 20 las paga así, con redondeo controlado (`PaymentBatch`;
+ * decisión de Nico, 2026-11-13). El capital en `double` no se recorta al saldo: el que paga lo hace después.
+ */
+export function rawInstallments(ledger: Ledger, debtor: AgentId, kind: 'loan' | 'advance'): RawInstallment[] {
   return contractIds(ledger, debtor, 'liabilities', kind).map((id) => {
     const loan = contractOf(ledger, id);
-    if (loan.age <= 0) return { interest: 0, principal: 0 };
+    if (loan.age <= 0) return { interest: 0, principal: 0, exactPrincipal: true };
     const L = loan.length as number;
     const A = loan.initialAmount as number;
-    const interest = interests.add(loan.rate * loan.amount);
-    let principal = 0;
+    const interest = loan.rate * loan.amount;
     if (loan.amortization === 'onlyInterest') {
-      if (loan.age === L) principal = loan.amount;
-    } else if (loan.age === L && Math.abs(loan.amount - A / L) < 2) {
-      principal = loan.amount;
-    } else if (loan.age <= L) {
+      return { interest, principal: loan.age === L ? loan.amount : 0, exactPrincipal: true };
+    }
+    if (loan.age === L && Math.abs(loan.amount - A / L) < 2) return { interest, principal: loan.amount, exactPrincipal: true };
+    if (loan.age <= L) {
       const drift = A - loan.amount - (A * (loan.age - 1)) / L;
       const correction = Math.abs(drift) >= 1 && Math.abs(drift) < 2 ? Math.trunc(drift) : 0;
-      principal = principals.add(A / L - correction);
+      return { interest, principal: A / L - correction, exactPrincipal: false };
     }
-    return { interest, principal: Math.max(0, Math.min(principal, loan.amount)) };
+    return { interest, principal: 0, exactPrincipal: true };
   });
 }
 
@@ -641,6 +752,49 @@ export function cleanup(ledger: Ledger, agent: AgentId): void {
   }
 }
 
+/**
+ * Patrimonio financiero **económico** de todos los agentes (índice = id): el de las listas
+ * (`netFinancialWorth`) más los contratos fuera de la lista de su emisor (`delisted`), que siguen siendo su pasivo.
+ * Es el que usan las invariantes de flujos (flows.ts): con él, el ledger sigue siendo SFC aunque JMAB no lo sea.
+ */
+export function netFinancialWorths(ledger: Ledger): Micro[] {
+  const nw = ledger.agents.map((a) => netFinancialWorth(ledger, a.id));
+  for (const key in ledger.contracts) {
+    const c = ledger.contracts[key] as Contract;
+    if (c.delisted) nw[c.issuer] = (nw[c.issuer] as number) - c.amount;
+  }
+  return nw;
+}
+
+/**
+ * El emisor saca el contrato de su lista de pasivos y el tenedor lo conserva (`removeItemStockMatrix` solo del lado
+ * del banco, `FirmBankruptcyFireSales` 79). No mueve saldos ni registra flujos. Ver `Contract.delisted`.
+ */
+export function delistFromIssuer(ledger: Ledger, id: ContractId): void {
+  const c = contractOf(ledger, id);
+  if (c.delisted) return; // en JMAB, sacar de una lista algo que no está no hace nada
+  const liabilities = agentOf(ledger, c.issuer).liabilities[KIND_INDEX[c.kind]] as ContractId[];
+  liabilities.splice(liabilities.indexOf(id), 1);
+  c.delisted = true;
+}
+
+/**
+ * Cierra un contrato con saldo 0: lo saca de las listas del tenedor y del emisor (el resto conserva el orden).
+ * No registra flujos.
+ */
+export function closeContract(ledger: Ledger, id: ContractId): void {
+  const c = contractOf(ledger, id);
+  if (c.amount !== 0) throw new Error(`closeContract: el ${c.kind} ${id} tiene saldo ${c.amount} µ`);
+  const k = KIND_INDEX[c.kind];
+  const assets = agentOf(ledger, c.holder).assets[k] as ContractId[];
+  assets.splice(assets.indexOf(id), 1);
+  if (!c.delisted) {
+    const liabilities = agentOf(ledger, c.issuer).liabilities[k] as ContractId[];
+    liabilities.splice(liabilities.indexOf(id), 1);
+  }
+  delete ledger.contracts[id];
+}
+
 // ---------------------------------------------------------------------------------------------
 // Invariante estructural
 // ---------------------------------------------------------------------------------------------
@@ -669,7 +823,11 @@ export function checkLedger(ledger: Ledger): string[] {
     const c = ledger.contracts[key] as Contract;
     if (c.id !== Number(key)) errors.push(`contrato ${key} con id ${c.id}`);
     if (c.id >= ledger.nextContractId) errors.push(`contrato ${c.id} ≥ nextContractId`);
-    if (seen.get(c.id) !== 2) errors.push(`contrato ${c.id} aparece ${seen.get(c.id) ?? 0} veces en las listas (deberían ser 2)`);
+    const times = c.delisted ? 1 : 2;
+    if (seen.get(c.id) !== times) errors.push(`contrato ${c.id} aparece ${seen.get(c.id) ?? 0} veces en las listas (deberían ser ${times})`);
+    if (c.delisted && !(agentOf(ledger, c.holder).assets[KIND_INDEX[c.kind]] as ContractId[]).includes(c.id)) {
+      errors.push(`contrato ${c.id}: fuera de la lista del emisor y tampoco en la del tenedor`);
+    }
     if (!Number.isSafeInteger(c.amount)) errors.push(`contrato ${c.id}: saldo no entero ${c.amount}`);
     if (c.amount < 0 && c.kind !== 'reserves') errors.push(`contrato ${c.id} (${c.kind}): saldo negativo ${c.amount}`);
     const h = ledger.agents[c.holder];

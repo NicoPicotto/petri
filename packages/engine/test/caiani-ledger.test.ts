@@ -13,6 +13,9 @@ import {
   createLedger,
   credit,
   debit,
+  delistFromIssuer,
+  closeContract,
+  netFinancialWorths,
   installments,
   installmentOf,
   netFinancialWorth,
@@ -337,6 +340,31 @@ describe('intereses de depósitos, quitas y limpieza', () => {
     expect(contractIds(w.L, w.b1, 'assets', 'loan')).toEqual([l1, l3]);
     expect(contractIds(w.L, w.f, 'liabilities', 'loan')).toEqual([l1, l3]);
     expect([contractOf(w.L, l1).age, contractOf(w.L, l3).age]).toEqual([1, 1]);
+    expectConsistent(w.L, w.cp);
+  });
+});
+
+describe('depósito fuera de la lista del banco (FirmBankruptcyFireSales; reglas-caiani.md, sec. 19)', () => {
+  it('el banco lo saca de su lista y la empresa lo conserva: los pagos lo mueven; las listas no lo ven; el ledger sigue SFC', () => {
+    const w = world();
+    const fDep2 = open(w.L, 'deposit', w.f, w.b2, 0, {}, 'deposits');
+    pay(w.L, w.hDep, fDep2, 100, 'consumption');
+    delistFromIssuer(w.L, fDep2);
+    delistFromIssuer(w.L, fDep2); // otra vez: no hace nada (como `remove` de algo que no está)
+    expect(contractIds(w.L, w.b2, 'liabilities', 'deposit')).toEqual([]);
+    expect(contractIds(w.L, w.f, 'assets', 'deposit')).toEqual([w.fDep1, fDep2]);
+    // Un pago al depósito fuera de la lista: liquida con las reservas de su banco, como cualquier otro.
+    pay(w.L, w.hDep, fDep2, 50, 'consumption');
+    expect(amt(w.L, fDep2)).toBe(150);
+    expect(amt(w.L, w.res2)).toBe(1150);
+    expect(amt(w.L, w.res1)).toBe(850);
+    // Por las listas (lo que ve JMAB), el banco 2 no tiene ese pasivo; el patrimonio económico sí lo cuenta.
+    expect(netFinancialWorth(w.L, w.b2)).toBe(1150);
+    expect(netFinancialWorths(w.L)[w.b2]).toBe(1000);
+    expectConsistent(w.L, w.cp);
+    pay(w.L, fDep2, w.fDep1, 150, 'deposits');
+    closeContract(w.L, fDep2);
+    expect(contractIds(w.L, w.f, 'assets', 'deposit')).toEqual([w.fDep1]);
     expectConsistent(w.L, w.cp);
   });
 });

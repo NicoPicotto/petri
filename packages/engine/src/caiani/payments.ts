@@ -25,7 +25,7 @@
  * pagos), sin azar ni `Map` iterados por claves no enteras. Solo las cuatro operaciones, `floor` y `ceil`.
  */
 
-import { applyPayments, contractOf, paymentLegs, type ContractId, type FlowCategory, type IntegerPayment, type Ledger } from './ledger';
+import { applyPayments, contractOf, paymentRecords, type ContractId, type FlowCategory, type IntegerPayment, type Ledger, type PaymentKind } from './ledger';
 import type { Micro } from './money';
 
 export interface PendingPayment {
@@ -34,6 +34,8 @@ export interface PendingPayment {
   /** Monto en µ, como `double` (sin redondear). */
   amount: number;
   category: FlowCategory;
+  /** `account` (de cuenta a cuenta), o un pago a un préstamo (`to` es el préstamo): ver `PaymentKind`. */
+  kind: PaymentKind;
 }
 
 export interface SettleReport {
@@ -60,11 +62,38 @@ export class PaymentBatch {
    * liquidación entre bancos que corresponda). `amount` en µ, `double` finito ≥ 0; un 0 no se anota.
    */
   pay(from: ContractId, to: ContractId, amount: number, category: FlowCategory): void {
+    this.add('account', from, to, amount, category);
+  }
+
+  /**
+   * Anota un pago a un préstamo desde la cuenta `from` (`ledger.paymentRecords`): `interest` (al prestamista,
+   * el préstamo no cambia), `repay` (capital: el préstamo baja; categoría `loans`) o `bailout` (aporte de los
+   * dueños: el hogar paga y el préstamo de la empresa baja; categoría `ownersBailout`).
+   */
+  payLoan(kind: Exclude<PaymentKind, 'account'>, from: ContractId, loan: ContractId, amount: number): number {
+    const category: FlowCategory = kind === 'interest' ? 'loanInterest' : kind === 'repay' ? 'loans' : 'ownersBailout';
+    return this.add(kind, from, loan, amount, category);
+  }
+
+  /** Monto entero con que se registró el pago `index` (el que devuelve `payLoan`), después de `settle`. */
+  settledAmount(index: number): Micro {
+    if (!this.settled || !this.rounded) throw new Error('PaymentBatch: el lote no se cerró');
+    if (index < 0) return 0;
+    return this.rounded[index] as Micro;
+  }
+
+  private rounded: number[] | undefined;
+
+  /** Anota el pago y devuelve su índice en `pending` (−1 si el monto es 0 y no se anota). */
+  private add(kind: PaymentKind, from: ContractId, to: ContractId, amount: number, category: FlowCategory): number {
     if (this.settled) throw new Error('PaymentBatch: el lote ya se cerró');
     if (!Number.isFinite(amount) || amount < 0) throw new Error(`PaymentBatch.pay: monto inválido ${amount}`);
-    if (amount === 0) return;
-    for (const [id, d] of paymentLegs(this.ledger, from, to, amount)) this.net.set(id, (this.net.get(id) ?? 0) + d);
-    this.pending.push({ from, to, amount, category });
+    if (amount === 0) return -1;
+    for (const r of paymentRecords(this.ledger, kind, from, to, amount, category)) {
+      for (const [id, d] of r.legs) this.net.set(id, (this.net.get(id) ?? 0) + d);
+    }
+    this.pending.push({ from, to, amount, category, kind });
+    return this.pending.length - 1;
   }
 
   /** Saldo del contrato en µ (`double`): el del ledger más los pagos pendientes del lote. */
@@ -77,23 +106,44 @@ export class PaymentBatch {
     if (this.settled) throw new Error('PaymentBatch: el lote ya se cerró');
     this.settled = true;
     const n = this.pending.length;
-    if (n === 0) return { payments: 0, relaxed: false, maxPaymentDiff: 0, maxGroupDiff: 0 };
+    if (n === 0) {
+      this.rounded = [];
+      return { payments: 0, relaxed: false, maxPaymentDiff: 0, maxGroupDiff: 0 };
+    }
     const L = this.ledger;
     const x = this.pending.map((p) => p.amount);
     const fromAcc = this.pending.map((p) => p.from);
-    const toAcc = this.pending.map((p) => p.to);
+    // Grupo de la "cuenta que cobra": la cuenta, o el préstamo para el capital (`repay`, `bailout`: la suma de lo
+    // que baja cada préstamo queda a < 1 µ); el interés y el sobrepago de un préstamo son un grupo aparte (clave
+    // −(id + 1); nunca van juntos: el sobrepago es de una empresa que quebró y no paga intereses), así el techo
+    // del préstamo (abajo) no los incluye.
+    const toAcc = this.pending.map((p) => (p.kind === 'interest' || p.kind === 'bailoutExcess' ? -(p.to + 1) : p.to));
     const fromBank = this.pending.map((p) => contractOf(L, p.from).issuer);
-    const toBank = this.pending.map((p) => contractOf(L, p.to).issuer);
+    // Banco que cobra: el emisor de la cuenta que cobra, o el prestamista (el que recibe las reservas).
+    const toBank = this.pending.map((p) => (p.kind === 'account' ? contractOf(L, p.to).issuer : contractOf(L, p.to).holder));
     // Techo de las cuentas que solo pagan (y no son reservas, que pueden quedar negativas): su saldo actual.
-    const receives = new Set<ContractId>(toAcc);
+    const receives = new Set<number>(toAcc);
     const payerCap = (acc: number): number | undefined => {
       if (receives.has(acc)) return undefined;
       const c = contractOf(L, acc);
       return c.kind === 'reserves' ? undefined : c.amount;
     };
-    const r = controlledRound(x, { fromBank, fromAcc, toAcc, toBank }, payerCap);
-    const payments: IntegerPayment[] = this.pending.map((p, i) => ({ from: p.from, to: p.to, amount: r.m[i] as Micro, category: p.category }));
+    // Techo de los préstamos que bajan: su saldo (un préstamo no puede quedar negativo).
+    const loanGroups = new Set<number>();
+    this.pending.forEach((p) => {
+      if (p.kind === 'repay' || p.kind === 'bailout') loanGroups.add(p.to);
+    });
+    const receiverCap = (acc: number): number | undefined => (loanGroups.has(acc) ? contractOf(L, acc).amount : undefined);
+    const r = controlledRound(x, { fromBank, fromAcc, toAcc, toBank }, payerCap, receiverCap);
+    const payments: IntegerPayment[] = this.pending.map((p, i) => ({
+      from: p.from,
+      to: p.to,
+      amount: r.m[i] as Micro,
+      category: p.category,
+      kind: p.kind,
+    }));
     applyPayments(L, payments);
+    this.rounded = r.m;
     return { payments: n, relaxed: r.relaxed, maxPaymentDiff: r.maxPaymentDiff, maxGroupDiff: r.maxGroupDiff };
   }
 }
@@ -129,7 +179,8 @@ export const RELAXED_EPSILON = 1e-3;
  * Redondeo controlado de los montos `x` (en µ, `double` ≥ 0): enteros mᵢ ∈ {⌊xᵢ⌋, ⌈xᵢ⌉} tales que la suma
  * de cada grupo de cada familia (cuenta que paga ⊂ banco de la que paga; cuenta que cobra ⊂ banco de la que
  * cobra) quede en {⌊s⌋, ⌈s⌉}, con s la suma en `double` de sus xᵢ (en el orden de los pagos). `cap(cuenta)`
- * agrega un techo entero a la suma de una cuenta que paga (su saldo).
+ * agrega un techo entero a la suma de una cuenta que paga (su saldo), y `receiverCap(cuenta)`, a la de una
+ * cuenta que cobra (el saldo de un préstamo que baja).
  *
  * Tira un error si los grupos no son laminares (una cuenta con dos bancos) o si no hay solución ni con las
  * cotas relajadas (no debería pasar salvo por un techo que la suma en `double` ya supera: un sobregiro real).
@@ -138,6 +189,7 @@ export function controlledRound(
   x: readonly number[],
   g: PaymentGroups,
   cap: (account: number) => number | undefined = () => undefined,
+  receiverCap: (account: number) => number | undefined = () => undefined,
 ): ControlledRounding {
   const n = x.length;
   for (const v of x) if (!Number.isFinite(v) || v < 0) throw new Error(`controlledRound: monto inválido ${v}`);
@@ -197,7 +249,10 @@ export function controlledRound(
       net.edge(oPB + (bankOfPA[k] as number), oPA + k, lo(s), c === undefined ? hi(s) : Math.min(hi(s), c));
     });
     const payEdges = x.map((v, i) => net.edge(oPA + (PA.of[i] as number), oQA + (QA.of[i] as number), Math.floor(v), Math.ceil(v)));
-    sQA.forEach((s, k) => net.edge(oQA + k, oQB + (bankOfQA[k] as number), lo(s), hi(s)));
+    sQA.forEach((s, k) => {
+      const c = receiverCap(QA.key[k] as number);
+      net.edge(oQA + k, oQB + (bankOfQA[k] as number), lo(s), c === undefined ? hi(s) : Math.min(hi(s), c));
+    });
     sQB.forEach((s, k) => net.edge(oQB + k, 1, lo(s), hi(s)));
     net.edge(1, 0, 0, INF);
     if (!net.feasible()) return null;

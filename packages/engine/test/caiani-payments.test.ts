@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../src/rng';
-import { addAgent, applyPayments, assertLedger, contractOf, createLedger, open, type Ledger } from '../src/caiani/ledger';
+import { addAgent, applyPayments, assertLedger, contractOf, createLedger, open, pay, type Ledger } from '../src/caiani/ledger';
 import { assertFlows, beginPeriod } from '../src/caiani/flows';
 import { PaymentBatch, controlledRound, type PaymentGroups } from '../src/caiani/payments';
 
@@ -181,6 +181,41 @@ describe('PaymentBatch: pagos pendientes en double y cierre del evento', () => {
     assertFlows(w.L, w.cp);
     expect(() => batch.settle()).toThrow(/ya se cerró/);
     expect(() => batch.pay(w.d1, w.fd, 1, 'consumption')).toThrow(/ya se cerró/);
+  });
+
+  it('pagos a un préstamo (evento 20 y quiebra): interés, capital y aporte de los dueños; el préstamo no queda negativo', () => {
+    const w = world();
+    const L = w.L;
+    const [h1, f, b2] = [contractOf(L, w.d1).holder, contractOf(L, w.fd).holder, contractOf(L, w.res2).holder];
+    pay(L, w.d1, w.fd, 200, 'consumption');
+    const loan = open(L, 'loan', b2, f, 100, { rate: 0, length: 20, amortization: 'fixedCapital' }, 'loans');
+    const cp = beginPeriod(L); // condiciones iniciales del caso (el préstamo se abre sin acreditarse en un depósito)
+    const batch = new PaymentBatch(L);
+    batch.payLoan('interest', w.fd, loan, 2.5); // al banco 2, desde un depósito en el 1: mueve reservas
+    batch.payLoan('repay', w.fd, loan, 10.5);
+    // Aporte de los dueños: 30,4 desde el banco 1 y 59,4 desde el 2 (el prestamista). En double, el préstamo
+    // recibe 100,3 > 100: el techo del préstamo deja la suma redondeada en exactamente 100.
+    batch.payLoan('bailout', w.d1, loan, 30.4);
+    batch.payLoan('bailout', w.d3, loan, 59.4);
+    expect(batch.balance(loan)).toBeCloseTo(-0.3, 12);
+    const fd0 = amt(L, w.fd);
+    const [r1, r2] = [amt(L, w.res1), amt(L, w.res2)];
+    batch.settle();
+    expect(amt(L, loan)).toBe(0);
+    const paidByFirm = fd0 - amt(L, w.fd);
+    expect(Math.abs(paidByFirm - 13)).toBeLessThan(1); // 2,5 + 10,5
+    // Reservas: el banco 1 le paga al 2 lo de la empresa y lo del hogar 1; el pago del hogar 3 queda en el banco 2.
+    const fromBank1 = r1 - amt(L, w.res1);
+    expect(amt(L, w.res2) - r2).toBe(fromBank1);
+    expect(Math.abs(fromBank1 - (13 + 30.4))).toBeLessThan(2);
+    // Registros: el aporte es una transferencia corriente hogar → empresa (ownersBailout) más la baja del préstamo.
+    const owners = L.flowLog.filter((r) => r.category === 'ownersBailout');
+    expect(owners.map((r) => [r.payer, r.payee])).toEqual([
+      [h1, f],
+      [contractOf(L, w.d3).holder, f],
+    ]);
+    assertLedger(L);
+    assertFlows(L, cp);
   });
 
   it('muchos pagadores de 0,5 µ a una cuenta de otro banco: reservas y cobrador a < 1 µ (por separado, error de 50 µ)', () => {
