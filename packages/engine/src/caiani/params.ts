@@ -165,6 +165,14 @@ export interface RuleParams {
    */
   capitalSwitchingLambda: number;
   capitalSwitchingPayOrReceive: boolean; // 1794
+  /**
+   * `InvestmentCapacityOperatingCashFlowExpected` (XML 2121–2130; evento 19): crecimiento deseado de la capacidad
+   * g = w_cf·(OCF/K − cf*)/cf* + w_u·(Yᵈ / capacidad − u*)/u*, con piso −1.
+   */
+  investmentCashFlowWeight: number; // 2128
+  investmentCapacityWeight: number; // 2127
+  investmentTargetCashFlow: number; // 2126
+  investmentTargetCapacityUtilization: number; // 2125
   /** `Bank.bankInterestRate` inicial (propiedad del prototipo del banco). */
   initialBankInterestRate: number; // 2288
   /**
@@ -284,6 +292,10 @@ export const RULES: Readonly<RuleParams> = {
   researchShare: 0,
   capitalSwitchingLambda: LN2 / 0.2,
   capitalSwitchingPayOrReceive: true,
+  investmentCashFlowWeight: 0.01,
+  investmentCapacityWeight: 0.02,
+  investmentTargetCashFlow: 0.043447814,
+  investmentTargetCapacityUtilization: 0.8,
   initialBankInterestRate: 0.0075,
   loanRateAdaptive: 1,
   loanRateIncrease: false,

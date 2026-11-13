@@ -486,46 +486,66 @@ function javaRoundToInt(x: number): number {
  * El "mercado activo" de `isActive` es el último que fijó un evento de mercado: el de capital (evento 3).
  */
 export function investmentDemandEvent(s: CaianiState, rng: CaianiRng): void {
-  const firstK = s.capitalFirms[0]!.id;
-  const capitalFirm = (id: AgentId): FirmState => {
-    const k = s.capitalFirms[id - firstK];
-    if (!k || k.id !== id) throw new Error(`el agente ${id} no es una empresa de capital`);
-    return k;
-  };
-  const offered = (id: AgentId): CapitalGoodStock => {
-    const g = capitalFirm(id).capitalGoods[0];
-    if (!g) throw new Error(`empresa de capital ${id} sin inventario (JMAB: NullPointerException)`);
-    return g;
-  };
   for (const c of s.consumptionFirms) {
     const sellers = c.selectedCapitalSuppliers;
     if (sellers === null || sellers.length === 0) {
       throw new Error(`empresa de consumo ${c.id} sin vendedores de capital (JMAB: excepción en sellers.get(0))`);
     }
-    const w = wageExpectation(c);
-    let best = sellers[0]!;
-    let maxAttr = -Infinity;
-    for (const k of sellers) {
-      const a = capitalAttractiveness(w, offered(k));
-      if (gt('BestQualityPriceCapitalSupplierWithSwitching mejor atractivo', a, maxAttr, 'pure')) {
-        best = k;
-        maxAttr = a;
-      }
-    }
-    const prev = c.previousCapitalSupplier;
-    if (prev === null) throw new Error(`empresa de consumo ${c.id} sin proveedor de capital previo (JMAB: NullPointerException)`);
-    const prevAttr = capitalFirm(prev).active[MKT.CAPGOOD] ? capitalAttractiveness(w, offered(prev)) : -Infinity;
-    // Si el previo es el mejor, los dos atractivos son el mismo cálculo: no es una decisión que pueda
-    // darse vuelta y no se registra. Un empate con otra empresa sí se registra.
-    const prevWorse = prev === best ? prevAttr < maxAttr : lt('BestQualityPriceCapitalSupplierWithSwitching previo < mejor', prevAttr, maxAttr, 'pure');
-    if (prevWorse) {
-      if (prevAttr === -Infinity || switches(prevAttr, maxAttr, s.rules.capitalSwitchingLambda, s.rules.capitalSwitchingPayOrReceive, rng)) {
-        c.previousCapitalSupplier = best;
-      }
-    }
-    c.desiredRealCapitalDemand = realCapitalDemand(c, offered(c.previousCapitalSupplier!));
-    if (c.desiredRealCapitalDemand > 0) c.active[MKT.CAPGOOD] = true;
+    computeDesiredInvestment(s, c, selectCapitalSupplier(s, c, sellers, rng));
   }
+}
+
+function capitalFirmById(s: CaianiState, id: AgentId): FirmState {
+  const k = s.capitalFirms[id - s.capitalFirms[0]!.id];
+  if (!k || k.id !== id) throw new Error(`el agente ${id} no es una empresa de capital`);
+  return k;
+}
+
+/** Inventario de una empresa de capital (`getItemStockMatrix(true, productionStockId)`). */
+function capitalOffered(s: CaianiState, id: AgentId): CapitalGoodStock {
+  const g = capitalFirmById(s, id).capitalGoods[0];
+  if (!g) throw new Error(`empresa de capital ${id} sin inventario (JMAB: NullPointerException)`);
+  return g;
+}
+
+/**
+ * `BestQualityPriceCapitalSupplierWithSwitching.selectGoodSupplier(sellers, 0, true)` (114–150): el más
+ * atractivo de `sellers` (el primero en caso de empate; **no** mira si están activos); atractivo del previo =
+ * −∞ si está inactivo en el mercado de capital; si el previo es menos atractivo, se reemplaza por el mejor si
+ * su atractivo es −∞ o con `switches`. Devuelve el previo (actualizado). Eventos 5 y 19.
+ */
+function selectCapitalSupplier(s: CaianiState, c: FirmState, sellers: readonly AgentId[], rng: CaianiRng): AgentId {
+  const w = wageExpectation(c);
+  let best = sellers[0]!;
+  let maxAttr = -Infinity;
+  for (const k of sellers) {
+    const a = capitalAttractiveness(w, capitalOffered(s, k));
+    if (gt('BestQualityPriceCapitalSupplierWithSwitching mejor atractivo', a, maxAttr, 'pure')) {
+      best = k;
+      maxAttr = a;
+    }
+  }
+  const prev = c.previousCapitalSupplier;
+  if (prev === null) throw new Error(`empresa de consumo ${c.id} sin proveedor de capital previo (JMAB: NullPointerException)`);
+  const prevAttr = capitalFirmById(s, prev).active[MKT.CAPGOOD] ? capitalAttractiveness(w, capitalOffered(s, prev)) : -Infinity;
+  // Si el previo es el mejor, los dos atractivos son el mismo cálculo: no es una decisión que pueda
+  // darse vuelta y no se registra. Un empate con otra empresa sí se registra.
+  const prevWorse = prev === best ? prevAttr < maxAttr : lt('BestQualityPriceCapitalSupplierWithSwitching previo < mejor', prevAttr, maxAttr, 'pure');
+  if (prevWorse) {
+    if (prevAttr === -Infinity || switches(prevAttr, maxAttr, s.rules.capitalSwitchingLambda, s.rules.capitalSwitchingPayOrReceive, rng)) {
+      c.previousCapitalSupplier = best;
+    }
+  }
+  return c.previousCapitalSupplier!;
+}
+
+/**
+ * `ConsumptionFirm.computeDesiredInvestment` (421–427): demanda real de capital al proveedor dado
+ * (`RealCapitalDemandWithPayBackPeriod`); si es > 0, activa en el mercado de capital (nunca desactiva).
+ */
+function computeDesiredInvestment(s: CaianiState, c: FirmState, supplier: AgentId): void {
+  c.desiredRealCapitalDemand = realCapitalDemand(c, capitalOffered(s, supplier));
+  if (c.desiredRealCapitalDemand > 0) c.active[MKT.CAPGOOD] = true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1698,6 +1718,157 @@ export function consumptionMarketEvent(s: CaianiState, rng: CaianiRng): SettleRe
       if (selected.length === 0) continue;
       const seller = selectGoodSupplier(s, h, selected, rng);
       consumptionPurchase(s, h, consumptionFirmById(s, seller), batch);
+    }
+  }
+  return batch.settle();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 19: segunda etapa del mercado de capital
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BROCHURE_SECOND = 'BrochureSelectionRandomRobinBuyerMixer.invokeSecondInteractions';
+export const SITE_DESIRED_GROWTH = 'InvestmentCapacityOperatingCashFlowExpected.computeDesiredGrowth';
+export const SITE_REALLOCATE = 'AbstractMechanism.reallocateLiquidity';
+
+/**
+ * `InvestmentCapacityOperatingCashFlowExpected.computeDesiredGrowth` (XML 2121–2130): capacidad = Σ cantidad ×
+ * productividad de las añadas (todas); K = `LAG_CAPITALFINANCIALVALUE` del período anterior; tasa de flujo de
+ * caja = `LAG_OPERATINGCASHFLOW` del período anterior / K (se calcula antes de mirar si K es 0, como Java).
+ * Si la capacidad o K son 0, −1; si no, max(−1, w_cf·(OCF/K − cf*)/cf* + w_u·(Yᵈ / capacidad − u*)/u*).
+ */
+export function desiredCapacityGrowth(s: CaianiState, c: FirmState): number {
+  const r = s.rules;
+  let capacity = 0;
+  for (const g of c.capitalGoods) capacity += g.quantity * g.productivity;
+  const capitalValue = getLag(c.lags, LAG.CAPITALFINANCIALVALUE, s.round, 1);
+  const cashFlowRate = getLag(c.lags, LAG.OPERATINGCASHFLOW, s.round, 1) / capitalValue;
+  const noCapacity = record(`${SITE_DESIRED_GROWTH} capacidad = 0`, capacity === 0, capacity, 0, 'pure');
+  if (noCapacity || record(`${SITE_DESIRED_GROWTH} K = 0`, capitalValue === 0, capitalValue, 0, 'pure')) return -1;
+  const g =
+    (r.investmentCashFlowWeight * (cashFlowRate - r.investmentTargetCashFlow)) / r.investmentTargetCashFlow +
+    (r.investmentCapacityWeight * (c.desiredOutput / capacity - r.investmentTargetCapacityUtilization)) / r.investmentTargetCapacityUtilization;
+  // Math.max(−1, g) de Java (NaN si g es NaN, igual que en JS).
+  return Number.isNaN(g) ? g : gt(`${SITE_DESIRED_GROWTH} max(−1, g)`, g, -1, 'fromAmounts') ? g : -1;
+}
+
+/**
+ * Compra de capital: `AtOnceMechanism.execute` con `CapitalGood` (el mismo mecanismo que el consumo, evento 18).
+ * - cantidad = min(demanda, inventario del vendedor); monto = cantidad × precio del inventario
+ *   (`CapitalFirm.getPrice`);
+ * - cuenta que cobra: el primer depósito del vendedor (`CapitalFirm.getPayableStock`); cuentas que pagan
+ *   (`ConsumptionFirm.getPayingStocks`, MKT_CAPGOOD): los depósitos de la empresa con el efectivo insertado
+ *   antes del último (`add(size − 1, cash)`); la cuenta que paga es el primer depósito de esa lista;
+ * - `reallocateLiquidity`: si el primer depósito no alcanza, se le pasa lo que falte desde las otras cuentas,
+ *   en el orden de la lista (otro depósito: pago entre bancos, categoría `deposits`). Con efectivo distinto de
+ *   0, **error** (no portado: las empresas tienen efectivo 0 siempre);
+ * - si aun así no alcanza: inactiva en capital y compra ⌊depósito / precio⌋;
+ * - si la cantidad es > 0: pago (categoría `investment`, con `PaymentBatch`), añada nueva al final de la lista
+ *   (valor = monto, edad −1, costo unitario 0, productividad, duración, amortización y capital/trabajo del
+ *   inventario), inventario − cantidad (`CapitalGood.setQuantity` recalcula el valor contable), demanda −
+ *   cantidad; inactiva si la demanda o el depósito llegan a 0; el vendedor, inactivo si se queda sin inventario.
+ */
+function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: PaymentBatch): void {
+  const L = s.ledger;
+  const demand = c.desiredRealCapitalDemand;
+  const output = k.capitalGoods[0];
+  if (!output) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
+  const price = output.price;
+  // Math.min(demanda, inventario). No se registra como decisión: en el empate las dos ramas dan lo mismo (y en
+  // el base los dos son enteros: la demanda sale de un Math.round y el inventario, de trabajadores × 2).
+  let quantity = demand <= output.quantity ? demand : output.quantity;
+  let totalAmount = quantity * price;
+  const payable = firstAsset(L, k.id, 'deposit');
+  if (!payable) throw new Error(`empresa de capital ${k.id} sin depósito (JMAB: NullPointerException)`);
+  const deposits = contractIds(L, c.id, 'assets', 'deposit');
+  const cash = contractIds(L, c.id, 'assets', 'cash')[0];
+  if (deposits.length === 0 || cash === undefined) {
+    throw new Error(`empresa de consumo ${c.id} sin depósito o sin efectivo (JMAB: IndexOutOfBoundsException en getPayingStocks)`);
+  }
+  const paying = [...deposits];
+  paying.splice(paying.length - 1, 0, cash);
+  const target = deposits[0]!;
+  const needed = totalAmount * MICRO_PER_UNIT;
+  // reallocateLiquidity(totalAmount, paying, target)
+  let raised = batch.balance(target);
+  for (let i = 0; i < paying.length && lt(`${SITE_REALLOCATE} reunido < monto`, raised, needed, 'amount'); i++) {
+    const id = paying[i]!;
+    if (id === target) continue;
+    const thisAmount = batch.balance(id);
+    const remAmount = Math.max(0, thisAmount + raised - needed);
+    const transfer = thisAmount - remAmount;
+    raised += transfer;
+    if (id === cash) {
+      if (transfer !== 0) throw new Error(`empresa de consumo ${c.id}: reallocateLiquidity con efectivo (no portado; reglas-caiani.md, sec. 18)`);
+    } else if (transfer !== 0) {
+      batch.pay(id, target, transfer, 'deposits'); // payingSupplier.transfer(payingStock, targetStock, monto)
+    }
+  }
+  if (lt(`${SITE_AT_ONCE} capital: depósito < monto`, batch.balance(target), needed, 'amount')) {
+    c.active[MKT.CAPGOOD] = false;
+    quantity = flooring(`${SITE_AT_ONCE} capital: cantidad con el depósito`, batch.balance(target) / MICRO_PER_UNIT / price, 'fromAmounts');
+    totalAmount = quantity * price;
+  }
+  if (quantity > 0) {
+    batch.pay(target, payable.id, totalAmount * MICRO_PER_UNIT, 'investment');
+    c.capitalGoods.push({
+      quantity,
+      value: totalAmount,
+      price,
+      unitCost: 0,
+      age: -1,
+      producer: k.id,
+      productivity: output.productivity,
+      duration: output.duration,
+      amortization: output.amortization,
+      capitalLaborRatio: output.capitalLaborRatio,
+      obsolete: false,
+    });
+    setCapitalGoodQuantity(output, output.quantity - quantity);
+    c.desiredRealCapitalDemand = demand - quantity;
+    if (
+      c.desiredRealCapitalDemand === 0 ||
+      record(`${SITE_AT_ONCE} capital: depósito agotado`, batch.balance(target) === 0, batch.balance(target), 0, 'amount')
+    ) {
+      c.active[MKT.CAPGOOD] = false;
+    }
+    if (output.quantity === 0) k.active[MKT.CAPGOOD] = false;
+  }
+}
+
+/**
+ * Evento 19, `capitalMarketTic2` (TIC_CAPITALMARKET2): segunda etapa del `BrochureMarket` de capital
+ * (`AbstractTwoStepMarketSimulation.eventOccurred` → `BrochureMarket.secondStep` →
+ * `BrochureSelectionRandomRobinBuyerMixer.invokeSecondInteractions`): mezcla la lista de compradores (la de la
+ * población de empresas de consumo, en el lugar) y, a cada una activa en el mercado de capital, le manda la
+ * llegada (`ConsumptionFirm.onAgentArrival` 216–227, rama de la segunda etapa):
+ * 1. `desiredCapacityGrowth` = `computeDesiredGrowth()` (lo usa la demanda de abajo y la del evento 5 del tick
+ *    siguiente);
+ * 2. con n = vendedores vistos + 1 (fijo), mientras i < n, la demanda real sea > 0 y queden vendedores vistos:
+ *    elige proveedor (`selectGoodSupplier` sobre los vistos: puede ser el previo, que no está en la lista),
+ *    recalcula la demanda real con ese proveedor (`computeDesiredInvestment`), compra (`capitalPurchase`) y
+ *    **saca al proveedor de `selectedCapitalGoodSuppliers`** (`remove`: la misma lista que guardó el evento 3,
+ *    modificada en el lugar; si el proveedor no estaba en ella, no cambia). La compra puede ser de 0 (vendedor
+ *    sin inventario): igual se lo saca.
+ * Los pagos se registran al cerrar el evento con redondeo controlado (`PaymentBatch`).
+ */
+export function capitalMarketSecondStepEvent(s: CaianiState, rng: CaianiRng): SettleReport {
+  const buyers = s.populations.consumptionFirms;
+  const batch = new PaymentBatch(s.ledger);
+  rng.shuffle(SITE_BROCHURE_SECOND, 'buyers', buyers, ownId);
+  for (const id of buyers) {
+    const c = consumptionFirmById(s, id);
+    if (!c.active[MKT.CAPGOOD]) continue;
+    c.desiredCapacityGrowth = desiredCapacityGrowth(s, c);
+    const list = c.selectedCapitalSuppliers;
+    if (list === null) throw new Error(`empresa de consumo ${c.id} sin vendedores de capital (JMAB: NullPointerException)`);
+    const nbSellers = list.length + 1;
+    for (let i = 0; i < nbSellers && c.desiredRealCapitalDemand > 0 && list.length > 0; i++) {
+      const supplier = selectCapitalSupplier(s, c, list, rng);
+      computeDesiredInvestment(s, c, supplier);
+      capitalPurchase(s, c, capitalFirmById(s, supplier), batch);
+      const at = list.indexOf(supplier);
+      if (at >= 0) list.splice(at, 1);
     }
   }
   return batch.settle();

@@ -5,7 +5,8 @@
  *
  * Tolerancias (plan-port-caiani.md, sec. 4, V3; regla de los montos en reglas-caiani.md, sec. 1): montos,
  * 2 µ en el evento suelto y 2 µ por evento en el encadenado (`V3_AMOUNT_TOL`, `chainedAmountTol`); double
- * calculados a partir de montos, 1e-6 relativo; double que no dependen de montos, 1e-9 relativo.
+ * calculados a partir de montos, 1e-6 relativo; double que no dependen de montos, 1e-9 relativo. En el
+ * encadenado, además, montos y double de montos pasan con ρ·S (escala de los flujos; `CompareOptions.scale`).
  */
 import { readFileSync } from 'node:fs';
 import {
@@ -398,6 +399,12 @@ export interface CompareResult {
    * informar los campos reportados (`REPORTED_FIELDS` del test) sin que tapen otras diferencias.
    */
   doubleFieldsOver: Record<string, { max: number; over: number }>;
+  /**
+   * Solo con `scale` (encadenado): por tipo de campo, el peor cociente diferencia / S y cuántos valores pasan
+   * **solo** por ρ·S (superan la tolerancia base: 2k µ o 10⁻⁶ relativo), y el ρ·S más grande (lo que afloja la
+   * regla: en µ para los montos, en unidades del campo para los `double`).
+   */
+  scaled: Record<string, { maxErrOverS: number; byScale: number; maxRhoS: number }>;
 }
 
 /**
@@ -408,10 +415,27 @@ export interface CompareResult {
  */
 export const V3_AMOUNT_TOL = 2; // µ
 export const chainedAmountTol = (eventsRun: number): number => V3_AMOUNT_TOL * eventsRun;
+/** ρ de la regla del encadenado por escala de los flujos (la tolerancia relativa de los `double` de montos). */
+export const V3_CHAIN_RHO = 1e-6;
 
 export interface CompareOptions {
   /** Tolerancia de los montos, en µ (por defecto, la del evento suelto). */
   amountTol?: number;
+  /**
+   * Encadenado: escala de los flujos de cada valor (reglas-caiani.md, sec. 1, "Regla del encadenado por escala
+   * de los flujos"). Con esto, un monto pasa si su diferencia es ≤ max(`amountTol`, ρ·S) y un `double` de
+   * montos si es ≤ max(10⁻⁶ relativo, ρ·S). Los `double` puros no cambian. Sin `scale`, la regla de siempre.
+   */
+  scale?: ScaleSource;
+}
+
+/** Escalas S(v) del encadenado (las da `ChainScales`, test/support/chain-scale.ts). */
+export interface ScaleSource {
+  rho: number;
+  /** S de un contrato del ledger (en µ): |saldo al empezar la cadena| + Σ |monto| de los flujos que lo tocaron. */
+  contract(id: number): number;
+  /** S de cualquier otro valor (montos en µ, `double` en sus unidades), por etiqueta, dado su valor actual. */
+  value(label: string, port: number): number;
 }
 
 /**
@@ -445,12 +469,26 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     if (diffs.length < 40) diffs.push(msg);
   };
   const rel = (a: number, b: number) => (a === b ? 0 : Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b)));
+  const scale = opts.scale;
+  const scaled: CompareResult['scaled'] = {};
+  /** ¿Pasa por ρ·S? Anota el peor diferencia / S y si hizo falta la escala. */
+  const byScale = (what: string, diff: number, S: number, baseOk: boolean): boolean => {
+    if (!scale) return false;
+    const st = (scaled[fieldKind(what)] ??= { maxErrOverS: 0, byScale: 0, maxRhoS: 0 });
+    st.maxRhoS = Math.max(st.maxRhoS, scale.rho * S);
+    if (diff > 0) st.maxErrOverS = Math.max(st.maxErrOverS, S > 0 ? diff / S : Infinity);
+    const ok = diff <= scale.rho * S;
+    if (ok && !baseOk) st.byScale++;
+    return ok;
+  };
   const close = (what: string, port: number, java: number, fromAmounts = false) => {
     const r = Number.isNaN(port) && Number.isNaN(java) ? 0 : rel(port, java);
     const tol = fromAmounts ? AMOUNTS_TOL : PURE_TOL;
     if (fromAmounts) counts.maxRelFromAmounts = Math.max(counts.maxRelFromAmounts, r);
     else counts.maxRelPure = Math.max(counts.maxRelPure, r);
-    if (!(r <= tol)) {
+    const baseOk = r <= tol;
+    const scaleOk = fromAmounts && scale !== undefined && Number.isFinite(port) && Number.isFinite(java) && byScale(what, Math.abs(port - java), scale.value(what, port), baseOk);
+    if (!baseOk && !scaleOk) {
       const st = (doubleFieldsOver[fieldKind(what)] ??= { max: 0, over: 0 });
       st.over++;
       st.max = Math.max(st.max, r);
@@ -458,16 +496,19 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     }
   };
   /** Montos: la misma tolerancia para todos (`amountTol`, arriba). */
-  const amount = (what: string, port: number, java: number) => {
+  const amount = (what: string, port: number, java: number, contract?: number) => {
     const dd = Math.abs(port - toMicro(java));
     counts.maxAmountDiff = Math.max(counts.maxAmountDiff, dd);
     const k = fieldKind(what);
     const st = (amountFields[k] ??= { max: 0, n: 0, over: 0 });
     st.n++;
     st.max = Math.max(st.max, dd);
-    if (dd > amountTol) {
+    const baseOk = dd <= amountTol;
+    const S = scale ? (contract !== undefined ? scale.contract(contract) : scale.value(what, port)) : 0;
+    if (!byScale(what, dd, S, baseOk) && !baseOk) {
       st.over++;
-      note(`${what}: port ${port} µ, JMAB ${java} (diferencia ${dd} µ, tolerancia ${amountTol} µ)`);
+      const sTxt = scale ? `, ρ·S ${scale.rho * S} µ` : '';
+      note(`${what}: port ${port} µ, JMAB ${java} (diferencia ${dd} µ, tolerancia ${amountTol} µ${sTxt})`);
     }
   };
   const same = (what: string, port: unknown, java: unknown) => {
@@ -554,7 +595,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
           counts.contracts++;
           same(`${w} tenedor`, toJ(c.holder), ref(it['AbstractItem.assetHolder']));
           same(`${w} emisor`, toJ(c.issuer), ref(it['AbstractItem.liabilityHolder']));
-          amount(`${w} saldo`, c.amount, it['AbstractItem.value']);
+          amount(`${w} saldo`, c.amount, it['AbstractItem.value'], c.id);
           same(`${w} edad`, c.age, it['AbstractItem.age']);
           if ('interestRate' in it) same(`${w} tasa`, c.rate, it['interestRate']);
           if (kind === 'loan' || kind === 'advance') {
@@ -709,5 +750,5 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   amount('BC intereses de adelantos', s.centralBank.interestsOnAdvances, jcb['interestsOnAdvances']);
   amount('BC intereses de bonos', s.centralBank.interestsOnBonds, jcb['interestsOnBonds']);
 
-  return { diffs, total, counts, amountFields, doubleFieldsOver };
+  return { diffs, total, counts, amountFields, doubleFieldsOver, scaled };
 }

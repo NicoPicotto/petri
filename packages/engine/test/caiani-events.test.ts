@@ -34,6 +34,10 @@ import {
   researchWorkers,
   consumptionDemandEvent,
   consumptionMarketEvent,
+  capitalMarketSecondStepEvent,
+  desiredCapacityGrowth,
+  setLag,
+  pay,
   selectGoodSupplier,
   firstAsset,
   netFinancialWorth,
@@ -74,7 +78,8 @@ import {
   type CaianiState,
   type FirmState,
 } from '../src/caiani';
-import { chainedAmountTol, compareState, idMaps, readDump, stateFromDump, type CompareResult } from './support/jmab-dump';
+import { ChainScales } from './support/chain-scale';
+import { V3_CHAIN_RHO, chainedAmountTol, compareState, idMaps, readDump, stateFromDump, type CompareResult, type ScaleSource } from './support/jmab-dump';
 
 describe('evento 0 (computeExpectations): casos a mano', () => {
   it('producción deseada: Y* = max(0, Sᵉ + 0,1·Sᵉ − inventario)', () => {
@@ -1057,6 +1062,144 @@ describe('evento 18 (mercado de consumo): casos a mano', () => {
   });
 });
 
+describe('evento 19 (segunda etapa del mercado de capital): casos a mano', () => {
+  /**
+   * Una empresa de consumo con una sola añada (100 unidades, productividad 1, edad 5) y rezagos del período
+   * anterior con OCF/K = cf* (el término del flujo de caja da 0) y Yᵈ / capacidad = 4,8: g = 0,02·(4,8 − 0,8)/0,8.
+   */
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    for (const f of s.consumptionFirms) f.active[MKT.CAPGOOD] = false;
+    const c = s.consumptionFirms[0]!;
+    c.active[MKT.CAPGOOD] = true;
+    const proto = c.capitalGoods[0]!;
+    c.capitalGoods = [{ ...proto, quantity: 100, productivity: 1, age: 5, obsolete: false }];
+    c.desiredOutput = 480;
+    c.desiredRealCapitalDemand = 1; // > 0: entra al lazo (se recalcula con el proveedor elegido)
+    setLag(c.lags, LAG.CAPITALFINANCIALVALUE, 0, 1);
+    setLag(c.lags, LAG.OPERATINGCASHFLOW, 0, RULES.investmentTargetCashFlow);
+    const [k0, k1, k2] = [s.capitalFirms[0]!, s.capitalFirms[1]!, s.capitalFirms[2]!];
+    const inv = (k: FirmState, price: number, quantity: number) => {
+      const g = k.capitalGoods[0]!;
+      g.price = price;
+      g.quantity = quantity;
+      g.productivity = 1;
+      g.capitalLaborRatio = proto.capitalLaborRatio;
+      k.active[MKT.CAPGOOD] = quantity > 0;
+    };
+    inv(k0, 2.5, 3); // el previo: activo, menos atractivo que k1 y k2 (más caro), no está en la lista
+    inv(k1, 2, 50);
+    inv(k2, 1.5, 0); // el más atractivo, pero sin inventario (inactivo)
+    c.previousCapitalSupplier = k0.id;
+    c.selectedCapitalSuppliers = [k1.id, k2.id];
+    const dep = (id: number) => firstAsset(s.ledger, id, 'deposit')!;
+    return { s, c, k0, k1, k2, dep };
+  };
+
+  it('crecimiento deseado: término de capacidad, piso −1 y sin capacidad', () => {
+    const { s, c } = setup();
+    const g = (0.02 * (480 / 100 - 0.8)) / 0.8; // el término del flujo de caja es 0 exacto
+    expect(desiredCapacityGrowth(s, c)).toBe(g);
+    expect(g).toBeCloseTo(0.1, 15);
+    setLag(c.lags, LAG.OPERATINGCASHFLOW, 0, -1e6); // flujo de caja muy negativo: piso −1
+    expect(desiredCapacityGrowth(s, c)).toBe(-1);
+    setLag(c.lags, LAG.OPERATINGCASHFLOW, 0, RULES.investmentTargetCashFlow);
+    c.capitalGoods = [];
+    expect(desiredCapacityGrowth(s, c)).toBe(-1);
+  });
+
+  it('compra al previo (fuera de la lista) hasta agotarlo; después elige de la lista: el sin inventario se saca sin comprar, y compra el resto al siguiente', () => {
+    const { s, c, k0, k1, k2, dep } = setup();
+    const [c0, a0, b0] = [dep(c.id).amount, dep(k0.id).amount, dep(k1.id).amount];
+    const r = capitalMarketSecondStepEvent(s, new PrngCaianiRng(Rng.fromSeed(3)));
+    // 1.ª vuelta: previo k0 activo, menos atractivo, p = 0 (pago): se queda. Demanda round(100·g) = 10; k0 tiene 3.
+    // 2.ª: k0 inactivo → el más atractivo de la lista (k2, inactivo y sin inventario): demanda
+    //      round(110 − 103) = 7, compra 0, se lo saca. 3.ª: k2 inactivo → k1: compra 7. Lista vacía: termina.
+    expect(c.capitalGoods.slice(1)).toEqual([
+      { quantity: 3, value: 7.5, price: 2.5, unitCost: 0, age: -1, producer: k0.id, productivity: 1, duration: k0.capitalGoods[0]!.duration, amortization: k0.capitalGoods[0]!.amortization, capitalLaborRatio: c.capitalGoods[0]!.capitalLaborRatio, obsolete: false },
+      { quantity: 7, value: 14, price: 2, unitCost: 0, age: -1, producer: k1.id, productivity: 1, duration: k1.capitalGoods[0]!.duration, amortization: k1.capitalGoods[0]!.amortization, capitalLaborRatio: c.capitalGoods[0]!.capitalLaborRatio, obsolete: false },
+    ]);
+    expect(c.selectedCapitalSuppliers).toEqual([]);
+    expect(c.previousCapitalSupplier).toBe(k1.id);
+    expect(c.desiredRealCapitalDemand).toBe(0);
+    expect(c.active[MKT.CAPGOOD]).toBe(false);
+    expect(c.desiredCapacityGrowth).toBe((0.02 * (480 / 100 - 0.8)) / 0.8);
+    expect(r.payments).toBe(2);
+    expect(dep(c.id).amount).toBe(c0 - 21_500_000);
+    expect(dep(k0.id).amount).toBe(a0 + 7_500_000);
+    expect(dep(k1.id).amount).toBe(b0 + 14_000_000);
+    // Inventarios: CapitalGood.setQuantity recalcula el valor contable.
+    const g1 = k1.capitalGoods[0]!;
+    expect(g1.quantity).toBe(43);
+    expect(g1.value).toBe(2 * 43 * (1 - g1.age / g1.amortization));
+    expect(k0.capitalGoods[0]!.quantity).toBe(0);
+    expect(k0.active[MKT.CAPGOOD]).toBe(false);
+    expect(k1.active[MKT.CAPGOOD]).toBe(true);
+    expect(k2.capitalGoods[0]!.quantity).toBe(0);
+  });
+
+  it('el previo está en la lista: se lo saca; una empresa inactiva en capital no hace nada', () => {
+    const { s, c, k1, k2 } = setup();
+    c.previousCapitalSupplier = k1.id; // activo y con inventario para toda la demanda
+    k2.capitalGoods[0]!.price = 2.5; // ahora k1 es también el más atractivo
+    const other = s.consumptionFirms[1]!;
+    const before = JSON.stringify(other);
+    capitalMarketSecondStepEvent(s, new PrngCaianiRng(Rng.fromSeed(3)));
+    expect(c.capitalGoods.slice(1).map((g) => [g.producer, g.quantity])).toEqual([[k1.id, 10]]);
+    expect(c.selectedCapitalSuppliers).toEqual([k2.id]);
+    expect(JSON.stringify(other)).toBe(before);
+  });
+
+  it('reallocateLiquidity: si el primer depósito no alcanza, pasa lo que falta desde el segundo (otro banco) y paga', () => {
+    const { s, c, k0, dep } = setup();
+    c.selectedCapitalSuppliers = [k0.id];
+    k0.capitalGoods[0]!.quantity = 100; // compra la demanda entera (10 × 2,5 = 25)
+    const L = s.ledger;
+    const d0 = dep(c.id);
+    const otherBank = s.banks.find((b) => b.id !== d0.issuer)!;
+    const d1id = open(L, 'deposit', c.id, otherBank.id, 0, { rate: 0 }, 'deposits');
+    pay(L, d0.id, d1id, d0.amount - 1_000_000, 'deposits'); // queda 1 en el primero
+    const total0 = d0.amount + contractOf(L, d1id).amount;
+    const r1 = contractIds(L, otherBank.id, 'assets', 'reserves').map((id) => contractOf(L, id).amount)[0]!;
+    capitalMarketSecondStepEvent(s, new PrngCaianiRng(Rng.fromSeed(3)));
+    expect(c.capitalGoods.slice(1).map((g) => g.quantity)).toEqual([10]);
+    // Del segundo depósito pasan 24 al primero; el primero paga 25 y queda en 0 (la empresa queda inactiva).
+    expect(d0.amount).toBe(0);
+    expect(contractOf(L, d1id).amount).toBe(total0 - 1_000_000 - 24_000_000);
+    expect(contractOf(L, contractIds(L, otherBank.id, 'assets', 'reserves')[0]!).amount).toBe(r1 - 24_000_000);
+    expect(c.active[MKT.CAPGOOD]).toBe(false);
+  });
+
+  it('con el efectivo de la empresa distinto de 0 y el primer depósito corto: error explícito (rama no portada)', () => {
+    const { s, c, dep } = setup();
+    const L = s.ledger;
+    const d0 = dep(c.id);
+    const otherBank = s.banks.find((b) => b.id !== d0.issuer)!;
+    const d1id = open(L, 'deposit', c.id, otherBank.id, 0, { rate: 0 }, 'deposits');
+    pay(L, d0.id, d1id, d0.amount, 'deposits');
+    contractOf(L, contractIds(L, c.id, 'assets', 'cash')[0]!).amount = 1_000_000; // solo para el caso
+    expect(() => capitalMarketSecondStepEvent(s, new PrngCaianiRng(Rng.fromSeed(3)))).toThrow(/reallocateLiquidity con efectivo/);
+  });
+
+  it('depósito insuficiente (con una sola cuenta): compra ⌊depósito / precio⌋ y queda inactiva', () => {
+    const { s, c, k0, k1, dep } = setup();
+    c.selectedCapitalSuppliers = [k1.id];
+    k0.capitalGoods[0]!.quantity = 100;
+    const L = s.ledger;
+    const d0 = dep(c.id);
+    expect(contractIds(L, c.id, 'assets', 'deposit')).toHaveLength(1);
+    // Deja 6,1 en el depósito (lo demás va a la cuenta de otro agente del mismo banco).
+    const sink = s.consumptionFirms.slice(1).map((f) => dep(f.id)).find((d) => d.issuer === d0.issuer)!;
+    pay(L, d0.id, sink.id, d0.amount - 6_100_000, 'deposits');
+    capitalMarketSecondStepEvent(s, new PrngCaianiRng(Rng.fromSeed(3)));
+    expect(c.capitalGoods.slice(1).map((g) => [g.producer, g.quantity])).toEqual([[k0.id, 2]]); // ⌊6,1 / 2,5⌋
+    expect(d0.amount).toBe(1_100_000);
+    expect(c.active[MKT.CAPGOOD]).toBe(false);
+    expect(c.desiredRealCapitalDemand).toBe(8);
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–37. */
@@ -1092,6 +1235,13 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
       console.log(`evento 18, cierre del lote: ${JSON.stringify(r)}`);
     },
   },
+  {
+    e: 19,
+    run: (s, rng) => {
+      const r = capitalMarketSecondStepEvent(s, rng);
+      console.log(`evento 19, cierre del lote: ${JSON.stringify(r)}`);
+    },
+  },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
@@ -1106,10 +1256,7 @@ const LAST = EVENTS[EVENTS.length - 1]!.e;
  *   hogar en su segunda compra). El error absoluto es el de las demandas del encadenado (~10⁻⁶), pero relativo
  *   a un residuo chico pasa el 10⁻⁶. En el evento suelto son bit a bit. Ver reglas-caiani.md, sec. 17.
  */
-const REPORTED_FIELDS: { field: string; chainedOnly: boolean }[] = [
-  { field: '# bien de consumo [#] cantidad', chainedOnly: true },
-  { field: '# bien de consumo [#] valor', chainedOnly: true },
-];
+const REPORTED_FIELDS: { field: string; chainedOnly: boolean }[] = [];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;
@@ -1133,11 +1280,18 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
    * `REPORTED_FIELDS` (en su modalidad) que la superan se informan aparte y no hacen fallar el test
    * (reglas-caiani.md, sec. 1, "Tolerancias": campos reportados). Sin `amountTol`, es el evento suelto.
    */
-  const check = (s: CaianiState, name: string, label: string, amountTol?: number) => {
+  const check = (s: CaianiState, name: string, label: string, amountTol?: number, scale?: ScaleSource) => {
     const chained = amountTol !== undefined;
-    const r = compareState(s, dumpOf(name), { amountTol });
+    const r = compareState(s, dumpOf(name), { amountTol, scale });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     report(label, r);
+    const scaledRows = Object.entries(r.scaled)
+      .filter(([, v]) => v.maxErrOverS > 0)
+      .sort((a, b) => b[1].maxErrOverS - a[1].maxErrOverS)
+      // Los 8 con el peor cociente y, siempre, los que necesitaron la escala para pasar.
+      .filter(([, v], i) => i < 8 || v.byScale > 0)
+      .map(([k, v]) => `${k}: diferencia/S máx ${v.maxErrOverS.toExponential(2)}, ρ·S máx ${v.maxRhoS.toPrecision(3)}${v.byScale > 0 ? `, ${v.byScale} pasan solo por ρ·S` : ''}`);
+    if (scaledRows.length > 0) console.log(`Escala de los flujos, tick ${tick}, ${label} (ρ = ${V3_CHAIN_RHO}):\n  ${scaledRows.join('\n  ')}`);
     const reported = REPORTED_FIELDS.filter((f) => chained || !f.chainedOnly).map((f) => f.field);
     const isReported = (kind: string) => reported.includes(kind);
     const reportedRows = [...Object.entries(r.amountFields), ...Object.entries(r.doubleFieldsOver)].filter(([k, v]) => isReported(k) && v.over > 0);
@@ -1184,15 +1338,32 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
 
   /** Estado del encadenado: arranca del volcado del principio del tick y lo avanza cada test de abajo. */
   let chainedState: CaianiState | undefined;
+  /** Escalas de los flujos del encadenado (reglas-caiani.md, sec. 1). */
+  let scales: ChainScales | undefined;
   it.skipIf(!available).each([...EVENTS.entries()])('encadenado desde el principio del tick, hasta el evento %#', (k, { e, run: ev }) => {
-    if (k === 0) chainedState = stateFromDump(dumpOf(before));
+    if (k === 0) {
+      const d = dumpOf(before);
+      chainedState = stateFromDump(d);
+      scales = new ChainScales(chainedState, V3_CHAIN_RHO, idMaps(d.meta).toJ);
+      // Valores al empezar la cadena: S = |v₀|.
+      compareState(chainedState, d, { scale: scales });
+      scales.commit();
+    }
     const s = chainedState;
-    if (!s) throw new Error('falta el estado del encadenado (falló un evento anterior)');
+    const sc = scales;
+    if (!s || !sc) throw new Error('falta el estado del encadenado (falló un evento anterior)');
     const rng = drawsOf(e);
+    const snap = sc.snapshot();
     withDecisions(chained, e, () => ev(s, rng));
     expect(rng.remaining).toBe(0);
-    // Después de cada evento, con la tolerancia de la cadena (k + 1 eventos corridos).
-    check(s, after(e), `encadenado 0–${e}`, chainedAmountTol(k + 1));
+    const created = sc.propagate(snap);
+    if (created > 0) console.log(`Escala propagada, tick ${tick}, evento ${e}: ${created} bienes de consumo nuevos`);
+    // Después de cada evento, con la tolerancia de la cadena (k + 1 eventos corridos) y la escala de los flujos.
+    try {
+      check(s, after(e), `encadenado 0–${e}`, chainedAmountTol(k + 1), sc);
+    } finally {
+      sc.commit();
+    }
   }, 120_000);
 
   it.skipIf(!available)('decisiones: frágiles por evento y dadas vuelta entre el suelto y el encadenado', () => {
