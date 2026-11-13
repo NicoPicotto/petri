@@ -16,7 +16,7 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { contractIds, contractOf, credit, firstAsset, installments, netFinancialWorth, open, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { contractIds, contractOf, credit, firstAsset, installments, netFinancialWorth, open, pay, serviceLoan, type AgentId, type ContractKind, type Ledger } from './ledger';
 import { CarryRounder, MICRO_PER_UNIT, toMicro, toUnits, type Micro } from './money';
 import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
@@ -1872,4 +1872,57 @@ export function capitalMarketSecondStepEvent(s: CaianiState, rng: CaianiRng): Se
     }
   }
   return batch.settle();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 20: servicio de la deuda de las empresas
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_PAY_INTERESTS = 'ConsumptionFirm/CapitalFirm.payInterests';
+
+/**
+ * `payInterests` de la empresa (`ConsumptionFirm` 634–673, `CapitalFirm` 303–348; iguales salvo que la de capital
+ * vuelve a poner `defaulted` = true después de la quiebra):
+ * 1. `computeDebtPayments`: cuotas de todos los préstamos (`installments`, la misma función y la misma lista que
+ *    el evento 9) y `debtBurden`, `debtInterests`;
+ * 2. si tiene **exactamente dos** depósitos, pasa todo el segundo al primero (`transfer`: pago entre bancos);
+ * 3. si tiene efectivo > 0, lo pasa al primer depósito (el efectivo del banco sube en espejo);
+ * 4. si el primer depósito ≥ `debtBurden`: paga cada préstamo en el orden de su lista (interés + capital desde
+ *    el depósito, con reservas si el prestamista es otro banco; el préstamo baja en el capital);
+ * 5. si no, quiebra (`FirmBankruptcyFireSales`): **no portada todavía** (error explícito; reglas-caiani.md, sec. 19).
+ * Todos los montos son enteros (cuotas en µ, saldos enteros): no hace falta el redondeo controlado.
+ */
+function payLoanInterests(s: CaianiState, f: FirmState): void {
+  const L = s.ledger;
+  const dues = installments(L, f.id, 'loan');
+  let burden = 0;
+  let interests = 0;
+  for (const due of dues) {
+    burden += due.interest + due.principal;
+    interests += due.interest;
+  }
+  f.debtBurden = burden;
+  f.debtInterests = interests;
+  const deposits = contractIds(L, f.id, 'assets', 'deposit');
+  const deposit = deposits[0];
+  if (deposit === undefined) throw new Error(`empresa ${f.id} sin depósito (JMAB: IndexOutOfBoundsException)`);
+  if (deposits.length === 2) pay(L, deposits[1]!, deposit, contractOf(L, deposits[1]!).amount, 'deposits');
+  const cash = contractIds(L, f.id, 'assets', 'cash')[0];
+  if (cash === undefined) throw new Error(`empresa ${f.id} sin efectivo (JMAB: IndexOutOfBoundsException)`);
+  if (contractOf(L, cash).amount > 0) pay(L, cash, deposit, contractOf(L, cash).amount, 'deposits');
+  const liquidity = contractOf(L, deposit).amount;
+  if (ge(`${SITE_PAY_INTERESTS} liquidez ≥ servicio`, liquidity, burden, 'amount')) {
+    contractIds(L, f.id, 'liabilities', 'loan').forEach((loan, i) => serviceLoan(L, loan, deposit, dues[i]!));
+  } else {
+    throw new Error(`empresa ${f.id}: quiebra por el servicio de la deuda (FirmBankruptcyFireSales no portada; reglas-caiani.md, sec. 19)`);
+  }
+}
+
+/**
+ * Evento 20, `creditInterestsTic` (TIC_CREDINTERESTS): solo las empresas, en orden de creación (consumo, después
+ * capital): `CopyOfConsumptionFirm2WagesEnd.onTicArrived` 88–89 y `CopyOfCapitalFirm2WagesEnd` 87–88 →
+ * `payInterests`. Sin sorteos. La matriz `debtPayments` de JMAB es de trabajo y no se porta.
+ */
+export function creditInterestsEvent(s: CaianiState): void {
+  for (const f of [...s.consumptionFirms, ...s.capitalFirms]) payLoanInterests(s, f);
 }

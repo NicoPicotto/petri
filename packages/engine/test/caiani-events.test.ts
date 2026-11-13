@@ -35,6 +35,8 @@ import {
   consumptionDemandEvent,
   consumptionMarketEvent,
   capitalMarketSecondStepEvent,
+  creditInterestsEvent,
+  installments,
   desiredCapacityGrowth,
   setLag,
   pay,
@@ -1200,6 +1202,67 @@ describe('evento 19 (segunda etapa del mercado de capital): casos a mano', () =>
   });
 });
 
+describe('evento 20 (servicio de la deuda): casos a mano', () => {
+  it('junta los dos depósitos en el primero, paga las cuotas de installments (interés + capital) y actualiza debtBurden', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const L = s.ledger;
+    const c = s.consumptionFirms[0]!;
+    const d0 = firstAsset(L, c.id, 'deposit')!;
+    const otherBank = s.banks.find((b) => b.id !== d0.issuer)!;
+    const d1 = open(L, 'deposit', c.id, otherBank.id, 0, { rate: 0 }, 'deposits');
+    pay(L, d0.id, d1, 10_000_000, 'deposits');
+    const total = d0.amount + contractOf(L, d1).amount;
+    const loans = contractIds(L, c.id, 'liabilities', 'loan');
+    const dues = installments(L, c.id, 'loan');
+    const burden = dues.reduce((a, d) => a + d.interest + d.principal, 0);
+    const before = loans.map((id) => contractOf(L, id).amount);
+    expect(burden).toBeGreaterThan(0);
+    // Para el caso, todas las demás empresas sin deuda que pagar no importan: corre el evento entero.
+    creditInterestsEvent(s);
+    expect(contractOf(L, d1).amount).toBe(0);
+    expect(d0.amount).toBe(total - burden);
+    loans.forEach((id, i) => expect(contractOf(L, id).amount).toBe(before[i]! - dues[i]!.principal));
+    expect(c.debtBurden).toBe(burden);
+    expect(c.debtInterests).toBe(dues.reduce((a, d) => a + d.interest, 0));
+  });
+
+  it('préstamo de otro banco: las reservas pasan del banco del depósito al prestamista', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const L = s.ledger;
+    const c = s.consumptionFirms[0]!;
+    const d0 = firstAsset(L, c.id, 'deposit')!;
+    const lender = s.banks.find((b) => b.id !== d0.issuer)!;
+    // Un préstamo de 20 a 20 trimestres, edad 1, tasa 0,01, del otro banco: cuota 0,2 de interés + 1 de capital.
+    const loan = open(L, 'loan', lender.id, c.id, 20_000_000, { rate: 0.01, length: 20, amortization: 'fixedCapital', age: 1, initialAmount: 20_000_000 }, 'loans');
+    const res = (b: number) => contractOf(L, contractIds(L, b, 'assets', 'reserves')[0]!).amount;
+    const [rd, rl] = [res(d0.issuer), res(lender.id)];
+    const dues = installments(L, c.id, 'loan');
+    expect(dues[dues.length - 1]).toEqual({ interest: 200_000, principal: 1_000_000 });
+    // Cada cuota de un préstamo de un banco que no es el del depósito mueve reservas (la de este y las de los
+    // préstamos iniciales). Las demás empresas, sin cuotas este tick (edad 0), para que no muevan nada.
+    const ids = contractIds(L, c.id, 'liabilities', 'loan');
+    const moved = (bank: number) => ids.reduce((a, id, i) => a + (contractOf(L, id).holder === bank ? dues[i]!.interest + dues[i]!.principal : 0), 0);
+    const toLender = moved(lender.id);
+    const out = ids.reduce((a, id, i) => a + (contractOf(L, id).holder !== d0.issuer ? dues[i]!.interest + dues[i]!.principal : 0), 0);
+    for (const f of [...s.consumptionFirms.slice(1), ...s.capitalFirms]) for (const id of contractIds(L, f.id, 'liabilities', 'loan')) contractOf(L, id).age = 0;
+    creditInterestsEvent(s);
+    expect(contractOf(L, loan).amount).toBe(19_000_000);
+    expect(toLender).toBeGreaterThanOrEqual(1_200_000);
+    expect(res(lender.id)).toBe(rl + toLender);
+    expect(res(d0.issuer)).toBe(rd - out);
+  });
+
+  it('sin liquidez para el servicio: quiebra (FirmBankruptcyFireSales), por ahora error explícito', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const L = s.ledger;
+    const c = s.consumptionFirms[0]!;
+    const d0 = firstAsset(L, c.id, 'deposit')!;
+    const sink = firstAsset(L, s.consumptionFirms[1]!.id, 'deposit')!;
+    pay(L, d0.id, sink.id, d0.amount, 'deposits');
+    expect(() => creditInterestsEvent(s)).toThrow(/quiebra por el servicio de la deuda/);
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–37. */
@@ -1242,6 +1305,7 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
       console.log(`evento 19, cierre del lote: ${JSON.stringify(r)}`);
     },
   },
+  { e: 20, run: (s) => creditInterestsEvent(s) },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
@@ -1256,7 +1320,13 @@ const LAST = EVENTS[EVENTS.length - 1]!.e;
  *   hogar en su segunda compra). El error absoluto es el de las demandas del encadenado (~10⁻⁶), pero relativo
  *   a un residuo chico pasa el 10⁻⁶. En el evento suelto son bit a bit. Ver reglas-caiani.md, sec. 17.
  */
-const REPORTED_FIELDS: { field: string; chainedOnly: boolean }[] = [];
+const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [
+  // Evento 20 suelto (2026-11-13): las reservas suman cientos de cuotas redondeadas por separado (arrastre por
+  // empresa, `installments`), sin control por banco: hasta 6 µ en el tick 50. Espera decisión de Nico
+  // (reglas-caiani.md, sec. 19). No se agrandó ninguna tolerancia.
+  { field: '# assets reserves[#] saldo', chainedOnly: false, events: [20] },
+  { field: '# liabilities reserves[#] saldo', chainedOnly: false, events: [20] },
+];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;
@@ -1280,7 +1350,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
    * `REPORTED_FIELDS` (en su modalidad) que la superan se informan aparte y no hacen fallar el test
    * (reglas-caiani.md, sec. 1, "Tolerancias": campos reportados). Sin `amountTol`, es el evento suelto.
    */
-  const check = (s: CaianiState, name: string, label: string, amountTol?: number, scale?: ScaleSource) => {
+  const check = (s: CaianiState, name: string, label: string, event: number, amountTol?: number, scale?: ScaleSource) => {
     const chained = amountTol !== undefined;
     const r = compareState(s, dumpOf(name), { amountTol, scale });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
@@ -1292,7 +1362,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
       .filter(([, v], i) => i < 8 || v.byScale > 0)
       .map(([k, v]) => `${k}: diferencia/S máx ${v.maxErrOverS.toExponential(2)}, ρ·S máx ${v.maxRhoS.toPrecision(3)}${v.byScale > 0 ? `, ${v.byScale} pasan solo por ρ·S` : ''}`);
     if (scaledRows.length > 0) console.log(`Escala de los flujos, tick ${tick}, ${label} (ρ = ${V3_CHAIN_RHO}):\n  ${scaledRows.join('\n  ')}`);
-    const reported = REPORTED_FIELDS.filter((f) => chained || !f.chainedOnly).map((f) => f.field);
+    const reported = REPORTED_FIELDS.filter((f) => (chained || !f.chainedOnly) && (!f.events || f.events.includes(event))).map((f) => f.field);
     const isReported = (kind: string) => reported.includes(kind);
     const reportedRows = [...Object.entries(r.amountFields), ...Object.entries(r.doubleFieldsOver)].filter(([k, v]) => isReported(k) && v.over > 0);
     if (reportedRows.length > 0) {
@@ -1333,7 +1403,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const rng = drawsOf(e);
     withDecisions(single, e, () => ev(s, rng));
     expect(rng.remaining).toBe(0);
-    check(s, after(e), `evento ${e}`);
+    check(s, after(e), `evento ${e}`, e);
   }, 120_000);
 
   /** Estado del encadenado: arranca del volcado del principio del tick y lo avanza cada test de abajo. */
@@ -1360,7 +1430,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     if (created > 0) console.log(`Escala propagada, tick ${tick}, evento ${e}: ${created} bienes de consumo nuevos`);
     // Después de cada evento, con la tolerancia de la cadena (k + 1 eventos corridos) y la escala de los flujos.
     try {
-      check(s, after(e), `encadenado 0–${e}`, chainedAmountTol(k + 1), sc);
+      check(s, after(e), `encadenado 0–${e}`, e, chainedAmountTol(k + 1), sc);
     } finally {
       sc.commit();
     }
