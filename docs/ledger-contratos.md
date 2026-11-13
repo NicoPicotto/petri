@@ -1,6 +1,6 @@
 # Ledger de contratos (P1): diseño
 
-Estado: **borrador para revisión de Nico** (2026-11-12). Todavía no hay código. Plan general en [plan-port-caiani.md](plan-port-caiani.md), sec. 3. Decisiones ya tomadas que este diseño usa (Nico, 2026-11-12):
+Estado: **aprobado e implementado** (decisiones de Nico del 2026-11-13, sec. 3; código en `packages/engine/src/caiani/`, sec. 4). Plan general en [plan-port-caiani.md](plan-port-caiani.md), sec. 3. Decisiones ya tomadas que este diseño usa (Nico, 2026-11-12):
 - escala monetaria: saldos enteros, con 1 unidad de Caiani = 10⁶ unidades del ledger (µ);
 - normal plegada determinista por inversa de la distribución;
 - 10 bancos y bonos desde la base.
@@ -166,8 +166,40 @@ Se corre en cada tick en los tests y en modo debug, igual que el chequeo SFC act
 - **Normal plegada:** media σ√(2/π) y varianza σ²(1 − 2/π) con 10⁶ sorteos; Kolmogorov–Smirnov contra la normal; misma semilla, mismos valores; monótona en u.
 - **Rng en modo oráculo:** lee un `draws.tsv` real del oráculo, devuelve los valores en orden y falla con un mensaje claro si el tipo o el lugar no coinciden.
 
-## 3. Para decidir (Nico)
+## 3. Decisiones (Nico, 2026-11-13)
 
-1. **Tolerancias de V3** (2.6): reemplazar el 1e-9 relativo por la propuesta de tres niveles. Cambia la sec. 4 del plan.
-2. **Reservas negativas durante el tick** (2.4): permitirlas como en JMAB y verificar en P3 si el `.jar` las produce. Alternativa: prohibirlas desde ya (más estricto, pero el port podría fallar donde el `.jar` no falla).
-3. **Última cuota de los préstamos** (2.1): cerrar con el saldo restante, en vez de dejar residuos que se borran en silencio. Es la única diferencia contable con JMAB de este diseño, sin contar la condonación de los préstamos iniciales, que se reproduce.
+1. **Tolerancias de V3 en tres niveles** (2.6): OK. Además, **contar y reportar cuántas decisiones discretas se dan vuelta** por diferencias dentro de la tolerancia. Escrito en `plan-port-caiani.md`, sec. 4 (V3); el contador va en el arnés de V3 (P3).
+2. **Reservas negativas durante el tick, como en JMAB** (2.4): OK, **con un contador de cuántas veces ocurre**.
+3. **Última cuota que cierra en cero** (2.1): OK, documentada como diferencia con JMAB (sec. 4).
+
+## 4. Implementación (2026-11-13)
+
+Módulo `packages/engine/src/caiani/`: `money.ts`, `ledger.ts` (lleva el encabezado de código portado), `flows.ts`, `normal.ts`, `rng.ts` e `index.ts`. Todavía no se exporta desde `src/index.ts`: convive con el motor viejo hasta P6.
+
+**Cambios respecto del diseño de la sec. 2** (de forma, salvo que se diga):
+- **Operaciones.** `accrue` pasó a ser `credit`, que sube un saldo con el emisor como contraparte: sirve para el interés capitalizado y también para acreditar un préstamo o una compra de bonos del BC. Se sumó `debit`, la inversa: baja un saldo pagándole al emisor con un pasivo del propio emisor (amortización, interés de un adelanto pagado con reservas). `writeDown` es un `debit` con categoría `writeOff`. `amortize` quedó partida en `payTo` (pago a un banco o al BC desde una cuenta, con liquidación si el banco de la cuenta es otro, como `CapitalFirm.payInterests`) y `serviceLoan`, que la usa.
+- **Cuota de capital (decisión 3).** La cuota de la edad a es redondeo(A·a/L) − redondeo(A·(a − 1)/L), con A = initialAmount y L = length. Cada cuota difiere de A/L (lo que paga JMAB) en menos de 1 µ y las cuotas de las edades 1 a L suman exactamente A, así que el préstamo cierra en cero sin un caso especial para la última. Los préstamos iniciales, que arrancan con edad j + 1, pagan las mismas cuotas que en JMAB y vencen con saldo.
+- **Condonación al vencer.** La limpieza (`cleanup`) condona con un `writeOff` explícito el saldo de un préstamo o adelanto que se cierra con saldo (lo que JMAB borra sin registrar), y lo cuenta en `writtenOffAtExpiry`. En la corrida base solo debería pasar con los préstamos iniciales; si pasa con otros, es una señal para investigar. Un bono que vence sin rescatar es un error del port.
+- **Contadores de reservas negativas (decisión 2).** Hay dos: `negativeReservesBank` y `negativeReservesGovernment`. Cuentan las veces que una operación lleva un saldo de ≥ 0 a < 0. Se separan porque **la cuenta del gobierno en el BC queda negativa por diseño**: `Government.emitBonds` lee el déficit como el saldo negativo de esa cuenta y emite bonos por ese monto. Lo de los bancos es lo que hay que verificar en P3.
+- **Categorías de flujo** (`FLOW_CATEGORIES`). Corrientes, que cambian el patrimonio financiero: consumo, salarios, seguro de desempleo, inversión, impuestos, intereses de depósitos, de bonos, de préstamos y de adelantos, dividendos, ganancias del BC y `writeOff`. Financieras, que solo cambian la composición del balance: préstamos, adelantos, bonos y depósitos (movimientos entre cuentas propias y entre efectivo y depósitos). La invariante de columnas usa esa clasificación, así que un pago corriente mal clasificado como financiero se detecta (hay un test). Las ganancias de capital en inventarios y la amortización del capital son flujos sin dinero y entran en P3 con los bienes reales.
+- **Movimientos** por (tipo, sector del tenedor, sector del emisor) en un arreglo plano, y no en un objeto con claves de texto (sec. 2.2).
+
+**Normal plegada.** Paso de la tabla h = 1/256 en z (1.665 nodos, se arma en milisegundos al cargar el módulo). Comparada con `statistics.NormalDist` de Python en 20.000 uniformes más la cola hasta u = 1 − 2⁻³², el error máximo es 9,5·10⁻¹⁰ en z (relativo 1,5·10⁻¹⁰), en la cola extrema. Con h = 1/32 era 3·10⁻⁶. F se calcula por la serie de Marsaglia para z < 3 y por la fracción continua de la razón de Mills para z ≥ 3; en el empalme coinciden en 10⁻¹⁵.
+
+**Rng semántico.**
+- Interfaz `CaianiRng`: `foldedNormal`, `bernoulli`, `shuffle`, `shuffleEmployees`, `sample` y `uniform01`. Cada pedido lleva el lugar de JMAB (`Clase.método`).
+- Modo PRNG: xoshiro de `rng.ts`, un uniforme por normal; la Bernoulli con p ≤ 0 o p ≥ 1 no consume azar, igual que JMAB.
+- Modo oráculo: verifica el tipo, el lugar, el tick (si se fija) y los agentes de cada lista. El σ de la normal no se registra, así que no se puede verificar. La p de la Bernoulli se compara con tolerancia relativa de 10⁻⁶ y las diferencias se anotan en `pDiffs`.
+- Los ids son los de JMAB: el arnés de V3 pasa la correspondencia.
+- **Verificado con el registro real** de la corrida "a" del oráculo (212.680 sorteos, ticks 1 a 6): el test los relee en orden y comprueba que cada valor llega exacto. Por separado, los dígitos de los 109.998 valores `double` registrados por Java coinciden con la representación más corta (la de JS), así que `parseFloat` recupera el mismo `double`.
+
+**Tests** (`packages/engine/test/caiani-*.test.ts`, 49 en total; corren en `pnpm test`):
+- casos a mano de cada operación: pagos en el mismo banco y entre bancos, desde y hacia la cuenta del gobierno, efectivo, préstamo en un banco nuevo, cuotas, condonación de préstamos iniciales, adelantos, bonos, intereses, quitas y limpieza;
+- propiedades: 6.000 operaciones al azar con 5 semillas, con las invariantes en cada tick y la atomicidad de las operaciones que fallan;
+- repartos por restos mayores;
+- normal plegada: cuantiles, momentos, Kolmogorov–Smirnov, monotonía y determinismo;
+- `Rng` en los dos modos. El test con el registro real se saltea si falta `reference/`.
+
+**Para P3, visto en el código de JMAB:**
+- `Households.payTaxes`, cuando el depósito no alcanza y el hogar tiene efectivo, deja el depósito en negativo: primero lo pone en `taxes` y después en `depValue − taxes`, con el valor viejo. Hay que ver si en la corrida base los hogares llegan a tener efectivo. Si no tienen, no importa.
+- Los pagos de impuestos e intereses de JMAB modifican los saldos directamente, sin pasar por `transfer`, pero las cuentas que tocan son las mismas que cubre `pay`/`payTo`.

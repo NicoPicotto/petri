@@ -8,7 +8,10 @@
 - [x] **Objetivo de V4:** la distribución del `.jar` (Nico, 2026-11-12). Las 25 réplicas (y después las 100) confirmaron que la tabla publicada no sale del `.jar`; la diferencia está documentada en [caiani-referencia.md](caiani-referencia.md).
 - [x] **Criterio de V4** (Nico, 2026-11-12): Welch + Holm al 1% + tamaño < 0,5 desvíos, también para la dispersión y los momentos del ciclo. Escrito en `plan-port-caiani.md` (sec. 4) e implementado en `reference/tools/v4_compare.py`. **P0 cerrado.**
 - [x] **Réplicas para V4:** 100 por lado (Nico, 2026-11-12). Las 100 del `.jar` terminaron el 2026-11-13, sin caídas; `resumen-100.json` es la referencia y la tabla de V4 del plan está actualizada. Con 100, los nueve indicadores publicados quedan fuera de la distribución del `.jar`.
-- [ ] **Diseño del ledger de contratos** (P1): borrador en [ledger-contratos.md](ledger-contratos.md). Faltan tres decisiones de Nico (sec. 3 del documento): tolerancias de V3, reservas negativas durante el tick, última cuota de los préstamos.
+- [x] **Ledger de contratos** (P1; decisiones de Nico del 2026-11-13): tolerancias de V3 en tres niveles, con un contador de decisiones discretas que se dan vuelta dentro de la tolerancia; reservas negativas durante el tick como en JMAB, con contador; última cuota que cierra en cero, documentada como diferencia. **Implementado** en `packages/engine/src/caiani/` ([ledger-contratos.md](ledger-contratos.md), sec. 4).
+- [ ] **P3, a verificar con el oráculo:** en qué etapas quedan reservas negativas (bancos y cuenta del gobierno) y si después del mercado de adelantos vuelven a ser ≥ 0 (contadores `negativeReservesBank` y `negativeReservesGovernment` del ledger).
+- [ ] **P3, arnés de V3:** contador de decisiones discretas que se dan vuelta dentro de la tolerancia (decisión de Nico, 2026-11-13); el `Rng` en modo oráculo ya anota las Bernoulli con p distinta (`pDiffs`).
+- [ ] **P2, inicialización:** reproducir los préstamos iniciales de JMAB (edad j + 1, initialAmount = saldo actual) y su condonación al vencer, y verificarla con el oráculo.
 - [ ] **(Opcional) Origen de la tabla publicada:** no se sabe qué versión o configuración la generó. No bloquea el port.
 - [x] **Escala monetaria del ledger** (P1; **aprobada por Nico el 2026-11-12**):
   - **Propuesta:** saldos enteros con 1 unidad de Caiani = 10⁶ unidades del ledger.
