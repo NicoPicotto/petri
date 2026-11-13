@@ -84,6 +84,8 @@ import {
   compareOutcomes,
   summarizeDecisions,
   withDecisions,
+  DerivedRecorder,
+  withDerived,
   type CaianiRng,
   type CaianiState,
   type FirmState,
@@ -1600,6 +1602,12 @@ describe('evento 23 (servicio de los adelantos del BC): casos a mano', () => {
   });
 });
 
+/**
+ * Tiempo máximo de cada test del V3: 5 minutos. Con la máquina cargada (otras corridas, el oráculo) un evento que
+ * tarda segundos puede pasar de los 2 minutos y dar un falso vencimiento (pedido de Nico, 2026-11-13).
+ */
+const V3_TIMEOUT = 300_000;
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–37. */
@@ -1613,10 +1621,9 @@ const RUNS = [
   // la pérdida total de 8164 cruza 0 en el último hogar). reglas-caiani.md, sec. 18 y 19.
   { run: 'p3-t108', tick: 108 },
   // Semilla 102: el único adelanto del BC con saldo en el tick 292 (banco 8256, 994,90) se paga en el evento 23.
-  // PENDIENTE (2026-11-13): el evento 23 pasa (suelto), pero el 10 no: la empresa 8204 pide 6,6·10⁻¹⁴ de crédito
-  // (residuo de punto flotante de JMAB) y queda activa en el mercado; en µ es 0 y el port la desactiva
-  // (reglas-caiani.md, sec. 22). Se vuelve a sumar cuando Nico decida.
-  // { run: 'p3-s102-t293', tick: 293 },
+  // Evento 10: la empresa 8204 pide 6,6·10⁻¹⁴ de crédito (residuo de JMAB); en µ es 0 y el port la desactiva: decisión
+  // frágil dada vuelta, informada y no falla; el encadenado se corta ahí (reglas-caiani.md, sec. 22).
+  { run: 'p3-s102-t293', tick: 293 },
 ];
 
 /**
@@ -1627,6 +1634,18 @@ const PENDING: { tick: number; event: number; error: RegExp; why: string }[] = [
 const pendingOf = (tick: number, event: number) => PENDING.find((p) => p.tick === tick && p.event === event);
 
 /** Eventos portados, en orden; `rng` = el evento sortea (si no, se verifica que el registro no tenga sorteos). */
+/**
+ * Cierre de un lote de pagos en el V3: se informa y se exige que cierre sin cotas relajadas, con cada pago y cada
+ * grupo a < 1 µ de su suma en double (decisión de Nico, 2026-11-13: lo estricto de los agregados derivados queda en
+ * los componentes; reglas-caiani.md, sec. 1).
+ */
+function settled(event: number, r: { relaxed: boolean; maxPaymentDiff: number; maxGroupDiff: number }): void {
+  console.log(`evento ${event}, cierre del lote: ${JSON.stringify(r)}`);
+  expect(r.relaxed).toBe(false);
+  expect(r.maxPaymentDiff).toBeLessThan(1);
+  expect(r.maxGroupDiff).toBeLessThan(1);
+}
+
 const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   { e: 0, run: (s) => computeExpectationsEvent(s) },
   { e: 1, run: capitalPriceEvent },
@@ -1650,42 +1669,42 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
     e: 18,
     run: (s, rng) => {
       const r = consumptionMarketEvent(s, rng);
-      console.log(`evento 18, cierre del lote: ${JSON.stringify(r)}`);
+      settled(18, r);
     },
   },
   {
     e: 19,
     run: (s, rng) => {
       const r = capitalMarketSecondStepEvent(s, rng);
-      console.log(`evento 19, cierre del lote: ${JSON.stringify(r)}`);
+      settled(19, r);
     },
   },
   {
     e: 20,
     run: (s) => {
       const r = creditInterestsEvent(s);
-      console.log(`evento 20, cierre del lote: ${JSON.stringify(r)}`);
+      settled(20, r);
     },
   },
   {
     e: 21,
     run: (s, rng) => {
       const r = wagePaymentEvent(s, rng);
-      console.log(`evento 21, cierre del lote: ${JSON.stringify(r)}`);
+      settled(21, r);
     },
   },
   {
     e: 22,
     run: (s) => {
       const r = bondInterestEvent(s);
-      console.log(`evento 22, cierre del lote: ${JSON.stringify(r)}`);
+      settled(22, r);
     },
   },
   {
     e: 23,
     run: (s) => {
       const r = advanceInterestEvent(s);
-      console.log(`evento 23, cierre del lote: ${JSON.stringify(r)}`);
+      settled(23, r);
     },
   },
 ];
@@ -1701,14 +1720,13 @@ const LAST = EVENTS[EVENTS.length - 1]!.e;
  *   (lo que queda del inventario de una empresa después de decenas de ventas, o el resto de la demanda de un
  *   hogar en su segunda compra). El error absoluto es el de las demandas del encadenado (~10⁻⁶), pero relativo
  *   a un residuo chico pasa el 10⁻⁶. En el evento suelto son bit a bit. Ver reglas-caiani.md, sec. 17.
- * - **Morosidad de un banco en el evento 20, suelto (2026-11-13, esperando decisión de Nico):** en el tick 108 la
+ * - Morosidad de un banco en el evento 20, suelto: **resuelta** con la regla de agregados derivados (2026-11-13;
+ *   ya no se reporta). Registro: en el tick 108 la
  *   morosidad del banco 8255 queda a 3,67 µ de JMAB. Suma lo que queda de los 5 préstamos de la empresa 8182
  *   (todos de ese banco): cada préstamo está a < 1 µ de lo que recibe en double (redondeo controlado), pero la suma
  *   de los 5 no tiene cota propia (~3,1 µ), más el error de entrada de los saldos (~0,5 µ). reglas-caiani.md, sec. 19.
  */
-const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [
-  { field: 'banco # morosidad del tick', chainedOnly: false, events: [20] },
-];
+const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;
@@ -1732,9 +1750,36 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
    * `REPORTED_FIELDS` (en su modalidad) que la superan se informan aparte y no hacen fallar el test
    * (reglas-caiani.md, sec. 1, "Tolerancias": campos reportados). Sin `amountTol`, es el evento suelto.
    */
-  const check = (s: CaianiState, name: string, label: string, event: number, amountTol?: number, scale?: ScaleSource, carry?: InputCarry) => {
+  /**
+   * Diferencias de estado sobre agentes con una decisión frágil (dentro de la tolerancia) en el evento: decisiones
+   * frágiles dadas vuelta respecto de JMAB. Se informan y no hacen fallar el test (decisión de Nico, 2026-11-13: el
+   * caso de P1 aplicado al estado; reglas-caiani.md, sec. 1, "Decisiones discretas").
+   */
+  const flippedVsJmab: string[] = [];
+  const jmabIdOf = (diff: string) => {
+    const m = /(\d{4,5})/.exec(diff.slice(0, diff.indexOf(':')));
+    return m ? Number(m[1]) : undefined;
+  };
+  const fragileJ = (agents: Iterable<number>) => {
+    toJ ??= idMaps(dumpOf(before).meta).toJ;
+    const out = new Set<number>();
+    for (const a of agents) out.add(toJ(a));
+    return out;
+  };
+  const check = (s: CaianiState, name: string, label: string, event: number, amountTol?: number, scale?: ScaleSource, carry?: InputCarry, derived?: DerivedRecorder, fragile?: Set<number>): number => {
     const chained = amountTol !== undefined;
-    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry });
+    // Agregados derivados (evento suelto): k µ + el error de entrada de los contratos anotados por el motor.
+    const derivedTol =
+      derived && carry
+        ? (agent: number, field: string) => {
+            const t = derived.of(agent, field);
+            if (!t) return undefined;
+            let e = 0;
+            for (const c of t.contracts) e += Math.abs(carry.carry(c));
+            return t.rounded + e;
+          }
+        : undefined;
+    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, derived: derivedTol });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     report(label, r);
     const scaledRows = Object.entries(r.scaled)
@@ -1750,11 +1795,16 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     if (reportedRows.length > 0) {
       console.log(`Campos reportados, tick ${tick}, ${label}:\n  ${reportedRows.map(([k, v]) => `${k}: ${v.over} sobre la tolerancia, máx ${v.max}`).join('\n  ')}`);
     }
-    const unexpected = r.diffs.filter((d) => !isReported(d.slice(0, d.indexOf(':')).replace(/\d+/g, '#')));
+    const notReported = r.diffs.filter((d) => !isReported(d.slice(0, d.indexOf(':')).replace(/\d+/g, '#')));
+    const explained = notReported.filter((d) => fragile !== undefined && fragile.has(jmabIdOf(d) ?? -1));
+    for (const d of explained) flippedVsJmab.push(`${label}: ${d}`);
+    if (explained.length > 0) console.log(`Decisiones frágiles dadas vuelta respecto de JMAB, tick ${tick}, ${label}:\n  ${explained.join('\n  ')}`);
+    const unexpected = notReported.filter((d) => !explained.includes(d));
     expect(unexpected).toEqual([]);
     // `diffs` guarda solo las primeras 40: si se llenó con reportados, el total tiene que cuadrar con ellos.
     const reportedOver = reportedRows.reduce((a, [, v]) => a + v.over, 0);
-    expect(r.total - reportedOver).toBe(unexpected.length);
+    expect(r.total - reportedOver - explained.length).toBe(unexpected.length);
+    return explained.length;
   };
   /** Montos con diferencia > 0, por tipo de campo: máximo, cuántos superan la tolerancia y de cuántos. */
   const report = (label: string, r: CompareResult) => {
@@ -1772,7 +1822,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const r = compareState(stateFromDump(d), d);
     expect(r.diffs).toEqual([]);
     expect(r.counts.maxAmountDiff).toBe(0);
-  }, 120_000);
+  }, V3_TIMEOUT);
 
   // Entre test y test vitest solo espera microtareas: sin ceder una macrotarea, el worker no atiende los
   // mensajes de su RPC durante todo el archivo y, pasado el minuto (con los eventos 11–14), vence el
@@ -1790,18 +1840,21 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
       return;
     }
     const carry = new InputCarry(s);
-    withDecisions(single, e, () => ev(s, rng));
+    const derived = new DerivedRecorder();
+    withDecisions(single, e, () => withDerived(derived, () => ev(s, rng)));
     expect(rng.remaining).toBe(0);
     carry.fromLog(s.ledger.flowLog);
     const cs = carry.summary();
     if (cs.contracts > 0) console.log(`V3 tick ${tick}, evento ${e}: error de entrada descontado en ${cs.contracts} contratos, máx ${cs.max.toFixed(3)} µ`);
-    check(s, after(e), `evento ${e}`, e, undefined, undefined, carry);
-  }, 120_000);
+    check(s, after(e), `evento ${e}`, e, undefined, undefined, carry, derived, fragileJ(single.fragileAgents.get(e) ?? []));
+  }, V3_TIMEOUT);
 
   /** Estado del encadenado: arranca del volcado del principio del tick y lo avanza cada test de abajo. */
   let chainedState: CaianiState | undefined;
   /** Escalas de los flujos del encadenado (reglas-caiani.md, sec. 1). */
   let scales: ChainScales | undefined;
+  /** Evento donde se cortó el encadenado por una decisión frágil dada vuelta respecto de JMAB. */
+  let chainCut: number | undefined;
   it.skipIf(!available).each([...EVENTS.entries()])('encadenado desde el principio del tick, hasta el evento %#', (k, { e, run: ev }) => {
     if (k === 0) {
       const d = dumpOf(before);
@@ -1810,6 +1863,10 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
       // Valores al empezar la cadena: S = |v₀|.
       compareState(chainedState, d, { scale: scales });
       scales.commit();
+    }
+    if (chainCut !== undefined) {
+      console.log(`V3 tick ${tick}, encadenado: cortado en el evento ${chainCut} (decisión frágil dada vuelta respecto de JMAB)`);
+      return;
     }
     const s = chainedState;
     const sc = scales;
@@ -1828,11 +1885,14 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     if (created > 0) console.log(`Escala propagada, tick ${tick}, evento ${e}: ${created} bienes de consumo nuevos`);
     // Después de cada evento, con la tolerancia de la cadena (k + 1 eventos corridos) y la escala de los flujos.
     try {
-      check(s, after(e), `encadenado 0–${e}`, e, chainedAmountTol(k + 1), sc);
+      const agents: number[] = [];
+      for (const [ev2, set] of chained.fragileAgents) if (ev2 <= e) agents.push(...set);
+      // Desde una decisión dada vuelta, el estado del port diverge del de JMAB a propósito: la cadena se corta.
+      if (check(s, after(e), `encadenado 0–${e}`, e, chainedAmountTol(k + 1), sc, undefined, undefined, fragileJ(agents)) > 0) chainCut = e;
     } finally {
       sc.commit();
     }
-  }, 120_000);
+  }, V3_TIMEOUT);
 
   it.skipIf(!available)('decisiones: frágiles por evento y dadas vuelta entre el suelto y el encadenado', () => {
     console.log(`Decisiones, tick ${tick}, cada evento suelto:\n  ${summarizeDecisions(single.log).join('\n  ')}`);
@@ -1840,6 +1900,8 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     // Decisiones que se dan vuelta entre el encadenado y el evento suelto (que arranca del estado de JMAB).
     const { flips, lengthMismatch } = compareOutcomes(single.log, chained.log);
     console.log(`Decisiones dadas vuelta, tick ${tick}: ${flips.length}`, JSON.stringify(flips.slice(0, 10)), lengthMismatch);
-    expect(lengthMismatch).toEqual([]);
+    console.log(`Decisiones frágiles dadas vuelta respecto de JMAB, tick ${tick}: ${flippedVsJmab.length}`, JSON.stringify(flippedVsJmab.slice(0, 10)));
+    // Con la cadena cortada, el encadenado no tiene los eventos siguientes: no se comparan.
+    if (chainCut === undefined) expect(lengthMismatch).toEqual([]);
   });
 });

@@ -55,8 +55,14 @@ const MAX_EXAMPLES = 5;
 export class DecisionRecorder {
   readonly log: DecisionLog = {};
   event = -1;
+  /**
+   * Evento → agentes con al menos una decisión frágil en ese evento (las que pasan el agente). El V3 informa una
+   * diferencia de estado sobre esos agentes como decisión frágil dada vuelta, no como falla (decisión de Nico,
+   * 2026-11-13, la de P1 aplicada al estado; reglas-caiani.md, sec. 1, "Decisiones discretas").
+   */
+  readonly fragileAgents = new Map<number, Set<number>>();
 
-  record(site: string, outcome: number, a: number, b: number, distance: number, tolerance: Tolerance): void {
+  record(site: string, outcome: number, a: number, b: number, distance: number, tolerance: Tolerance, agent?: number): void {
     const ev = this.log[this.event] ?? (this.log[this.event] = {});
     const s =
       ev[site] ??
@@ -67,6 +73,11 @@ export class DecisionRecorder {
     // NaN (operandos NaN) no cuenta como frágil: la rama es la misma en JMAB y en el port.
     if (distance <= DECISION_TOLERANCE[tolerance]) {
       s.fragile++;
+      if (agent !== undefined) {
+        let set = this.fragileAgents.get(this.event);
+        if (!set) this.fragileAgents.set(this.event, (set = new Set()));
+        set.add(agent);
+      }
       if (s.examples.length < MAX_EXAMPLES) s.examples.push({ index, a, b, distance });
     }
   }
@@ -105,24 +116,24 @@ export function decisionDistance(a: number, b: number, tolerance: Tolerance, sca
 }
 
 /** Registro directo, para decisiones que no son una comparación simple (ver el lugar que la usa). */
-export function record(site: string, outcome: boolean, a: number, b: number, tolerance: Tolerance, scale?: number): boolean {
-  if (active) active.record(site, outcome ? 1 : 0, a, b, decisionDistance(a, b, tolerance, scale), tolerance);
+export function record(site: string, outcome: boolean, a: number, b: number, tolerance: Tolerance, scale?: number, agent?: number): boolean {
+  if (active) active.record(site, outcome ? 1 : 0, a, b, decisionDistance(a, b, tolerance, scale), tolerance, agent);
   return outcome;
 }
 
 /** a > b. */
-export function gt(site: string, a: number, b: number, tolerance: Tolerance, scale?: number): boolean {
-  return record(site, a > b, a, b, tolerance, scale);
+export function gt(site: string, a: number, b: number, tolerance: Tolerance, scale?: number, agent?: number): boolean {
+  return record(site, a > b, a, b, tolerance, scale, agent);
 }
 
 /** a ≥ b. */
-export function ge(site: string, a: number, b: number, tolerance: Tolerance, scale?: number): boolean {
-  return record(site, a >= b, a, b, tolerance, scale);
+export function ge(site: string, a: number, b: number, tolerance: Tolerance, scale?: number, agent?: number): boolean {
+  return record(site, a >= b, a, b, tolerance, scale, agent);
 }
 
 /** a < b. */
-export function lt(site: string, a: number, b: number, tolerance: Tolerance, scale?: number): boolean {
-  return record(site, a < b, a, b, tolerance, scale);
+export function lt(site: string, a: number, b: number, tolerance: Tolerance, scale?: number, agent?: number): boolean {
+  return record(site, a < b, a, b, tolerance, scale, agent);
 }
 
 /**

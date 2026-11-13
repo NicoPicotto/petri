@@ -23,6 +23,7 @@ import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
 import { flooring, ge, gt, lt, record, rounding } from './decisions';
+import { derivedInput, derivedRounded } from './derived';
 import {
   EXPECTATION,
   LAG,
@@ -759,7 +760,7 @@ export const SITE_PECKING_ORDER = 'PeckingOrderTheory.computeCreditDemand';
 export function peckingOrderCreditDemand(L: Ledger, firm: AgentId, requirement: number): Micro {
   const liquidity = sumContracts(L, firm, 'assets', 'deposit') + sumContracts(L, firm, 'assets', 'cash');
   const req = toMicro(requirement);
-  return gt(`${SITE_PECKING_ORDER} requerimiento > liquidez`, req, liquidity, 'amount') ? req - liquidity : 0;
+  return gt(`${SITE_PECKING_ORDER} requerimiento > liquidez`, req, liquidity, 'amount', undefined, firm) ? req - liquidity : 0;
 }
 
 /** `ConsumptionFirm.getRequiredWorkers` (267–298): trabajadores para la producción deseada, `(int) Math.round`. */
@@ -1023,6 +1024,7 @@ function bankById(s: CaianiState, id: AgentId): BankState {
  * la empresa queda inactiva en crédito. La oferta total del banco baja en el monto (+∞ en el base: no
  * cambia) y, si llega a 0, el banco queda inactivo. Un préstamo de 0 también se crea (lo cierra `cleanSM`).
  */
+const SITE_CREDIT_MECHANISM = 'ConstrainedCreditMechanism.execute';
 function creditTransaction(s: CaianiState, firm: FirmState, bank: BankState, isConsumption: boolean): void {
   const L = s.ledger;
   const required = firm.creditDemanded;
@@ -1041,7 +1043,10 @@ function creditTransaction(s: CaianiState, firm: FirmState, bank: BankState, isC
   if (deposit === undefined) open(L, 'deposit', firm.id, bank.id, amount, { rate: bank.depositInterestRate }, 'loans');
   else credit(L, deposit, amount, 'loans');
   firm.creditDemanded = required - amount;
-  if (amount === required) firm.active[MKT.CREDIT] = false;
+  // "Se le dio todo": en µ. Un pedido que en JMAB es un residuo de punto flotante (6,6·10⁻¹⁴ en el tick 293 de la
+  // semilla 102) es 0 en µ y la empresa sale del mercado; en JMAB sigue activa. Es una decisión frágil (decisión de
+  // Nico, 2026-11-13: "0 en µ es 0"; reglas-caiani.md, sec. 22).
+  if (record(`${SITE_CREDIT_MECHANISM} se le dio todo`, amount === required, amount, required, 'amount', undefined, firm.id)) firm.active[MKT.CREDIT] = false;
   bank.totalLoanSupply -= toUnits(amount);
   if (bank.totalLoanSupply === 0) bank.active[MKT.CREDIT] = false;
 }
@@ -1946,9 +1951,10 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
   let totalDebt = 0;
   for (const d of debts) totalDebt += d;
   if (totalDebt === 0) return;
-  const paid = ge(`${SITE_BANKRUPTCY} liquidez ≥ deuda`, liquidity, totalDebt, 'amount')
-    ? debts
-    : allocateLargestRemainder(liquidity, debts, loans);
+  const coversDebt = ge(`${SITE_BANKRUPTCY} liquidez ≥ deuda`, liquidity, totalDebt, 'amount');
+  const paid = coversDebt ? debts : allocateLargestRemainder(liquidity, debts, loans);
+  /** Préstamos que recibieron aportes de los dueños (grupo del redondeo controlado: un redondeo). */
+  const touched = loans.map(() => false);
   loans.forEach((loan, i) => batch.payLoan('repay', deposit, loan, paid[i]!));
   let surplus = liquidity;
   for (const p of paid) surplus -= p;
@@ -2002,6 +2008,7 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
           // y las reservas al revés.
           const micro = -amount * MICRO_PER_UNIT;
           batch.refundBailout(loan, target.id, micro);
+          touched[i] = true;
           room[i] = room[i]! + micro;
           losses[i] = losses[i]! - amount;
           totalLoss -= amount;
@@ -2015,6 +2022,7 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
         // aporte), así que un vuelco no cambia nada más allá de la diferencia que lo provoca.
         const part = micro <= room[i]! ? micro : room[i]!;
         batch.payLoan('bailout', target.id, loan, part);
+        touched[i] = true;
         room[i] = room[i]! - part;
         if (micro > part) excess[i]!.push(batch.payLoan('bailoutExcess', target.id, loan, micro - part));
         losses[i] = losses[i]! - amount;
@@ -2031,6 +2039,13 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
       let over = 0;
       for (const k of excess[i] ?? []) over += batch.settledAmount(k);
       bankById(s, c.holder).currentNonPerformingLoans += rest - over;
+      // Agregado derivado (reglas-caiani.md, sec. 1): la pérdida del préstamo sale de su parte de la liquidez
+      // (restos mayores), de lo que bajó con los aportes (grupo del lote) y del sobrepago (otro grupo), y de los
+      // saldos de entrada del préstamo y del depósito de la empresa.
+      const npl = 'currentNonPerformingLoans';
+      derivedRounded(c.holder, npl, (coversDebt ? 0 : 1) + (touched[i] ? 1 : 0) + ((excess[i] ?? []).length > 0 ? 1 : 0));
+      derivedInput(c.holder, npl, loan);
+      derivedInput(c.holder, npl, deposit);
     });
   });
 }

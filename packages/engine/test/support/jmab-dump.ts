@@ -473,6 +473,12 @@ export interface CompareOptions {
    * Nico, 2026-11-13; ver `InputCarry`, test/support/input-carry.ts).
    */
   carry?: (contract: number) => number;
+  /**
+   * Evento suelto: tolerancia de un agregado derivado (regla de Nico, 2026-11-13; reglas-caiani.md, sec. 1): k µ +
+   * el error de entrada de sus contratos, con k y los contratos anotados por el motor (`DerivedRecorder`). La
+   * tolerancia del campo es el máximo entre esta y la general.
+   */
+  derived?: (agent: AgentId, field: string) => number | undefined;
 }
 
 /** Escalas S(v) del encadenado (las da `ChainScales`, test/support/chain-scale.ts). */
@@ -542,7 +548,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     }
   };
   /** Montos: la misma tolerancia para todos (`amountTol`, arriba). */
-  const amount = (what: string, port: number, java: number, contract?: number) => {
+  const amount = (what: string, port: number, java: number, contract?: number, derivedTol?: number) => {
     const carried = contract !== undefined && opts.carry ? opts.carry(contract) : 0;
     const dd = Math.abs(port - carried - (opts.carry ? java * MICRO_PER_UNIT : toMicro(java)));
     counts.maxAmountDiff = Math.max(counts.maxAmountDiff, dd);
@@ -550,12 +556,13 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     const st = (amountFields[k] ??= { max: 0, n: 0, over: 0 });
     st.n++;
     st.max = Math.max(st.max, dd);
-    const baseOk = dd <= amountTol;
+    const tol = derivedTol !== undefined && !scale ? Math.max(amountTol, derivedTol) : amountTol;
+    const baseOk = dd <= tol;
     const S = scale ? (contract !== undefined ? scale.contract(contract) : scale.value(what, port)) : 0;
     if (!byScale(what, dd, S, baseOk) && !baseOk) {
       st.over++;
       const sTxt = scale ? `, ρ·S ${scale.rho * S} µ` : '';
-      note(`${what}: port ${port} µ, JMAB ${java} (diferencia ${dd} µ, tolerancia ${amountTol} µ${sTxt})`);
+      note(`${what}: port ${port} µ, JMAB ${java} (diferencia ${dd} µ, tolerancia ${tol} µ${sTxt})`);
     }
   };
   const same = (what: string, port: unknown, java: unknown) => {
@@ -779,7 +786,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} ratio de liquidez`, b.liquidityRatio, j['liquidityRatio'], true);
     close(`${w} ratio de capital`, b.capitalRatio, j['capitalRatio'], true);
     amount(`${w} costo de rescate`, b.bailoutCost, j['bailoutCost']);
-    amount(`${w} morosidad del tick`, b.currentNonPerformingLoans, j['AbstractBank.currentNonPerformingLoans']);
+    amount(`${w} morosidad del tick`, b.currentNonPerformingLoans, j['AbstractBank.currentNonPerformingLoans'], undefined, opts.derived?.(b.id, 'currentNonPerformingLoans'));
     close(`${w} tasa de préstamos`, b.bankInterestRate, j['bankInterestRate']);
     close(`${w} oferta de crédito`, b.totalLoanSupply, j['totalLoanSupply'], true);
     close(`${w} tasa de depósitos`, b.depositInterestRate, j['depositInterestRate']);
