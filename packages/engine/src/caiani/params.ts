@@ -1,0 +1,137 @@
+/**
+ * Parámetros del escenario base de Caiani et al. (2016) que usa la inicialización (P2).
+ *
+ * Fuente: `reference/paper-launcher/Model/modelFile.xml` (el del `.jar` del paper, referencia
+ * canónica; plan-port-caiani.md, sec. 0). Se cita la línea de cada valor. Los nombres son los de las
+ * propiedades del XML. Los parámetros de comportamiento de cada regla entran en P3, con su regla.
+ */
+
+/** Bean `macroAgentInitialiser` (`modellone.init.SFCSSMacroAgentInitialiser`), líneas 1381–1420. */
+export interface InitialiserParams {
+  /** Amplitud de la perturbación U(−u, u) de rezagos y expectativas. 0 en el base: no perturba. */
+  uniformDistr: number;
+  // Stocks (agregados por sector).
+  hhsDep: number;
+  /** No está en el XML: queda en 0,0, el valor por defecto de Java. Nadie arranca con efectivo. */
+  hhsCash: number;
+  ksDep: number;
+  /** Entero en Java (`int`): se reparte con división entera. */
+  ksInv: number;
+  ksLoans: number;
+  ksLoans0: number;
+  csDep: number;
+  csInv: number;
+  csLoans: number;
+  csLoans0: number;
+  /** Entero en Java. */
+  csKap: number;
+  bsBonds: number;
+  bsRes: number;
+  bsAdv: number;
+  bsCash: number;
+  cbBonds: number;
+  // Flujos.
+  dividendsReceived: number;
+  hhWage: number;
+  ksEmpl: number;
+  ksSales: number;
+  ksProfits: number;
+  kPrice: number;
+  kUnitCost: number;
+  ksOCF: number;
+  csEmpl: number;
+  csSales: number;
+  csProfits: number;
+  cPrice: number;
+  cUnitCost: number;
+  csOCF: number;
+  iLoans: number;
+  iDep: number;
+  bsProfits: number;
+  /** No está en el XML: 0, el valor por defecto de Java. El gobierno arranca sin empleados. */
+  gEmpl: number;
+  iBonds: number;
+  iAdv: number;
+  /** Crecimiento con que se "envejecen" hacia atrás los préstamos y las añadas de capital. */
+  gr: number;
+}
+
+export const INITIALISER: Readonly<InitialiserParams> = {
+  uniformDistr: 0.0, // 1382
+  hhsDep: 80704.13311, // 1385
+  hhsCash: 0,
+  dividendsReceived: 2376.600118, // 1386
+  ksDep: 5000, // 1387
+  ksInv: 200, // 1388
+  ksLoans: 1298.02106, // 1389
+  ksLoans0: 129.5283557, // 1390
+  csDep: 25000, // 1391
+  csInv: 3200, // 1392
+  csLoans: 52194.42973, // 1393
+  csLoans0: 5208.435263, // 1394
+  csKap: 40000, // 1395
+  bsBonds: 38273.5462, // 1396
+  bsRes: 28564.58248, // 1397
+  bsAdv: 0, // 1398
+  bsCash: 0, // 1399
+  cbBonds: 28564.58248, // 1400
+  hhWage: 5, // 1401
+  ksEmpl: 1000, // 1402
+  ksSales: 5375, // 1403
+  ksProfits: 312.8024025, // 1404
+  kPrice: 2.6875, // 1405
+  kUnitCost: 2.5, // 1406
+  csEmpl: 5000, // 1407
+  csSales: 32971.43332, // 1408
+  csProfits: 2208.429577, // 1409
+  cPrice: 1.030357291, // 1410
+  cUnitCost: 0.936688447, // 1411
+  iLoans: 0.0075, // 1412
+  iDep: 0.0025, // 1413
+  bsProfits: 179.1522275, // 1414
+  gEmpl: 0,
+  iBonds: 0.0025, // 1415
+  iAdv: 0.0025, // 1416
+  ksOCF: 189.2146501, // 1417
+  csOCF: 2340.255574, // 1418
+  gr: 0.0075, // 1419
+};
+
+/** Parámetros estructurales de los agentes que usa la inicialización. */
+export interface StructureParams {
+  households: number; // 2631
+  consumptionFirms: number; // 1909
+  capitalFirms: number; // 1446
+  banks: number; // 2201
+  /** Préstamos de las empresas: plazo (20 trimestres) y amortización 0 = FIXED_CAPITAL. */
+  loanLength: number; // 1541 (capital), 2010 (consumo)
+  // Bienes de capital (los define la empresa de capital que los produce).
+  capitalDuration: number; // 1544
+  capitalAmortization: number; // 1543
+  capitalProductivity: number; // 1545
+  capitalLaborRatio: number; // 1547
+  /** Adelantos del BC: plazo 1, amortización 2 = ONLY_INTERESTS. */
+  advancesLength: number; // 2294
+  bondMaturity: number; // 2867
+  bondPrice: number; // 2869
+  /** Expectativas adaptativas (`SimpleAdaptiveExpectation`): observaciones y λ. */
+  expectationPeriods: number; // 1555, 1578, 1601, 2304, 2706
+  expectationLambda: number; // 1557, 1580, 1603, 2306, 2708
+}
+
+export const STRUCTURE: Readonly<StructureParams> = {
+  households: 8000,
+  consumptionFirms: 100,
+  capitalFirms: 20,
+  banks: 10,
+  loanLength: 20,
+  capitalDuration: 20,
+  capitalAmortization: 20,
+  capitalProductivity: 1,
+  capitalLaborRatio: 6.4,
+  advancesLength: 1,
+  bondMaturity: 1,
+  bondPrice: 1.0,
+  expectationPeriods: 4,
+  expectationLambda: 0.25,
+};

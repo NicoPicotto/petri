@@ -138,7 +138,7 @@ Hay tres versiones distintas, y no son iguales:
 
 1. **P0, referencia y oráculo (fuera del motor):** leer el paper; descompilar el `.jar` y compararlo con git (V0); correr el `.jar` con 25+ semillas fijas y guardar la distribución de referencia; instrumentar JMAB para volcar estados y sorteos.
 2. **P1, infraestructura:** ledger de contratos con varios bancos, escala monetaria, normal determinista, invariante de flujos, módulo nuevo. **Hecho (2026-11-13):** `packages/engine/src/caiani/`; diseño y registro en [ledger-contratos.md](ledger-contratos.md).
-3. **P2, inicialización** (V1).
+3. **P2, inicialización** (V1). **Hecho (2026-11-13):** `caiani/init.ts`, con V1 verificado contra el volcado del oráculo; registro en [inicializacion.md](inicializacion.md).
 4. **P3, reglas en el orden del tick de JMAB:** expectativas → precios → inversión → crédito y depósitos → trabajo → producción → consumo → pagos (salarios, intereses, impuestos, dividendos) → quiebras → bonos y reservas. Cada una con V2 y V3.
 5. **P4, reproducción** (V4, V5).
 6. **P5:** criterio de la Fase 0 y G = 0 sobre el port; costo por tick en el navegador con 8.000 hogares.

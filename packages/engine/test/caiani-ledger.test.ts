@@ -206,9 +206,10 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     expect(JSON.stringify(w.L)).toBe(before);
   });
 
-  it('préstamos iniciales (sec. 1): pagan saldo/20 y vencen con saldo, que se condona explícitamente', () => {
-    // Préstamo inicial con edad 19 (j = 18) y saldo 1.000 µ: JMAB le pone initialAmount = 1.000,
-    // paga 50 por cuota en las edades 19 y 20 y lo borra en la limpieza con 900 µ pendientes.
+  it('un préstamo que vence con saldo se condona explícitamente al cerrarse', () => {
+    // Préstamo con edad 19, saldo 1.000 µ e initialAmount = 1.000 (A/L = 50 por cuota): paga 50 en las
+    // edades 19 y 20 y la limpieza lo cierra con 900 µ pendientes. En la corrida base no pasa (los
+    // préstamos iniciales de JMAB cierran en cero, verificado en P2); es la salvaguarda de `cleanup`.
     const w = world();
     const loan = open(w.L, 'loan', w.b1, w.f, 1000, { rate: 0, length: 20, amortization: 'fixedCapital', age: 19 }, 'loans');
     credit(w.L, w.fDep1, 1000, 'loans');

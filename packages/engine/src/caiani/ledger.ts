@@ -128,7 +128,7 @@ export const FLOW_CATEGORIES = {
   advanceInterest: 'current',
   dividends: 'current',
   centralBankProfits: 'current',
-  /** Pérdida del tenedor y ganancia del emisor: quiebras, quitas, condonación de préstamos iniciales. */
+  /** Pérdida del tenedor y ganancia del emisor: quiebras, quitas, préstamos que vencen con saldo. */
   writeOff: 'current',
   loans: 'financial',
   advances: 'financial',
@@ -153,7 +153,10 @@ export interface LedgerStats {
   negativeReservesBank: number;
   /** Lo mismo para la cuenta del gobierno en el BC (en JMAB queda negativa por diseño con déficit). */
   negativeReservesGovernment: number;
-  /** Préstamos y adelantos que la limpieza cerró con saldo (condonación implícita de JMAB, sec. 1). */
+  /**
+   * Préstamos y adelantos que la limpieza cerró con saldo (JMAB los borra sin registrar). En la corrida
+   * base no debería pasar: los préstamos iniciales cierran en cero (verificado en P2, inicializacion.md).
+   */
   writtenOffAtExpiry: number;
 }
 
@@ -460,7 +463,7 @@ export function payTo(ledger: Ledger, from: ContractId, payee: AgentId, amount: 
  *   cuota difiere de A/L en menos de 1 µ y la suma de las cuotas de las edades 1..L es exactamente A,
  *   así que el préstamo cierra en cero (adaptación aprobada por Nico, 2026-11-13; en JMAB el redondeo
  *   de double deja residuos que `cleanSM` borra sin registrar). Los préstamos iniciales, que arrancan
- *   con edad > 1, pagan las mismas cuotas que en JMAB y vencen con saldo (la condonación de la sec. 1).
+ *   con edad j + 1, tienen saldo A − redondeo(A·j/L) y cierran en cero (docs/inicializacion.md).
  * - capital, `onlyInterest`: todo el saldo cuando la edad llega a length.
  * El capital nunca supera el saldo.
  */
@@ -511,8 +514,9 @@ const AGING: readonly ContractKind[] = ['loan', 'bond', 'advance'];
  * adelante; suma 1 a la edad de préstamos, bonos y adelantos, y cierra:
  * - préstamos y adelantos con saldo 0 o edad > length (`Loan.remove`);
  * - bonos con maturity < edad (`Bond.remove`).
- * Un préstamo que cierra con saldo (los préstamos iniciales, sec. 1) se condona antes de cerrarlo
- * con un `writeOff` explícito; JMAB lo borra sin registrar el flujo. Un bono que cierra con saldo es
+ * Un préstamo que cierra con saldo se condona antes de cerrarlo con un `writeOff` explícito y se
+ * cuenta en `writtenOffAtExpiry`; JMAB lo borra sin registrar el flujo. En la corrida base no debería
+ * pasar (los préstamos iniciales cierran en cero; P2). Un bono que cierra con saldo es
  * un error del port (se rescata al vencer).
  */
 export function cleanup(ledger: Ledger, agent: AgentId): void {

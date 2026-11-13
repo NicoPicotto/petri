@@ -11,7 +11,10 @@
 - [x] **Ledger de contratos** (P1; decisiones de Nico del 2026-11-13): tolerancias de V3 en tres niveles, con un contador de decisiones discretas que se dan vuelta dentro de la tolerancia; reservas negativas durante el tick como en JMAB, con contador; última cuota que cierra en cero, documentada como diferencia. **Implementado** en `packages/engine/src/caiani/` ([ledger-contratos.md](ledger-contratos.md), sec. 4).
 - [ ] **P3, a verificar con el oráculo:** en qué etapas quedan reservas negativas (bancos y cuenta del gobierno) y si después del mercado de adelantos vuelven a ser ≥ 0 (contadores `negativeReservesBank` y `negativeReservesGovernment` del ledger).
 - [ ] **P3, arnés de V3:** contador de decisiones discretas que se dan vuelta dentro de la tolerancia (decisión de Nico, 2026-11-13); el `Rng` en modo oráculo ya anota las Bernoulli con p distinta (`pDiffs`).
-- [ ] **P2, inicialización:** reproducir los préstamos iniciales de JMAB (edad j + 1, initialAmount = saldo actual) y su condonación al vencer, y verificarla con el oráculo.
+- [x] **P2, inicialización (V1 cumplido, 2026-11-13):** `caiani/init.ts`, verificado contra el volcado del oráculo agente por agente ([inicializacion.md](inicializacion.md)). Corrige lo anotado en P1: los préstamos iniciales **no** se condonan, cierran en cero a la edad 20.
+- [ ] **Decidir (P2 → P3): algoritmo de las mezclas en modo PRNG.** `AgentList.shuffle` de JMAB no es uniforme (intercambia cada posición con una de toda la lista); el `Rng` del port usa Fisher–Yates. Propuesta: usar el algoritmo de JMAB en modo PRNG para que la distribución de órdenes sea la del `.jar` (importa para V4). Ver [inicializacion.md](inicializacion.md), sec. 6.
+- [ ] **P3: valor contable de los bienes reales** en `double` (como JMAB, hoy) o en µ; se decide cuando entren sus flujos.
+- [x] **Efectivo de los hogares** (rama rara de `Households.payTaxes`): nadie arranca con efectivo y `DepositMechanism` lo mantiene en 0 (`shareDeposits = 1`). Verificación empírica en [inicializacion.md](inicializacion.md), sec. 5.
 - [ ] **(Opcional) Origen de la tabla publicada:** no se sabe qué versión o configuración la generó. No bloquea el port.
 - [x] **Escala monetaria del ledger** (P1; **aprobada por Nico el 2026-11-12**):
   - **Propuesta:** saldos enteros con 1 unidad de Caiani = 10⁶ unidades del ledger.

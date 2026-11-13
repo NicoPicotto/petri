@@ -48,10 +48,9 @@ Tipos (`StaticValues.SM_*`):
 - Recorre los activos de atrás para adelante, hace `update()` (`age += 1`) y saca los ítems con `remove()`: préstamo con `value == 0 || age > length`, bono con `maturity < age`.
 - El ítem se saca de las dos listas; el resto conserva el orden.
 
-**Particularidad de las condiciones iniciales** (a verificar con el oráculo en P2):
-- El inicializador crea préstamos ya empezados (edad j + 1, saldo = original × (20 − j)/20 / (1 + g)ʲ). Les pone `initialAmount = saldo actual` (lo hace el constructor), así que pagan `saldo/20` por trimestre y no `original/20`.
-- Al cumplir `age > 20` se sacan **con saldo pendiente**: es una condonación implícita en los primeros ~20 trimestres.
-- Queda fuera de la ventana de V4, pero V1 y V3 la tienen que reproducir.
+**Préstamos de las condiciones iniciales** (verificado con el oráculo en P2, 2026-11-13; [inicializacion.md](inicializacion.md)):
+- El inicializador crea préstamos ya empezados: edad j + 1, saldo = original × (20 − j)/20, con original = préstamo por empresa / (1 + g)ʲ.
+- **Corrección (P2):** acá se había anotado que quedaban con `initialAmount = saldo actual` (lo que hace el constructor) y que vencían con saldo pendiente, una condonación implícita. **Es falso:** el inicializador llama después a `loan.setInitialAmount(original)`, y el volcado del oráculo lo confirma. Pagan original/20 por trimestre y **cierran en cero exactamente a la edad 20**. No hay condonación.
 
 ## 2. Diseño
 
@@ -62,7 +61,7 @@ Tipos (`StaticValues.SM_*`):
 - **Lo que no es dinero se guarda en `double`:** precios, tasas, expectativas, márgenes, cantidades reales. Se calcula con las cuatro operaciones (principio 4).
 - **Conversión:** `toMicro(x) = Math.round(x × 10⁶)`. Es determinista: `Math.round` es exacta según el estándar. Todo flujo calculado en `double` (interés, salario × trabajadores, impuesto) pasa por `toMicro` una sola vez, en el momento de registrarlo.
 - **Repartos proporcionales** (dividendos a 8.000 hogares, liquidez de una empresa quebrada entre sus acreedores, quitas): método de restos mayores, con desempate por id. La suma de las partes es exactamente el total.
-- **Última cuota de un préstamo:** paga el saldo que quede, para que el préstamo cierre en cero. Es una adaptación documentada: en JMAB el redondeo de `double` deja residuos que `cleanSM` borra en silencio. La condonación de los préstamos iniciales (sec. 1) se reproduce aparte, como flujo explícito.
+- **Última cuota de un préstamo:** paga el saldo que quede, para que el préstamo cierre en cero. Es una adaptación documentada: en JMAB el redondeo de `double` deja residuos que `cleanSM` borra en silencio. (Acá decía que la condonación de los préstamos iniciales se reproducía aparte; esa condonación no existe, ver sec. 1.)
 
 ### 2.2 Contratos
 
@@ -103,7 +102,7 @@ Cada operación recibe la **categoría de flujo** (fila de la matriz de transacc
 | `pay(from, to, amount, flow)` | Baja el contrato `from` y sube `to`. Si los emisores difieren, liquida con reservas (abajo) | salarios, consumo, inversión, impuestos, dividendos, seguro de desempleo |
 | `accrue(contract, amount, flow)` | Sube el saldo: el emisor le paga al tenedor sin movimiento de dinero | interés de los depósitos |
 | `amortize(loan, principal, interest, from, flow)` | Paga interés y capital desde la cuenta `from` (con liquidación si el banco es otro) | servicio de la deuda, adelantos, bonos al vencer |
-| `writeDown(contract, amount, flow)` | Baja el saldo sin contrapartida: pérdida del tenedor, ganancia del emisor | quiebras, quita a los depositantes en el rescate, condonación de los préstamos iniciales |
+| `writeDown(contract, amount, flow)` | Baja el saldo sin contrapartida: pérdida del tenedor, ganancia del emisor | quiebras, quita a los depositantes en el rescate, préstamos que vencen con saldo (no debería pasar en la corrida base) |
 | `cleanup(agent)` | `age += 1` y cierre de contratos vencidos o en cero, como `cleanSM` | fin del tick |
 
 **Liquidación de `pay`** (sigue a `AbstractBank.transfer` y `CentralBank.transfer`):
@@ -178,8 +177,8 @@ Módulo `packages/engine/src/caiani/`: `money.ts`, `ledger.ts` (lleva el encabez
 
 **Cambios respecto del diseño de la sec. 2** (de forma, salvo que se diga):
 - **Operaciones.** `accrue` pasó a ser `credit`, que sube un saldo con el emisor como contraparte: sirve para el interés capitalizado y también para acreditar un préstamo o una compra de bonos del BC. Se sumó `debit`, la inversa: baja un saldo pagándole al emisor con un pasivo del propio emisor (amortización, interés de un adelanto pagado con reservas). `writeDown` es un `debit` con categoría `writeOff`. `amortize` quedó partida en `payTo` (pago a un banco o al BC desde una cuenta, con liquidación si el banco de la cuenta es otro, como `CapitalFirm.payInterests`) y `serviceLoan`, que la usa.
-- **Cuota de capital (decisión 3).** La cuota de la edad a es redondeo(A·a/L) − redondeo(A·(a − 1)/L), con A = initialAmount y L = length. Cada cuota difiere de A/L (lo que paga JMAB) en menos de 1 µ y las cuotas de las edades 1 a L suman exactamente A, así que el préstamo cierra en cero sin un caso especial para la última. Los préstamos iniciales, que arrancan con edad j + 1, pagan las mismas cuotas que en JMAB y vencen con saldo.
-- **Condonación al vencer.** La limpieza (`cleanup`) condona con un `writeOff` explícito el saldo de un préstamo o adelanto que se cierra con saldo (lo que JMAB borra sin registrar), y lo cuenta en `writtenOffAtExpiry`. En la corrida base solo debería pasar con los préstamos iniciales; si pasa con otros, es una señal para investigar. Un bono que vence sin rescatar es un error del port.
+- **Cuota de capital (decisión 3).** La cuota de la edad a es redondeo(A·a/L) − redondeo(A·(a − 1)/L), con A = initialAmount y L = length. Cada cuota difiere de A/L (lo que paga JMAB) en menos de 1 µ y las cuotas de las edades 1 a L suman exactamente A, así que el préstamo cierra en cero sin un caso especial para la última. Los préstamos iniciales, que arrancan con edad j + 1, se abren con saldo A − redondeo(A·j/L) (P2), así que también cierran en cero.
+- **Condonación al vencer.** La limpieza (`cleanup`) condona con un `writeOff` explícito el saldo de un préstamo o adelanto que se cierra con saldo (lo que JMAB borra sin registrar), y lo cuenta en `writtenOffAtExpiry`. En la corrida base no debería pasar nunca (los préstamos iniciales cierran en cero, sec. 1); si pasa, es una señal para investigar. Un bono que vence sin rescatar es un error del port.
 - **Contadores de reservas negativas (decisión 2).** Hay dos: `negativeReservesBank` y `negativeReservesGovernment`. Cuentan las veces que una operación lleva un saldo de ≥ 0 a < 0. Se separan porque **la cuenta del gobierno en el BC queda negativa por diseño**: `Government.emitBonds` lee el déficit como el saldo negativo de esa cuenta y emite bonos por ese monto. Lo de los bancos es lo que hay que verificar en P3.
 - **Categorías de flujo** (`FLOW_CATEGORIES`). Corrientes, que cambian el patrimonio financiero: consumo, salarios, seguro de desempleo, inversión, impuestos, intereses de depósitos, de bonos, de préstamos y de adelantos, dividendos, ganancias del BC y `writeOff`. Financieras, que solo cambian la composición del balance: préstamos, adelantos, bonos y depósitos (movimientos entre cuentas propias y entre efectivo y depósitos). La invariante de columnas usa esa clasificación, así que un pago corriente mal clasificado como financiero se detecta (hay un test). Las ganancias de capital en inventarios y la amortización del capital son flujos sin dinero y entran en P3 con los bienes reales.
 - **Movimientos** por (tipo, sector del tenedor, sector del emisor) en un arreglo plano, y no en un objeto con claves de texto (sec. 2.2).
@@ -194,7 +193,7 @@ Módulo `packages/engine/src/caiani/`: `money.ts`, `ledger.ts` (lleva el encabez
 - **Verificado con el registro real** de la corrida "a" del oráculo (212.680 sorteos, ticks 1 a 6): el test los relee en orden y comprueba que cada valor llega exacto. Por separado, los dígitos de los 109.998 valores `double` registrados por Java coinciden con la representación más corta (la de JS), así que `parseFloat` recupera el mismo `double`.
 
 **Tests** (`packages/engine/test/caiani-*.test.ts`, 49 en total; corren en `pnpm test`):
-- casos a mano de cada operación: pagos en el mismo banco y entre bancos, desde y hacia la cuenta del gobierno, efectivo, préstamo en un banco nuevo, cuotas, condonación de préstamos iniciales, adelantos, bonos, intereses, quitas y limpieza;
+- casos a mano de cada operación: pagos en el mismo banco y entre bancos, desde y hacia la cuenta del gobierno, efectivo, préstamo en un banco nuevo, cuotas, condonación de un préstamo que vence con saldo, adelantos, bonos, intereses, quitas y limpieza;
 - propiedades: 6.000 operaciones al azar con 5 semillas, con las invariantes en cada tick y la atomicidad de las operaciones que fallan;
 - repartos por restos mayores;
 - normal plegada: cuantiles, momentos, Kolmogorov–Smirnov, monotonía y determinismo;
