@@ -2249,3 +2249,42 @@ export function bondInterestEvent(s: CaianiState): SettleReport {
   for (const id of redeemed) contractOf(L, id).quantity = 0;
   return report;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Evento 23: servicio de los adelantos del BC
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 23, `advInterestTic` (TIC_ADVINTERESTS): los bancos, en orden de creación (`Bank.onTicArrived` 206–208 →
+ * `Bank.payInterests`, 299–330). Sin sorteos. `advancesInterests` = 0 y, por cada adelanto de la lista de pasivos
+ * del banco con edad > 0, en orden:
+ * - interés = tasa × saldo; capital según la amortización: `ONLY_INTERESTS` (la de los adelantos, XML), el monto
+ *   inicial cuando edad = plazo; `FIXED_CAPITAL`, monto inicial / plazo; `FIXED_AMOUNT` usa `Math.pow` y no está
+ *   portado (no se usa en el base: `stateFromDump` y la inicialización no lo admiten);
+ * - `advancesInterests` += interés; las reservas del banco bajan interés + capital (el BC cobra bajando su pasivo)
+ *   y el adelanto baja el capital. JMAB no mira el saldo de las reservas (pueden quedar negativas, como en JMAB).
+ * Los montos son los de `rawInstallments` (las mismas reglas que el evento 20: con "solo intereses" el capital es
+ * el saldo, que en un adelanto es el monto inicial; ledger-contratos.md, sec. 4) y van al lote (`interest` y
+ * `repay` con un adelanto: categorías `advanceInterest` y `advances`), con redondeo controlado.
+ */
+export function advanceInterestEvent(s: CaianiState): SettleReport {
+  const L = s.ledger;
+  const batch = new PaymentBatch(L);
+  for (const b of s.banks) {
+    const reserves = contractIds(L, b.id, 'assets', 'reserves')[0];
+    if (reserves === undefined) throw new Error(`banco ${b.id} sin reservas`);
+    const advances = contractIds(L, b.id, 'liabilities', 'advance');
+    const raw = rawInstallments(L, b.id, 'advance');
+    let interests = 0;
+    advances.forEach((id, i) => {
+      const a = contractOf(L, id);
+      if (a.age <= 0) return;
+      const due = raw[i]!;
+      interests += due.interest / MICRO_PER_UNIT; // JMAB: iRate × loan.getValue(), en double
+      batch.payLoan('interest', reserves, id, due.interest);
+      batch.payLoan('repay', reserves, id, Math.min(due.principal, a.amount));
+    });
+    b.advancesInterests = toMicro(interests);
+  }
+  return batch.settle();
+}

@@ -358,6 +358,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
       totInterestsDeposits: toMicro(j['totInterestsDeposits']),
       bondInterestRate: j['bondInterestRate'],
       bondInterestReceived: toMicro(j['bondInterestReceived']),
+      advancesInterests: toMicro(j['advancesInterests']),
     };
   });
   const gov = firstOf('government');
@@ -785,6 +786,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     amount(`${w} intereses pagados a depósitos`, b.totInterestsDeposits, j['totInterestsDeposits']);
     close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
     amount(`${w} intereses de bonos cobrados`, b.bondInterestReceived, j['bondInterestReceived']);
+    amount(`${w} intereses de adelantos`, b.advancesInterests, j['advancesInterests']);
     lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues']);
     expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
   }

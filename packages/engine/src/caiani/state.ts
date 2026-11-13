@@ -238,6 +238,8 @@ export interface BankState extends AgentFlags {
    * (`setBondInterestsReceived` asigna, no suma).
    */
   bondInterestReceived: Micro;
+  /** `Bank.advancesInterests` (µ): intereses de los adelantos del BC pagados en el tick (evento 23). */
+  advancesInterests: Micro;
 }
 
 export interface GovernmentState extends AgentFlags {

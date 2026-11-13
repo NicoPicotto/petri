@@ -71,12 +71,17 @@ export class PaymentBatch {
    * Anota un pago a un préstamo desde la cuenta `from` (`ledger.paymentRecords`): `interest` (al prestamista,
    * el préstamo no cambia), `repay` (capital: el préstamo baja; categoría `loans`) o `bailout` (aporte de los
    * dueños: el hogar paga y el préstamo de la empresa baja; categoría `ownersBailout`). Con un bono, `interest` y
-   * `repay` van con las categorías `bondInterest` y `bonds` (evento 22).
+   * `repay` van con las categorías `bondInterest` y `bonds` (evento 22); con un adelanto del BC, `advanceInterest` y
+   * `advances` (evento 23).
    */
   payLoan(kind: Exclude<PaymentKind, 'account' | 'bailoutRefund'>, from: ContractId, loan: ContractId, amount: number): number {
-    const bond = contractOf(this.ledger, loan).kind === 'bond';
+    const k = contractOf(this.ledger, loan).kind;
     const category: FlowCategory =
-      kind === 'interest' ? (bond ? 'bondInterest' : 'loanInterest') : kind === 'repay' ? (bond ? 'bonds' : 'loans') : 'ownersBailout';
+      kind === 'interest'
+        ? k === 'bond' ? 'bondInterest' : k === 'advance' ? 'advanceInterest' : 'loanInterest'
+        : kind === 'repay'
+          ? k === 'bond' ? 'bonds' : k === 'advance' ? 'advances' : 'loans'
+          : 'ownersBailout';
     return this.add(kind, from, loan, amount, category);
   }
 

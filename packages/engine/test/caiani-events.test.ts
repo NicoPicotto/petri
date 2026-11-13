@@ -38,6 +38,7 @@ import {
   creditInterestsEvent,
   wagePaymentEvent,
   bondInterestEvent,
+  advanceInterestEvent,
   installments,
   rawInstallments,
   closeContract,
@@ -1568,6 +1569,37 @@ describe('evento 22 (intereses y rescate de los bonos): casos a mano', () => {
   });
 });
 
+describe('evento 23 (servicio de los adelantos del BC): casos a mano', () => {
+  it('solo intereses, plazo 1: el banco paga interés y monto inicial con sus reservas; un adelanto de edad 0 no paga', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    const cb = s.centralBank.id;
+    const [b1, b2] = [s.banks[0]!, s.banks[1]!];
+    const terms = { rate: 0.005, length: 1, amortization: 'onlyInterest' as const };
+    // Banco 1: dos adelantos vencidos, 100 y 40,000001 (interés 0,5 + 0,200000005 = 0,700000005). Banco 2: uno
+    // de 30 con edad 0 (tomado en este tick: no paga).
+    const a1 = open(L, 'advance', cb, b1.id, 100_000_000, { ...terms, age: 1, initialAmount: 100_000_000 }, 'advances');
+    const a2 = open(L, 'advance', cb, b1.id, 40_000_001, { ...terms, age: 1, initialAmount: 40_000_001 }, 'advances');
+    const a3 = open(L, 'advance', cb, b2.id, 30_000_000, { ...terms, age: 0, initialAmount: 30_000_000 }, 'advances');
+    const res = (b: number) => contractOf(L, contractIds(L, b, 'assets', 'reserves')[0]!).amount;
+    const [r1, r2] = [res(b1.id), res(b2.id)];
+    const cp = beginPeriod(L);
+    advanceInterestEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(contractOf(L, a1).amount).toBe(0);
+    expect(contractOf(L, a2).amount).toBe(0);
+    expect(contractOf(L, a3).amount).toBe(30_000_000);
+    // Reservas del banco 1: − (100 + 40,000001) − 0,700000005 = −140,700001005 → a < 1 µ.
+    expect(Math.abs(r1 - res(b1.id) - 140_700_001.005)).toBeLessThan(1);
+    expect(res(b2.id)).toBe(r2);
+    expect(b1.advancesInterests).toBe(700_000); // toMicro(0,700000005)
+    expect(b2.advancesInterests).toBe(0);
+    expect(L.flowLog.filter((r) => r.category === 'advanceInterest').length).toBe(2);
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–37. */
@@ -1580,6 +1612,11 @@ const RUNS = [
   // Ejercita el techo sobre el neto (evento 19: depósito que cobra y paga todo) y el aporte negativo (evento 20:
   // la pérdida total de 8164 cruza 0 en el último hogar). reglas-caiani.md, sec. 18 y 19.
   { run: 'p3-t108', tick: 108 },
+  // Semilla 102: el único adelanto del BC con saldo en el tick 292 (banco 8256, 994,90) se paga en el evento 23.
+  // PENDIENTE (2026-11-13): el evento 23 pasa (suelto), pero el 10 no: la empresa 8204 pide 6,6·10⁻¹⁴ de crédito
+  // (residuo de punto flotante de JMAB) y queda activa en el mercado; en µ es 0 y el port la desactiva
+  // (reglas-caiani.md, sec. 22). Se vuelve a sumar cuando Nico decida.
+  // { run: 'p3-s102-t293', tick: 293 },
 ];
 
 /**
@@ -1642,6 +1679,13 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
     run: (s) => {
       const r = bondInterestEvent(s);
       console.log(`evento 22, cierre del lote: ${JSON.stringify(r)}`);
+    },
+  },
+  {
+    e: 23,
+    run: (s) => {
+      const r = advanceInterestEvent(s);
+      console.log(`evento 23, cierre del lote: ${JSON.stringify(r)}`);
     },
   },
 ];

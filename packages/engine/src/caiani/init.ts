@@ -415,6 +415,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       totInterestsDeposits: 0,
       bondInterestRate: R.initialBankBondInterestRate, // propiedad del prototipo (XML 2298)
       bondInterestReceived: 0,
+      advancesInterests: 0,
     };
     open(ledger, 'cash', b.id, cb, toMicro(bCash), {}, 'deposits');
     open(ledger, 'reserves', b.id, cb, toMicro(bRes), { rate: 0 }, 'deposits');
