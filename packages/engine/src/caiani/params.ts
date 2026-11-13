@@ -187,6 +187,37 @@ export interface RuleParams {
   depositRateAdaptive: number; // 2518
   depositRateIncrease: boolean; // 2516
   depositRateSigma: number; // 2988
+  /** `ProfitsWealthTaxStrategy.profitTaxRate` de las empresas (`profitTaxVal`, XML 1880): la usa el evento 9 para los impuestos esperados. */
+  profitTaxRate: number; // 1880
+  /**
+   * `FixedShareOfProfitsToPopulationAsShareOfWealthDividends.profitShare` de las empresas de capital (1895) y de
+   * consumo (2185): dividendos / ganancia después de impuestos. Lo usa el evento 9 para los dividendos esperados.
+   */
+  firmProfitShareCapital: number; // 1895
+  firmProfitShareConsumption: number; // 2185
+  /**
+   * `shareOfExpIncomeAsDeposit` de las empresas de capital (1548) y de consumo (2013): colchón de liquidez
+   * deseado, en masas salariales esperadas (evento 9).
+   */
+  shareOfExpIncomeAsDepositCapital: number; // 1548
+  shareOfExpIncomeAsDepositConsumption: number; // 2013
+  /** `AbstractFirm.loanLength` / `loanAmortizationType` (capital 1541–1542, consumo 2010–2011): 20 trimestres, capital fijo (0). */
+  firmLoanLength: number; // 1541, 2010
+  /** `SelectionRandomRobinBuyerMixer.nbSellers` del mercado de crédito: bancos que ve cada empresa (evento 10). */
+  creditMarketSellers: number; // 333
+  /**
+   * `SwitchingStrategySimple` del prestamista (`switchingStrategy1`): λ = −ln(0,5) / thresholdMean, con
+   * thresholdMean = 0,15 (1767) y `payOrReceive` = true (1769).
+   */
+  lenderSwitchingLambda: number;
+  lenderSwitchingPayOrReceive: boolean; // 1769
+  /** `Bank.riskAversionC` / `riskAversionK`: aversión al riesgo con empresas de consumo y de capital (`DeterministicLogisticCashFlowComputer`). */
+  riskAversionC: number; // 2286
+  riskAversionK: number; // 2287
+  /** `ExpectedReturnCreditSupply.haircut` (`haircutVal`): parte del valor del capital que se recupera en una quiebra. */
+  creditSupplyHaircut: number; // 1889
+  /** `Bank.bondInterestRate` inicial (propiedad del prototipo del banco); lo actualiza el mercado de bonos. */
+  initialBankBondInterestRate: number; // 2298
 }
 
 /**
@@ -218,4 +249,17 @@ export const RULES: Readonly<RuleParams> = {
   depositRateAdaptive: 1,
   depositRateIncrease: false,
   depositRateSigma: 0.0094,
+  profitTaxRate: 0.18,
+  firmProfitShareCapital: 0.9,
+  firmProfitShareConsumption: 0.9,
+  shareOfExpIncomeAsDepositCapital: 1,
+  shareOfExpIncomeAsDepositConsumption: 1,
+  firmLoanLength: 20,
+  creditMarketSellers: 3,
+  lenderSwitchingLambda: LN2 / 0.15,
+  lenderSwitchingPayOrReceive: true,
+  riskAversionC: 3.922445,
+  riskAversionK: 21.513347,
+  creditSupplyHaircut: 0.5,
+  initialBankBondInterestRate: 0.0025,
 };

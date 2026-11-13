@@ -244,6 +244,9 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     desiredCapacityGrowth: 0,
     desiredRealCapitalDemand: 0,
     interestReceived: 0,
+    debtBurden: 0,
+    debtInterests: 0,
+    creditDemanded: 0,
     lags: {},
     expectations: {},
   });
@@ -399,6 +402,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       totalLoanSupply: 0, // valor por defecto del campo en Java
       depositInterestRate: R.initialDepositInterestRate, // propiedad del prototipo (XML 2299)
       totInterestsDeposits: 0,
+      bondInterestRate: R.initialBankBondInterestRate, // propiedad del prototipo (XML 2298)
     };
     open(ledger, 'cash', b.id, cb, toMicro(bCash), {}, 'deposits');
     open(ledger, 'reserves', b.id, cb, toMicro(bRes), { rate: 0 }, 'deposits');

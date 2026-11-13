@@ -23,6 +23,20 @@ import {
   creditSupplyEvent,
   depositSupplyEvent,
   depositInterestEvent,
+  creditDemandEvent,
+  creditMarketEvent,
+  expectedReturnCreditSupply,
+  logisticDefaultProbability,
+  loanInterestRate,
+  RULES,
+  debtPayments,
+  peckingOrderCreditDemand,
+  consumptionFinancialRequirement,
+  capitalFinancialRequirement,
+  createLedger,
+  addAgent,
+  open,
+  EXPECTATION,
   contractIds,
   contractOf,
   type AdaptiveRateParams,
@@ -368,9 +382,243 @@ describe('eventos 7 y 8 (depósitos): casos a mano', () => {
   });
 });
 
+describe('evento 9 (demanda de crédito): casos a mano', () => {
+  it('servicio de la deuda: nada con edad 0; capital fijo A/L e interés tasa × saldo; solo intereses al vencer', () => {
+    const L = createLedger();
+    const bank = addAgent(L, 'bank');
+    const firm = addAgent(L, 'consumptionFirm');
+    // Préstamo de 100 a 20 trimestres, edad 0 (dado este tick): no se paga.
+    open(L, 'loan', bank, firm, 100_000_000, { rate: 0.01, age: 0, length: 20, amortization: 'fixedCapital' }, 'loans');
+    // Préstamo de 200 a 20 trimestres, edad 3, saldo 170: interés 0,01·170 = 1,7; capital 200/20 = 10.
+    open(L, 'loan', bank, firm, 170_000_000, { rate: 0.01, age: 3, length: 20, amortization: 'fixedCapital', initialAmount: 200_000_000 }, 'loans');
+    // Solo intereses, a 4 trimestres, edad 4 (vence): interés 0,02·50 = 1 y todo el capital, 50.
+    open(L, 'loan', bank, firm, 50_000_000, { rate: 0.02, age: 4, length: 4, amortization: 'onlyInterest' }, 'loans');
+    expect(debtPayments(L, firm)).toEqual({ burden: 1_700_000 + 10_000_000 + 1_000_000 + 50_000_000, interests: 2_700_000 });
+  });
+
+  it('PeckingOrderTheory: crédito = max(requerimiento − (depósitos + efectivo), 0)', () => {
+    const L = createLedger();
+    const bank = addAgent(L, 'bank');
+    const cb = addAgent(L, 'centralBank');
+    const firm = addAgent(L, 'capitalFirm');
+    open(L, 'deposit', firm, bank, 30_000_000, {}, 'deposits');
+    open(L, 'cash', firm, cb, 5_000_000, {}, 'deposits');
+    expect(peckingOrderCreditDemand(L, firm, 50)).toBe(15_000_000); // 50 − 35
+    expect(peckingOrderCreditDemand(L, firm, 35)).toBe(0); // igual a la liquidez: no pide
+    expect(peckingOrderCreditDemand(L, firm, -10)).toBe(0);
+  });
+
+  /** Empresa del estado inicial con expectativas fijadas a mano. */
+  function withExpectations(f: FirmState, nominalSales: number, realSales: number, wages: number) {
+    f.expectations[EXPECTATION.NOMINALSALES]!.expectation = nominalSales;
+    f.expectations[EXPECTATION.REALSALES]!.expectation = realSales;
+    f.expectations[EXPECTATION.WAGES]!.expectation = wages;
+  }
+
+  it('requerimiento de la empresa de consumo (CopyOfConsumptionFirm2WagesEnd.computeCreditDemand)', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const c = s.consumptionFirms[0]!;
+    const k = s.capitalFirms[0]!;
+    withExpectations(c, 400, 320, 5);
+    // 20 añadas de 20 (productividad 1, capital/trabajo 6,4): producir 320 → 50 trabajadores; N·wᵉ = 250.
+    c.desiredOutput = 320;
+    c.consumptionGoods[0]!.quantity = 32.7; // ⌊32,7⌋ = 32 = 0,1·320: el término del inventario da 0
+    c.consumptionGoods[0]!.unitCost = 0.8;
+    // Añadas con edades 0..19, precio 2, amortización 20: cada una 20·2/20 = 2 → 40. Una de edad −1 no cuenta.
+    c.capitalGoods.forEach((g, i) => {
+      g.age = i;
+      g.price = 2;
+      g.amortization = 20;
+    });
+    c.interestReceived = 1_000_000;
+    c.debtInterests = 3_000_000;
+    c.debtBurden = 10_000_000;
+    // Inversión: 10 unidades al precio del PRIMER vendedor visto (2,5), aunque el proveedor elegido sea otro.
+    c.desiredRealCapitalDemand = 10;
+    k.capitalGoods[0]!.price = 2.5;
+    c.selectedCapitalSuppliers = [k.id, s.capitalFirms[1]!.id];
+    s.capitalFirms[1]!.capitalGoods[0]!.price = 99;
+    // Πᵉ = 400 − 250 + 1 − 3 + 0 − 40 = 108; impuestos 108·0,18 = 19,44; dividendos 108·0,82·0,9 = 79,704.
+    // Requerimiento = 250 + 25 + 10 − 1 + 19,44 + 79,704 − 400 + 1·250 = 233,144.
+    expect(consumptionFinancialRequirement(s, c)).toBeCloseTo(233.144, 9);
+    c.capitalGoods[0]!.age = -1; // sin esa añada (0 ≤ edad falla): amortización 38, Πᵉ = 110
+    expect(consumptionFinancialRequirement(s, c)).toBeCloseTo(250 + 25 + 10 - 1 + 110 * 0.18 + 110 * 0.82 * 0.9 - 400 + 250, 9);
+  });
+
+  it('requerimiento de la empresa de capital (CopyOfCapitalFirm2WagesEnd.computeCreditDemand)', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const k = s.capitalFirms[0]!;
+    withExpectations(k, 60, 50, 5);
+    k.desiredOutput = 21; // 21 / 2 = 10,5 → Math.round de Java: 11 trabajadores; N·wᵉ = 55
+    k.capitalGoods[0]!.quantity = 5.7; // ⌊5,7⌋ = 5 = 0,1·50
+    k.capitalGoods[0]!.unitCost = 2.5;
+    k.interestReceived = 500_000;
+    k.debtInterests = 1_000_000;
+    k.debtBurden = 4_000_000;
+    k.amountResearch = 12; // ⌊12/5⌋·5 = 10
+    // Πᵉ = 60 − 55 + 0,5 − 1 + 0 = 4,5; impuestos 0,81; dividendos 4,5·0,82·0,9 = 3,321.
+    // Requerimiento = 55 + 10 + 4 − 0,5 + 3,321 + 0,81 − 60 + 1·55 = 67,631.
+    expect(capitalFinancialRequirement(s, k)).toBeCloseTo(67.631, 9);
+  });
+
+  it('evento 9 sobre el estado inicial: servicio de la deuda, crédito pedido y activa en crédito si pide', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    computeExpectationsEvent(s);
+    for (const c of s.consumptionFirms) c.selectedCapitalSuppliers = [s.capitalFirms[0]!.id];
+    creditDemandEvent(s);
+    for (const f of [...s.consumptionFirms, ...s.capitalFirms]) {
+      expect(f.debtBurden).toBe(debtPayments(s.ledger, f.id).burden);
+      expect(f.debtBurden).toBeGreaterThan(0); // los préstamos iniciales tienen edad ≥ 1
+      expect(f.active[MKT.CREDIT]).toBe(f.creditDemanded > 0);
+    }
+  });
+});
+
+describe('evento 10 (mercado de crédito): casos a mano', () => {
+  it('tasa del préstamo: max(tasa del banco, tasa de bonos)', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const b = s.banks[0]!;
+    b.bankInterestRate = 0.008;
+    b.bondInterestRate = 0.0025;
+    expect(loanInterestRate(b)).toBe(0.008);
+    b.bankInterestRate = 0.001;
+    expect(loanInterestRate(b)).toBe(0.0025);
+  });
+
+  it('probabilidad de default logística: 1 / (1 + e^{(OCF − a·cuota)/cuota}), cuota = r·m + m/plazo', () => {
+    // m = 100, r = 0,01, plazo 20: cuota = 1 + 5 = 6. OCF = 30, a = 3,922445: exponente (30 − 23,53467)/6.
+    const x = (30 - 3.922445 * 6) / 6;
+    expect(logisticDefaultProbability(30, 0.01, 100, 20, 3.922445)).toBeCloseTo(1 / (1 + Math.exp(x)), 12);
+    // Monto 0: cuota 0, exponente ±∞ → p = 0 (OCF > 0) o 1 (OCF < 0), como Java; 0/0 → NaN.
+    expect(logisticDefaultProbability(30, 0.01, 0, 20, 3.9)).toBe(0);
+    expect(logisticDefaultProbability(-30, 0.01, 0, 20, 3.9)).toBe(1);
+    expect(logisticDefaultProbability(0, 0.01, 0, 20, 3.9)).toBeNaN();
+  });
+
+  /** ExpectedReturnCreditSupply escrito directo de JMAB, con Math.pow y Math.exp (solo para el test). */
+  function javaSupply(required: number, ocf: number, r: number, a: number, recovered: number): number {
+    const D = 20;
+    const s = 1 / D;
+    for (let i = 0; i < 101; i++) {
+      const m = required * (1 - i / 100);
+      const pay = r * m + m / D;
+      const p = 1 / (1 + Math.exp((ocf - a * pay) / pay));
+      let er = 0;
+      for (let t = 0; t < D; t++) er += Math.pow(1 - p, t) * (-1 + s * t) * m * (1 - recovered) + Math.pow(1 - p, t + 1) * r * m;
+      for (let t = 1; t < D - 1; t++) er += Math.pow(1 - p, t + 1) * (t - 0.5 * t * s * (1 + t)) * r * m;
+      er *= p;
+      er += Math.pow(1 - p, D) * r * m * (D - 0.5 * (D - 1) * s * D);
+      if (er >= 0) return m;
+    }
+    return 0;
+  }
+
+  it('oferta por rendimiento esperado: el primer monto pedido·(1 − i/100) con rendimiento ≥ 0', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const c = s.consumptionFirms[0]!;
+    const b = s.banks[0]!;
+    b.bankInterestRate = 0.0075;
+    b.bondInterestRate = 0.0025;
+    // Recupero esperado = min(1, Σ valor del capital × 0,5 / Σ deuda).
+    let debt = 0;
+    for (const id of contractIds(s.ledger, c.id, 'liabilities', 'loan')) debt += contractOf(s.ledger, id).amount / 1e6;
+    let cap = 0;
+    for (const g of c.capitalGoods) cap += g.value * 0.5;
+    const rec = Math.min(1, cap / debt);
+    // Tres flujos de caja: sobrado (presta todo), justo (recorta) y negativo (no presta).
+    for (const [ocf, a] of [
+      [1000, RULES.riskAversionC],
+      [40, RULES.riskAversionC],
+      [-50, RULES.riskAversionC],
+    ] as const) {
+      c.lags[LAG.OPERATINGCASHFLOW] = { 0: ocf };
+      expect(expectedReturnCreditSupply(s, b, c, 100, true)).toBeCloseTo(javaSupply(100, ocf, 0.0075, a, rec), 9);
+    }
+    c.lags[LAG.OPERATINGCASHFLOW] = { 0: 1000 };
+    expect(expectedReturnCreditSupply(s, b, c, 100, true)).toBe(100);
+    c.lags[LAG.OPERATINGCASHFLOW] = { 0: -50 };
+    expect(expectedReturnCreditSupply(s, b, c, 100, true)).toBe(0);
+    // Con OCF 40 recorta: se verifica que el recorte coincide con el cálculo directo y que es intermedio.
+    c.lags[LAG.OPERATINGCASHFLOW] = { 0: 40 };
+    const cut = expectedReturnCreditSupply(s, b, c, 100, true);
+    expect(cut).toBeGreaterThan(0);
+    expect(cut).toBeLessThan(100);
+    // La empresa de capital usa la aversión K (21,51): con el mismo OCF le prestan menos.
+    const k = s.capitalFirms[0]!;
+    k.lags[LAG.OPERATINGCASHFLOW] = { 0: 40 };
+    expect(expectedReturnCreditSupply(s, b, k, 100, false)).toBeLessThan(cut);
+  });
+
+  /** Rng sin reordenar (las mezclas dejan la lista como está); cualquier Bernoulli tira error. */
+  function identityRng(log: string[]): CaianiRng {
+    const no = () => {
+      throw new Error('no se esperaba este sorteo');
+    };
+    return {
+      foldedNormal: no,
+      bernoulli: no,
+      shuffle: <T,>(_site: string, what: string, items: T[]) => {
+        log.push(what);
+        return items;
+      },
+      shuffleEmployees: no,
+      sample: no,
+      uniform01: no,
+    };
+  }
+
+  it('mercado: préstamo al prestamista previo, depósito nuevo si no tiene cuenta en ese banco; cerrado sin compradores activos', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    for (const b of s.banks) {
+      b.bankInterestRate = 0.0075; // todos iguales: nadie cambia de prestamista y no hay sorteos
+      b.bondInterestRate = 0.0025;
+      b.totalLoanSupply = Infinity;
+      b.active[MKT.CREDIT] = true;
+    }
+    for (const f of [...s.consumptionFirms, ...s.capitalFirms]) f.active[MKT.CREDIT] = false;
+    // Sin compradores activos: el mercado está cerrado y no se mezcla nada.
+    const log: string[] = [];
+    creditMarketEvent(s, identityRng(log));
+    expect(log).toEqual([]);
+
+    const [c0, c1] = s.consumptionFirms;
+    for (const c of [c0!, c1!]) {
+      c.lags[LAG.OPERATINGCASHFLOW] = { 0: 1e6 }; // sin riesgo: presta todo
+      c.active[MKT.CREDIT] = true;
+      c.creditDemanded = 50_000_000;
+    }
+    // c1: prestamista previo distinto del banco de su depósito.
+    const depBank1 = contractOf(s.ledger, contractIds(s.ledger, c1!.id, 'assets', 'deposit')[0]!).issuer;
+    const other = s.banks.find((b) => b.id !== depBank1)!;
+    other.depositInterestRate = 0.003;
+    c1!.previousLender = other.id;
+    const dep0 = contractIds(s.ledger, c0!.id, 'assets', 'deposit');
+    const dep0Before = contractOf(s.ledger, dep0[0]!).amount;
+    expect(contractOf(s.ledger, dep0[0]!).issuer).toBe(c0!.previousLender);
+    creditMarketEvent(s, identityRng(log));
+    // Una mezcla de compradores y una de vendedores por comprador activo.
+    expect(log).toEqual(['buyers', 'sellers', 'sellers']);
+    for (const c of [c0!, c1!]) {
+      const loans = contractIds(s.ledger, c.id, 'liabilities', 'loan');
+      const l = contractOf(s.ledger, loans[loans.length - 1]!);
+      expect(l).toMatchObject({ amount: 50_000_000, age: 0, rate: 0.0075, length: 20, amortization: 'fixedCapital', holder: c.previousLender });
+      expect(c.creditDemanded).toBe(0);
+      expect(c.active[MKT.CREDIT]).toBe(false);
+    }
+    // c0: se acredita en su depósito; c1: depósito nuevo en el otro banco, con su tasa de depósitos.
+    expect(contractOf(s.ledger, dep0[0]!).amount).toBe(dep0Before + 50_000_000);
+    const deps1 = contractIds(s.ledger, c1!.id, 'assets', 'deposit');
+    expect(deps1.length).toBe(2);
+    expect(contractOf(s.ledger, deps1[1]!)).toMatchObject({ issuer: other.id, amount: 50_000_000, rate: 0.003 });
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
-/** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–8. */
+/** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–14. */
 const RUNS = [
   { run: 'p3-t1', tick: 1 },
   { run: 'p3-t50', tick: 50 },
@@ -387,6 +635,8 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   { e: 6, run: creditSupplyEvent },
   { e: 7, run: depositSupplyEvent },
   { e: 8, run: (s) => depositInterestEvent(s) },
+  { e: 9, run: (s) => creditDemandEvent(s) },
+  { e: 10, run: creditMarketEvent },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 

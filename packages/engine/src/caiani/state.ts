@@ -176,6 +176,15 @@ export interface FirmState extends AgentFlags {
   desiredRealCapitalDemand: number;
   /** `ConsumptionFirm.interestReceived` / `CapitalFirm.interestReceived`: interés del depósito del tick (evento 8). */
   interestReceived: Micro;
+  /**
+   * `debtBurden` / `debtInterests` (`computeDebtPayments`, evento 9): cuotas (interés + capital) e
+   * intereses de los préstamos de la empresa en el tick, con `installment` del ledger. JMAB los vuelve a
+   * calcular en el evento 20 antes de pagar; la matriz `debtPayments` es de trabajo y no se porta.
+   */
+  debtBurden: Micro;
+  debtInterests: Micro;
+  /** `creditDemanded` (evento 9, `PeckingOrderTheory`): crédito pedido en el tick; lo baja el mercado de crédito. */
+  creditDemanded: Micro;
   lags: Lags;
   expectations: Expectations;
 }
@@ -202,6 +211,11 @@ export interface BankState extends AgentFlags {
   depositInterestRate: number;
   /** `Bank.totInterestsDeposits`: intereses pagados a los depósitos en el tick (evento 8). */
   totInterestsDeposits: Micro;
+  /**
+   * `Bank.bondInterestRate`: tasa de los bonos que vio en el mercado de bonos (primera etapa, eventos 29–37).
+   * Es el piso de la tasa de los préstamos (`Bank.getInterestRate`, evento 10).
+   */
+  bondInterestRate: number;
 }
 
 export interface GovernmentState extends AgentFlags {

@@ -294,6 +294,9 @@ export function stateFromDump(d: Dump): CaianiState {
       desiredCapacityGrowth: consumption ? j['ConsumptionFirm.desiredCapacityGrowth'] : 0,
       desiredRealCapitalDemand: consumption ? j['ConsumptionFirm.desiredRealCapitalDemand'] : 0,
       interestReceived: toMicro(j[consumption ? 'ConsumptionFirm.interestReceived' : 'CapitalFirm.interestReceived']),
+      debtBurden: toMicro(j[consumption ? 'ConsumptionFirm.debtBurden' : 'CapitalFirm.debtBurden']),
+      debtInterests: toMicro(j[consumption ? 'ConsumptionFirm.debtInterests' : 'CapitalFirm.debtInterests']),
+      creditDemanded: toMicro(j[consumption ? 'ConsumptionFirm.creditDemanded' : 'CapitalFirm.creditDemanded']),
       selectedCapitalSuppliers: agentRefs(j['ConsumptionFirm.selectedCapitalGoodSuppliers'], fromJ),
       lags: lagsOf(j['SimpleAbstractAgent.passedValues'], `empresa ${toJ(id)}`),
       expectations: expectationsOf(j['SimpleAbstractAgent.expectations']),
@@ -314,6 +317,7 @@ export function stateFromDump(d: Dump): CaianiState {
       totalLoanSupply: j['totalLoanSupply'],
       depositInterestRate: j['depositInterestRate'],
       totInterestsDeposits: toMicro(j['totInterestsDeposits']),
+      bondInterestRate: j['bondInterestRate'],
     };
   });
   const gov = firstOf('government');
@@ -470,6 +474,22 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
   const firmOf = new Map<AgentId, FirmState>();
   for (const f of [...s.consumptionFirms, ...s.capitalFirms]) firmOf.set(f.id, f);
 
+  // Préstamos dados en el tick (edad 0, evento 10) y depósitos donde se acreditan: su monto sale del crédito
+  // pedido (evento 9), que arrastra hasta 3 redondeos por préstamo previo de la empresa más 2.
+  const loanTol = new Map<number, number>();
+  for (const f of firmOf.values()) {
+    const loans = contractIds(s.ledger, f.id, 'liabilities', 'loan');
+    const tol = 3 * loans.length + 2;
+    for (const cid of loans) {
+      const l = contractOf(s.ledger, cid);
+      if (l.age !== 0) continue;
+      loanTol.set(cid, tol);
+      for (const d of contractIds(s.ledger, f.id, 'assets', 'deposit')) {
+        if (contractOf(s.ledger, d).issuer === l.holder) loanTol.set(d, (loanTol.get(d) ?? 0) + tol);
+      }
+    }
+  }
+
   // Contratos y bienes reales, agente por agente.
   for (let id = 0; id < s.ledger.agents.length; id++) {
     const j = agentJ(id);
@@ -493,13 +513,13 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
           counts.contracts++;
           same(`${w} tenedor`, toJ(c.holder), ref(it['AbstractItem.assetHolder']));
           same(`${w} emisor`, toJ(c.issuer), ref(it['AbstractItem.liabilityHolder']));
-          amount(`${w} saldo`, c.amount, it['AbstractItem.value']);
+          amount(`${w} saldo`, c.amount, it['AbstractItem.value'], loanTol.get(cid) ?? 0);
           same(`${w} edad`, c.age, it['AbstractItem.age']);
           if ('interestRate' in it) same(`${w} tasa`, c.rate, it['interestRate']);
           if (kind === 'loan' || kind === 'advance') {
             same(`${w} plazo`, c.length, it['length']);
             same(`${w} amortización`, c.amortization, AMORT[it['amortization'] as number]);
-            amount(`${w} initialAmount`, c.initialAmount as number, it['initialAmount']);
+            amount(`${w} initialAmount`, c.initialAmount as number, it['initialAmount'], loanTol.get(cid) ?? 0);
           }
           if (kind === 'bond') {
             same(`${w} cantidad`, c.quantity, it['AbstractItem.quantity']);
@@ -601,6 +621,13 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
     }
     if (j['CapitalFirm.amountResearch'] !== undefined) close(`${w} I+D`, f.amountResearch, j['CapitalFirm.amountResearch']);
     amount(`${w} intereses de depósitos`, f.interestReceived, j['ConsumptionFirm.interestReceived'] ?? j['CapitalFirm.interestReceived']);
+    // Suma de cuotas redondeadas a µ (`installment`): hasta 3 redondeos por préstamo (interés y las dos
+    // puntas del capital). El crédito pedido los arrastra, más el interés cobrado y su propio redondeo.
+    const loanRoundings = 3 * contractIds(s.ledger, f.id, 'liabilities', 'loan').length;
+    const jf = (k: string) => j[`ConsumptionFirm.${k}`] ?? j[`CapitalFirm.${k}`];
+    amount(`${w} servicio de la deuda`, f.debtBurden, jf('debtBurden'), loanRoundings);
+    amount(`${w} intereses de la deuda`, f.debtInterests, jf('debtInterests'), loanRoundings);
+    amount(`${w} crédito pedido`, f.creditDemanded, jf('creditDemanded'), loanRoundings + 2);
     const sel = (l: AgentId[] | null) => (l === null ? 'null' : l.map(toJ).join());
     const jsel = j['ConsumptionFirm.selectedCapitalGoodSuppliers'] as J[] | null | undefined;
     same(`${w} vendedores de capital vistos`, sel(f.selectedCapitalSuppliers), jsel === null || jsel === undefined ? 'null' : jsel.map(ref).join());
@@ -628,6 +655,7 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
       j['totInterestsDeposits'],
       contractIds(s.ledger, b.id, 'liabilities', 'deposit').length,
     );
+    close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
     lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues']);
     expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
   }

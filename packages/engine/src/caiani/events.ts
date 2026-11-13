@@ -16,9 +16,10 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { contractIds, contractOf, credit, firstAsset, netFinancialWorth, type AgentId, type ContractKind, type Ledger } from './ledger';
-import { toUnits, type Micro } from './money';
+import { contractIds, contractOf, credit, firstAsset, installment, netFinancialWorth, open, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { toMicro, toUnits, type Micro } from './money';
 import { expNeg } from '../detmath';
+import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
 import { ge, gt, lt, record, rounding } from './decisions';
 import {
@@ -28,6 +29,8 @@ import {
   getLag,
   setLag,
   updateExpectation,
+  goodValue,
+  type BankState,
   type CaianiState,
   type CapitalGoodStock,
   type Expectations,
@@ -45,6 +48,8 @@ export const EVENT = {
   CREDIT_SUPPLY: 6,
   DEPOSIT_SUPPLY: 7,
   DEPOSIT_INTEREST: 8,
+  CREDIT_DEMAND: 9,
+  CREDIT_MARKET: 10,
 } as const;
 
 /**
@@ -685,5 +690,360 @@ export function depositInterestEvent(s: CaianiState): void {
       credit(L, id, interest, 'depositInterest');
     }
     b.totInterestsDeposits = tot;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 9: demanda de crédito de las empresas
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * `computeDebtPayments` (`ConsumptionFirm` 355–396, `CapitalFirm` 490–530): por cada préstamo de la
+ * empresa (sus pasivos), con edad > 0, interés = tasa × saldo y capital según la amortización; con edad 0
+ * (dado en este tick), nada. Devuelve el servicio total (`debtBurden`) y los intereses (`debtInterests`).
+ * En µ, con `installment` del ledger (la misma cuota que se paga en el evento 20): difiere de la de JMAB
+ * en menos de ~1,5 µ por préstamo (ledger-contratos.md; reglas-caiani.md, sec. 10).
+ */
+export function debtPayments(L: Ledger, firm: AgentId): { burden: Micro; interests: Micro } {
+  let burden = 0;
+  let interests = 0;
+  for (const id of contractIds(L, firm, 'liabilities', 'loan')) {
+    const due = installment(contractOf(L, id));
+    burden += due.interest + due.principal;
+    interests += due.interest;
+  }
+  return { burden, interests };
+}
+
+/**
+ * `PeckingOrderTheory.computeCreditDemand` (XML 1855–1861 y 2152–2158, `stocksId` = [SM_DEP, SM_CASH]):
+ * crédito = max(requerimiento − (depósitos + efectivo), 0). El requerimiento llega en unidades de
+ * Caiani (double, como en JMAB) y se pasa a µ antes de restar.
+ */
+export const SITE_PECKING_ORDER = 'PeckingOrderTheory.computeCreditDemand';
+
+export function peckingOrderCreditDemand(L: Ledger, firm: AgentId, requirement: number): Micro {
+  const liquidity = sumContracts(L, firm, 'assets', 'deposit') + sumContracts(L, firm, 'assets', 'cash');
+  const req = toMicro(requirement);
+  return gt(`${SITE_PECKING_ORDER} requerimiento > liquidez`, req, liquidity, 'amount') ? req - liquidity : 0;
+}
+
+/** `ConsumptionFirm.getRequiredWorkers` (267–298): trabajadores para la producción deseada, `(int) Math.round`. */
+function consumptionRequiredWorkersInt(c: FirmState): number {
+  const w = requiredWorkers(c.capitalGoods, c.desiredOutput);
+  return rounding('ConsumptionFirm.getRequiredWorkers Math.round(trabajadores)', w, javaRoundToInt(w), 'pure');
+}
+
+function expectationOf(f: FirmState, id: number): number {
+  const e = f.expectations[id];
+  if (!e) throw new Error(`empresa ${f.id} sin expectativa ${id}`);
+  return e.expectation;
+}
+
+/**
+ * Requerimiento financiero de una empresa de consumo (`CopyOfConsumptionFirm2WagesEnd.computeCreditDemand`,
+ * 197–235), en unidades de Caiani y en el orden de evaluación de Java:
+ * - amortización = Σ cantidad × precio / amortización de las añadas con 0 ≤ edad < amortización (orden de la lista);
+ * - ganancia esperada Πᵉ = Sᵉ nominal − N·wᵉ + intereses cobrados − intereses de la deuda
+ *   + (0,1·Sᵉ real − ⌊inventario⌋)·costo unitario − amortización;
+ * - impuestos esperados = Πᵉ·τ; dividendos esperados = Πᵉ·(1 − τ)·profitShare;
+ * - inversión = demanda real de capital × precio del **primer** vendedor visto en el evento 3
+ *   (`selectedCapitalGoodSuppliers.get(0)`, no el proveedor elegido en el evento 5: así está en JMAB);
+ * - requerimiento = N·wᵉ + inversión + servicio de la deuda − intereses cobrados + impuestos + dividendos
+ *   − Sᵉ nominal + shareOfExpIncomeAsDeposit·N·wᵉ.
+ * N = `getRequiredWorkers()` (redondeado).
+ */
+export function consumptionFinancialRequirement(s: CaianiState, c: FirmState): number {
+  const r = s.rules;
+  const firstK = s.capitalFirms[0]!.id;
+  const expRealSales = expectationOf(c, EXPECTATION.REALSALES);
+  const inventories = c.consumptionGoods[0];
+  if (!inventories) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
+  const uc = inventories.unitCost;
+  const inv = Math.trunc(inventories.quantity); // (int) inventories.getQuantity()
+  const expRevenues = expectationOf(c, EXPECTATION.NOMINALSALES);
+  const nbWorkers = consumptionRequiredWorkersInt(c);
+  const expWages = wageExpectation(c);
+  let capitalAmortization = 0;
+  for (const cap of c.capitalGoods) {
+    if (cap.age >= 0 && cap.age < cap.amortization) capitalAmortization += (cap.quantity * cap.price) / cap.amortization;
+  }
+  const interestReceived = toUnits(c.interestReceived);
+  const expectedProfits =
+    expRevenues - nbWorkers * expWages + interestReceived - toUnits(c.debtInterests) + (r.inventoryShareConsumption * expRealSales - inv) * uc - capitalAmortization;
+  const expectedTaxes = expectedProfits * r.profitTaxRate;
+  const expectedDividends = expectedProfits * (1 - r.profitTaxRate) * r.firmProfitShareConsumption;
+  const firstSeller = c.selectedCapitalSuppliers?.[0];
+  if (firstSeller === undefined) throw new Error(`empresa de consumo ${c.id} sin vendedores de capital (JMAB: excepción en get(0))`);
+  const k = s.capitalFirms[firstSeller - firstK];
+  if (!k || k.id !== firstSeller) throw new Error(`el agente ${firstSeller} no es una empresa de capital`);
+  const kInv = k.capitalGoods[0];
+  if (!kInv) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException en getPrice)`);
+  const investment = c.desiredRealCapitalDemand * kInv.price;
+  return (
+    nbWorkers * expWages +
+    investment +
+    toUnits(c.debtBurden) -
+    interestReceived +
+    expectedTaxes +
+    expectedDividends -
+    expRevenues +
+    r.shareOfExpIncomeAsDepositConsumption * (nbWorkers * expWages)
+  );
+}
+
+/**
+ * Requerimiento financiero de una empresa de capital (`CopyOfCapitalFirm2WagesEnd.computeCreditDemand`,
+ * 195–222), en el orden de evaluación de Java. Como el de consumo, sin inversión ni amortización, con la
+ * I+D (⌊amountResearch / wᵉ⌋·wᵉ, 0 en el base) y con los dividendos sumados **antes** que los impuestos
+ * (el orden importa para el bit a bit). N = `CapitalFirm.getRequiredWorkers` (535–537) =
+ * `(int) Math.round(Y* / laborProductivity)`; inventario y costo unitario, los del primer bien de capital.
+ */
+export function capitalFinancialRequirement(s: CaianiState, k: FirmState): number {
+  const r = s.rules;
+  const expRealSales = expectationOf(k, EXPECTATION.REALSALES);
+  const inventories = k.capitalGoods[0];
+  if (!inventories) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
+  const uc = inventories.unitCost;
+  const inv = Math.trunc(inventories.quantity);
+  const x = k.desiredOutput / r.capitalLaborProductivity;
+  const nbWorkers = rounding('CapitalFirm.getRequiredWorkers Math.round(Y*/productividad)', x, javaRoundToInt(x), 'pure');
+  const expWages = wageExpectation(k);
+  const expRevenues = expectationOf(k, EXPECTATION.NOMINALSALES);
+  const interestReceived = toUnits(k.interestReceived);
+  const expectedProfits =
+    expRevenues - nbWorkers * expWages + interestReceived - toUnits(k.debtInterests) + (r.inventoryShareCapital * expRealSales - inv) * uc;
+  const expectedTaxes = expectedProfits * r.profitTaxRate;
+  const expectedDividends = expectedProfits * (1 - r.profitTaxRate) * r.firmProfitShareCapital;
+  return (
+    nbWorkers * expWages +
+    Math.floor(k.amountResearch / expWages) * expWages +
+    toUnits(k.debtBurden) -
+    interestReceived +
+    expectedDividends +
+    expectedTaxes -
+    expRevenues +
+    r.shareOfExpIncomeAsDepositCapital * (nbWorkers * expWages)
+  );
+}
+
+/**
+ * Evento 9, `creditDemandTic` (TIC_CREDITDEMAND). Lo escuchan las empresas de capital
+ * (`CopyOfCapitalFirm2WagesEnd.onTicArrived` 72–73) y las de consumo (`CopyOfConsumptionFirm2WagesEnd`
+ * 76–77), en orden de creación (no hay sorteos ni interacción: el orden no importa). Cada una:
+ * 1. `computeDebtPayments`: servicio de la deuda e intereses del tick;
+ * 2. requerimiento financiero (arriba) y crédito pedido con `PeckingOrderTheory`;
+ * 3. si el crédito pedido es > 0, queda activa en el mercado de crédito (nunca se desactiva acá).
+ */
+export function creditDemandEvent(s: CaianiState): void {
+  const L = s.ledger;
+  const demand = (f: FirmState, requirement: () => number) => {
+    const d = debtPayments(L, f.id);
+    f.debtBurden = d.burden;
+    f.debtInterests = d.interests;
+    f.creditDemanded = peckingOrderCreditDemand(L, f.id, requirement());
+    if (f.creditDemanded > 0) f.active[MKT.CREDIT] = true;
+  };
+  for (const k of s.capitalFirms) demand(k, () => capitalFinancialRequirement(s, k));
+  for (const c of s.consumptionFirms) demand(c, () => consumptionFinancialRequirement(s, c));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 10: mercado de crédito
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_CREDIT_MIXER = 'SelectionRandomRobinBuyerMixer.invokeInteractions';
+export const SITE_CREDIT_SUPPLY = 'ExpectedReturnCreditSupply.computeSpecificSupply';
+
+/** `Math.pow(b, n)` con n entero ≥ 0, como producto (principio 4: sin `pow`). No es bit a bit igual a Java. */
+function powInt(b: number, n: number): number {
+  let r = 1;
+  for (let k = 0; k < n; k++) r *= b;
+  return r;
+}
+
+/** `Bank.getInterestRate(idLoanSM, …)` (134–140): max(tasa del banco, tasa de bonos); el premio por empresa está comentado. */
+export function loanInterestRate(b: BankState): number {
+  return Math.max(b.bankInterestRate, b.bondInterestRate);
+}
+
+/**
+ * `DeterministicLogisticCashFlowComputer.getDefaultProbability`: con OCF el flujo de caja operativo del
+ * período anterior (`LAG_OPERATINGCASHFLOW`, 1), cuota = tasa × monto + monto / plazo y a la aversión al
+ * riesgo del banco con ese tipo de empresa:
+ *   p = 1 / (1 + e^{(OCF − a·cuota)/cuota})
+ * Con `logistic` de creditRisk (expNeg; error relativo < 10⁻¹²; e^{x} con x > 40 se trata como infinito:
+ * p = 0 en vez de ~e^{−x}). Con cuota 0 el exponente es ±∞ (p = 0 o 1, como Java) o NaN.
+ */
+export function logisticDefaultProbability(ocf: number, interestRate: number, amount: number, length: number, riskAversion: number): number {
+  const payments = interestRate * amount + amount / length;
+  const x = (ocf - riskAversion * payments) / payments;
+  if (Number.isNaN(x)) return NaN;
+  return logistic(-x);
+}
+
+/**
+ * `ExpectedReturnCreditSupply.computeSpecificSupply` (binaryDecision = false, XML 2567–2574): lo que el
+ * banco está dispuesto a prestarle a la empresa. Recorre monto = pedido·(1 − i/100), i = 0…100, y devuelve
+ * el primero con rendimiento esperado ≥ 0 (0 si ninguno):
+ * - recupero esperado = min(1, Σ valor del capital × haircut / Σ saldo de los préstamos de la empresa);
+ * - p = probabilidad de default (arriba), con la tasa del banco y el plazo de la empresa (20);
+ * - rendimiento esperado (q = 1 − p, s = 1/plazo, r = tasa, m = monto, D = plazo):
+ *     p·[Σ_{t=0}^{D−1} (q^t·(−1 + s·t)·m·(1 − recupero) + q^{t+1}·r·m) + Σ_{t=1}^{D−2} q^{t+1}·(t − 0,5·t·s·(1 + t))·r·m]
+ *     + q^D·r·m·(D − 0,5·(D − 1)·s·D)
+ * Montos en unidades de Caiani (double), como JMAB. Las potencias son productos y la exponencial es
+ * `expNeg`: el rendimiento no es bit a bit el de Java; lo que importa es su signo (decisión registrada,
+ * con la escala de la suma de los términos en valor absoluto). Con monto 0 (i = 100) el rendimiento es 0
+ * (o NaN, y entonces devuelve 0 igual).
+ */
+export function expectedReturnCreditSupply(s: CaianiState, bank: BankState, firm: FirmState, required: number, isConsumption: boolean): number {
+  const r = s.rules;
+  const L = s.ledger;
+  let totCurrentDebt = 0;
+  for (const id of contractIds(L, firm.id, 'liabilities', 'loan')) totCurrentDebt += toUnits(contractOf(L, id).amount);
+  let capitalValue = 0;
+  for (const g of firm.capitalGoods) capitalValue += goodValue(g, firm.id) * r.creditSupplyHaircut;
+  const expectedShareRecovered = Math.min(1, capitalValue / totCurrentDebt);
+  const duration = r.firmLoanLength; // decideLoanLength
+  const shareRepaid = 1 / duration;
+  const interest = loanInterestRate(bank);
+  const ocf = getLag(firm.lags, LAG.OPERATINGCASHFLOW, s.round, 1);
+  const riskAversion = isConsumption ? r.riskAversionC : r.riskAversionK; // Bank.getRiskAversion
+  for (let i = 0; i < 101; i++) {
+    const amount = required * (1 - i / 100);
+    const probability = logisticDefaultProbability(ocf, interest, amount, duration, riskAversion);
+    const q = 1 - probability;
+    let er = 0;
+    let abs = 0;
+    for (let t = 0; t < duration; t++) {
+      const a = powInt(q, t) * (-1 + shareRepaid * t) * amount * (1 - expectedShareRecovered);
+      const b = powInt(q, t + 1) * interest * amount;
+      er += a + b;
+      abs += Math.abs(a) + Math.abs(b);
+    }
+    for (let t = 1; t < duration - 1; t++) {
+      const c = powInt(q, t + 1) * (t - 0.5 * t * shareRepaid * (1 + t)) * interest * amount;
+      er += c;
+      abs += Math.abs(c);
+    }
+    er = er * probability;
+    const last = powInt(q, duration) * interest * amount * (duration - 0.5 * (duration - 1) * shareRepaid * duration);
+    er += last;
+    const scale = Math.abs(probability) * abs + Math.abs(last);
+    // Con monto 0 (i = 100) se devuelve 0 por cualquier rama: no es una decisión y no se registra.
+    if (amount === 0) return 0;
+    if (ge(`${SITE_CREDIT_SUPPLY} rendimiento esperado ≥ 0`, er, 0, 'fromAmounts', scale)) return amount;
+  }
+  return 0;
+}
+
+/**
+ * `CheapestLenderWithSwitching.selectLender`: el banco más barato de los vistos (el primero en caso de
+ * empate); el previo se reemplaza si su tasa es mayor y, o bien no está disponible (muerto, sin oferta
+ * para esta empresa o inactivo en crédito: tasa +∞), o `switches(previa, mínima)` con la estrategia de
+ * cambio del prestamista (pago, λ = ln 2 / 0,15). Calcular la oferta del previo no tiene efectos.
+ */
+function selectLender(s: CaianiState, firm: FirmState, lenders: readonly BankState[], isConsumption: boolean, rng: CaianiRng): BankState {
+  const required = toUnits(firm.creditDemanded);
+  let minRate = Infinity;
+  let minLender = lenders[0]!;
+  for (const b of lenders) {
+    const rate = loanInterestRate(b);
+    if (lt('CheapestLenderWithSwitching más barato', rate, minRate, 'pure')) {
+      minRate = rate;
+      minLender = b;
+    }
+  }
+  if (firm.previousLender === null) throw new Error(`empresa ${firm.id} sin prestamista previo (JMAB: NullPointerException)`);
+  const prev = bankById(s, firm.previousLender);
+  // `isDead()`: la población de bancos es fija y nadie muere en el base (NoEntryPopulationHandler).
+  // La oferta es 0 o al menos el 1% del pedido: se decide (y se registra) en expectedReturnCreditSupply.
+  const available = expectedReturnCreditSupply(s, prev, firm, required, isConsumption) > 0 && prev.active[MKT.CREDIT]!;
+  const previousRate = available ? loanInterestRate(prev) : Infinity;
+  // Si el previo es el más barato, las dos tasas son el mismo cálculo: no se registra.
+  const prevWorse = prev === minLender ? previousRate > minRate : gt('CheapestLenderWithSwitching previo > mínimo', previousRate, minRate, 'pure');
+  if (prevWorse) {
+    if (previousRate === Infinity || switches(previousRate, minRate, s.rules.lenderSwitchingLambda, s.rules.lenderSwitchingPayOrReceive, rng)) {
+      firm.previousLender = minLender.id;
+    }
+  }
+  return bankById(s, firm.previousLender);
+}
+
+function bankById(s: CaianiState, id: AgentId): BankState {
+  const b = s.banks[id - s.banks[0]!.id];
+  if (!b || b.id !== id) throw new Error(`el agente ${id} no es un banco`);
+  return b;
+}
+
+/**
+ * `ConstrainedCreditMechanism.execute` (XML 338–341): préstamo de min(pedido, oferta del banco, oferta
+ * total del banco), a la tasa del banco, edad 0, plazo 20, capital fijo. Se acredita en el depósito de
+ * la empresa **en ese banco** (el primero, `getItemStockMatrix(true, SM_DEP, banco)`); si no tiene, se
+ * abre uno con la tasa de depósitos del banco. El pedido baja en el monto prestado; si se le dio todo,
+ * la empresa queda inactiva en crédito. La oferta total del banco baja en el monto (+∞ en el base: no
+ * cambia) y, si llega a 0, el banco queda inactivo. Un préstamo de 0 también se crea (lo cierra `cleanSM`).
+ */
+function creditTransaction(s: CaianiState, firm: FirmState, bank: BankState, isConsumption: boolean): void {
+  const L = s.ledger;
+  const required = firm.creditDemanded;
+  const offered = expectedReturnCreditSupply(s, bank, firm, toUnits(required), isConsumption);
+  // Math.min(required, Math.min(offered, totalLoanSupply)), en µ. La oferta es pedido·(1 − i/100): nunca lo supera.
+  const amountUnits = Math.min(toUnits(required), Math.min(offered, bank.totalLoanSupply));
+  const amount = Math.min(required, toMicro(amountUnits));
+  open(L, 'loan', bank.id, firm.id, amount, { rate: loanInterestRate(bank), age: 0, length: s.rules.firmLoanLength, amortization: 'fixedCapital' }, 'loans');
+  let deposit: number | undefined;
+  for (const id of contractIds(L, firm.id, 'assets', 'deposit')) {
+    if (contractOf(L, id).issuer === bank.id) {
+      deposit = id;
+      break;
+    }
+  }
+  if (deposit === undefined) open(L, 'deposit', firm.id, bank.id, amount, { rate: bank.depositInterestRate }, 'loans');
+  else credit(L, deposit, amount, 'loans');
+  firm.creditDemanded = required - amount;
+  if (amount === required) firm.active[MKT.CREDIT] = false;
+  bank.totalLoanSupply -= toUnits(amount);
+  if (bank.totalLoanSupply === 0) bank.active[MKT.CREDIT] = false;
+}
+
+/**
+ * Evento 10, `creditMarketTic` (TIC_CREDITMARKET): `SimpleMarketSimulation` del crédito (XML 303–341), con
+ * listas propias (`s.markets.credit`: compradores = empresas de capital y de consumo, vendedores = bancos)
+ * y `nbRuns` = 1. Si no hay ningún comprador activo con algún vendedor activo, el mercado está cerrado y
+ * no pasa nada (ni siquiera las mezclas). Si no, `SelectionRandomRobinBuyerMixer`:
+ * - mezcla los compradores (en el lugar);
+ * - para cada comprador activo en crédito: mezcla los vendedores (en el lugar) y toma los primeros 3
+ *   activos (`selectSellers`); si hay alguno, la empresa elige prestamista (`selectLender`) y se ejecuta
+ *   el crédito (`creditTransaction`), en el momento (el evento de llegada es sincrónico).
+ */
+export function creditMarketEvent(s: CaianiState, rng: CaianiRng): void {
+  const m = s.markets.credit;
+  const firmOf = new Map<AgentId, { f: FirmState; consumption: boolean }>();
+  for (const f of s.consumptionFirms) firmOf.set(f.id, { f, consumption: true });
+  for (const f of s.capitalFirms) firmOf.set(f.id, { f, consumption: false });
+  const buyer = (id: AgentId) => {
+    const b = firmOf.get(id);
+    if (!b) throw new Error(`el agente ${id} no es una empresa`);
+    return b;
+  };
+  const sellerActive = (id: AgentId) => bankById(s, id).active[MKT.CREDIT]!;
+  // AbstractMarketMixer.closed
+  const open_ = m.buyers.some((id) => buyer(id).f.active[MKT.CREDIT]) && m.sellers.some(sellerActive);
+  if (!open_) return;
+  rng.shuffle(SITE_CREDIT_MIXER, 'buyers', m.buyers, ownId);
+  for (const id of m.buyers) {
+    const { f, consumption } = buyer(id);
+    if (!f.active[MKT.CREDIT]) continue;
+    const selected = selectSellers(m.sellers, s.rules.creditMarketSellers, sellerActive, rng, SITE_CREDIT_MIXER);
+    if (selected.length === 0) continue;
+    const lender = selectLender(
+      s,
+      f,
+      selected.map((b) => bankById(s, b)),
+      consumption,
+      rng,
+    );
+    creditTransaction(s, f, lender, consumption);
   }
 }
