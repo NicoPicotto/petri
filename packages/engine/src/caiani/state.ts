@@ -138,6 +138,10 @@ export interface FirmState extends AgentFlags {
   desiredOutput: number;
   /** `AbstractFirm.bailoutCost`: costo del rescate en el tick (lo pagan los hogares a los bancos). */
   bailoutCost: Micro;
+  /** Margen de `AdaptiveMarkUpOnAC` (estado de la estrategia de precios). */
+  markUp: number;
+  /** `expectedVariableCosts`: costo variable unitario esperado (el piso del precio). */
+  expectedVariableCosts: number;
   /** Orden de JMAB (`AbstractFirm.employees`); se mezcla al despedir y al pagar salarios. */
   employees: AgentId[];
   /** SM_CONSGOOD: inventario de la empresa de consumo. */

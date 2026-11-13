@@ -112,6 +112,7 @@ function depositLiabilities(ledger: Ledger, bank: AgentId): number {
 export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiState {
   const P = options.init ?? INITIALISER;
   const S = options.structure ?? STRUCTURE;
+  const R = options.rules ?? RULES;
   const idOf = options.jmabId ?? ((id: AgentId) => id);
   if (P.uniformDistr !== 0) {
     // Con uniformDistr = 0, (1 + U(−0, 0)) vale exactamente 1 y no hace falta sortear.
@@ -229,6 +230,8 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     id,
     desiredOutput: 0,
     bailoutCost: 0,
+    markUp: 0,
+    expectedVariableCosts: 0,
     employees: [],
     consumptionGoods: [],
     capitalGoods: [],
@@ -251,6 +254,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   const capitalFirms: FirmState[] = [];
   for (let i = 0; i < kSize; i++) {
     const k = newFirm(kIds[i] as AgentId);
+    k.markUp = R.initialMarkUpCapital;
     const inv: CapitalGoodStock = {
       quantity: kInv,
       value: kInv * P.kPrice,
@@ -300,6 +304,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   const consumptionFirms: FirmState[] = [];
   for (let i = 0; i < cSize; i++) {
     const c = newFirm(cIds[i] as AgentId);
+    c.markUp = R.initialMarkUpConsumption;
     const inv: ConsumptionGoodStock = {
       quantity: cInv,
       value: cInv * P.cPrice,
@@ -477,7 +482,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   return {
     init: P,
     structure: S,
-    rules: options.rules ?? RULES,
+    rules: R,
     round: 0,
     ledger,
     populations,

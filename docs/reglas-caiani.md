@@ -1,6 +1,6 @@
 # Reglas del port de Caiani (P3)
 
-Estado al 2026-11-13: **infraestructura de V3 por evento lista; evento 0 portado y verificado.** Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
+Estado al 2026-11-13: **infraestructura de V3 por evento lista; eventos 0, 1 y 2 portados y verificados en los ticks 1 y 50, bit a bit.** Para retomar en una sesión nueva, ver la sec. 6. Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
 
 Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equivalente al `.jar`, V0), de `paper-launcher/Model/modelFile.xml` y de los volcados del oráculo.
 
@@ -15,9 +15,17 @@ Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equiv
 
 **Reconstrucción del estado** (`stateFromDump`): los contratos se emparejan por `@oid` (el oráculo numera cada ítem dentro de un volcado; el mismo objeto está en la lista del tenedor y en la del emisor), y cada lista conserva el orden de JMAB. Verificado: el estado reconstruido del tick 1 coincide con su volcado sin ninguna diferencia.
 
+**Orden de despacho.** Dentro de un evento, JMAB llama a los agentes en **orden de creación** (el de suscripción al planificador), no en el de la lista de la población (que las mezclas reordenan). Verificado en los eventos 1 y 2: el paso |N| de cada empresa, despejado de su margen antes y después, coincide a 10⁻¹³ con el registrado en esa posición de la secuencia. Importa porque el oráculo registra las normales sin el id del agente: el port las tiene que pedir en el mismo orden. Los arreglos del estado del port (`households`, `consumptionFirms`, etc.) están en orden de creación.
+
 **Tolerancias** (plan, sec. 4, V3): montos, 2 µ; `double` calculados a partir de montos, 10⁻⁶ relativo; los demás `double`, 10⁻⁹. Una decisión discreta que se dé vuelta dentro de la tolerancia se va a contar aparte (decisión de Nico, 2026-11-13); todavía no hubo ninguna.
 
-**Corrida de referencia:** `DUMP_TICKS=1 DUMP_EVENTS="1:0" reference/tools/run-oracle.sh p3-t1 12345 1 -1 999999`. Se van a sumar eventos a `DUMP_EVENTS` a medida que se porten. Después de portar el tick entero: V3 completo desde t = 1, 50, 200 y 399.
+**Corridas de referencia** (semilla 12345; el test `caiani-events.test.ts` las recorre con `describe.each`):
+- `DUMP_TICKS=1 DUMP_EVENTS="1:0,1:1,1:2" reference/tools/run-oracle.sh p3-t1 12345 1 -1 999999`
+- `DUMP_TICKS=50 DUMP_EVENTS="50:0,50:1,50:2" reference/tools/run-oracle.sh p3-t50 12345 50 50 50`
+
+Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y volver a correrlas (~1 y ~3 minutos). Después de portar el tick entero: V3 completo desde t = 1, 50, 200 y 399. El tick 1 es muy simétrico (todas las empresas iguales): el 50 es el que ejercita las ramas.
+
+**Herramienta auxiliar** (fuera del repo, a recrear si hace falta): un diff de dos volcados que lista, por población, qué campos cambian, cuántos agentes y un ejemplo. Con eso se ve qué estado toca un evento antes de leer el código.
 
 ## 2. Mapa del tick (eventos de comportamiento)
 
@@ -26,8 +34,8 @@ Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equiv
 | # | Evento | Estado |
 |---|---|---|
 | 0 | `computeExpectationsTic`: expectativas, producción deseada, ratios de los bancos, ganancias del BC | **portado, V3 ✓** |
-| 1 | `capitalPriceTic`: precio de las empresas de capital (20 normales) | |
-| 2 | `consumptionPriceTic`: precio de las empresas de consumo (100) | |
+| 1 | `capitalPriceTic`: precio de las empresas de capital (20 normales) | **portado, V3 ✓** |
+| 2 | `consumptionPriceTic`: precio de las empresas de consumo (100) | **portado, V3 ✓** |
 | 3 | `capitalMarketTic1`: primera etapa del mercado de capital (101) | |
 | 4 | `rdDecisionTic` (I+D, apagada en el base) | |
 | 5 | `investmentDemandTic` | |
@@ -78,3 +86,42 @@ Lo escuchan las empresas, los hogares, los bancos y el BC (el gobierno no). No h
 **Verificación:**
 - A mano: Y* de una empresa de consumo al inicio (320,0000000854072, el valor de JMAB) y casos de borde; ratio de liquidez del banco 0 y ganancias del BC (28.564 × 0,0025 = 71,41) sobre el estado inicial del port.
 - V3, tick 1: 37.364 contratos, 2.120 bienes, 25.481 rezagos, 8.370 expectativas, banderas de mercado y campos nuevos. `double` puros: diferencia 0. Ratios de los bancos (salen de montos): 2,6·10⁻⁸. Montos: 0 µ.
+
+## 4. Eventos 1 y 2: precios (`capitalPriceTic`, `consumptionPriceTic`)
+
+**Qué cambia en JMAB** (diff de volcados, tick 1): el margen de la estrategia de precios, `expectedVariableCosts`, el precio del inventario y el rezago `LAG_PRICE` del período. Nada más (el valor contable del inventario no se recalcula: `setPrice` no llama a `updateValue`). Evento 1: las 20 empresas de capital; evento 2: las 100 de consumo. Un sorteo `fn` por empresa, en orden de creación.
+
+| Qué | JMAB | Port |
+|---|---|---|
+| Disparo | `CopyOfCapitalFirm2WagesEnd.onTicArrived` 66–67 → `CapitalFirm.computePrice` 565–574; `CopyOfConsumptionFirm2WagesEnd` 69–70 → `ConsumptionFirm.computePrice` 683–690: precio de la estrategia en el inventario y `addValue(LAG_PRICE, precio)` | `capitalPriceEvent`, `consumptionPriceEvent` |
+| Sin inventario | crea un bien temporal, pero la estrategia ya habría fallado en `getPrice()` (NullPointerException) | error explícito |
+| Referencia | `getReferenceVariableForPrice` (capital 822–826, consumo 889–893): inventario / ventas reales del período anterior (`getPassedValue(LAG_REALSALES, 1)`) | igual |
+| Margen | `AdaptiveMarkUpOnAC.computePrice`: piso anterior = precio / (1 + μ); si referencia > 0,1, μ −= 1·μ·\|N(0; 0,0094)\|; si no, μ += 1·μ·\|N\| (XML 1864–1870 y 2161–2168; `foldedNormal1`, 2980–2984). Márgenes iniciales: 0,075 (capital) y 0,318857 (consumo) | `adaptiveMarkUpPrice`; los márgenes iniciales los pone `initialize` |
+| Precio | piso·(1 + μ), o piso anterior·(1 + μ) si el piso es 0; nunca por debajo del piso | igual |
+| Piso, capital | `CapitalFirm.getPriceLowerBound` 810–814: salario esperado / `laborProductivity` (= 2, XML 1546); lo guarda en `expectedVariableCosts` | igual |
+| Piso, consumo | `ConsumptionFirm.getPriceLowerBound` 826–881: si Y* > 0, salario esperado × `getRequiredWorkers()` / Y*; si no, salario esperado × trabajadores para el inventario / inventario (0/0 = NaN con inventario 0, como en 2015) | `consumptionLowerBound` |
+| Trabajadores requeridos | `ConsumptionFirm.getRequiredWorkers` 267–297: añadas ordenadas por productividad (de mayor a menor; a igual productividad, en el orden de la lista; `TreeMap.descendingKeySet`), cantidad / (capital/trabajo) por añada usada; `(int) Math.round` | `requiredWorkers` (sin redondear) + `Math.round` donde JMAB redondea |
+
+**Detalle:** `getPriceLowerBound` se llama hasta tres veces dentro de `computePrice`, pero solo lee estado y escribe `expectedVariableCosts` con el mismo valor: el port la llama una vez.
+
+**Verificación:**
+- A mano: margen que baja y que sube, piso 0 (usa el piso anterior), trabajadores requeridos con dos productividades, piso de la empresa de consumo al inicio (0,7812499997914863, el valor de JMAB), piso sin producción deseada (incluido el NaN).
+- V3, ticks 1 y 50, cada evento desde el volcado anterior y los tres encadenados desde el principio del tick: **diferencia 0** en todo lo que toca el evento (márgenes, precios, pisos, rezagos). En el tick 50 se ejercitan las dos ramas del margen (capital: 4 bajan, 16 suben; consumo: 46 y 54). La rama sin producción deseada no aparece en ninguno de los dos ticks: la cubre solo el caso a mano.
+
+## 5. Estado agregado al port en P3 hasta ahora
+
+- Todos los agentes (`AgentFlags`): `active[MKT_*]`, `defaulted`.
+- Empresas: `desiredOutput`, `bailoutCost` (µ), `markUp`, `expectedVariableCosts`.
+- Bancos: `liquidityRatio`, `capitalRatio`, `bailoutCost`, `currentNonPerformingLoans` (µ).
+- BC (`centralBank`): `interestsOnAdvances`, `interestsOnBonds` (µ).
+- Rezagos: `setLag` con la eviction de `TreeMapPassedValues` (4 observaciones) y `getLag`.
+- Parámetros (`RULES`, con su línea del XML): participación del inventario objetivo, tasa de adelantos del BC, margen (umbral, paso, σ, iniciales), productividad del trabajo en capital.
+
+Cada campo nuevo va en `state.ts`, en `initialize` (valor del constructor de JMAB), en `stateFromDump` y en `compareState` (`test/support/jmab-dump.ts`).
+
+## 6. Para retomar en una sesión nueva
+
+1. Leer este documento (sec. 1: método; sec. 2: mapa) y [inicializacion.md](inicializacion.md).
+2. Siguiente: **evento 3, `capitalMarketTic1`** (primera etapa del mercado de capital, `BrochureMarket`: 101 sorteos en el tick 1). Es el primer mercado: hay que portar el mezclador (`BrochureSelectionRandomRobinBuyerMixer`, `nbSellers` = 5) y su orden de compradores. Después 4 (I+D, apagada: verificar que no toque nada) y 5 (`investmentDemandTic`).
+3. Por cada evento: agregar `t:e` a las dos corridas de referencia y correrlas; diff de volcados; leer el código de los agentes que escuchan el evento (`activeTicEvents`); portar en `events.ts` con la línea de JMAB al lado; casos a mano y V3 en `caiani-events.test.ts`; registrar acá.
+4. Norma operativa: no editar los scripts de `reference/tools` mientras corre algo largo ([arquitectura.md](arquitectura.md), "Corridas largas").

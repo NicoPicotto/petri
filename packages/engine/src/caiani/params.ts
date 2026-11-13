@@ -146,10 +146,25 @@ export interface RuleParams {
   inventoryShareConsumption: number; // 2094
   /** `CentralBank.advancesInterestRate`: tasa con que el BC calcula su ganancia por adelantos. */
   centralBankAdvancesRate: number; // 2966
+  /** `AdaptiveMarkUpOnAC` (precios, eventos 1 y 2): umbral de inventario / ventas, paso y margen inicial. */
+  markUpThreshold: number; // 1868 (capital), 2165 (consumo)
+  markUpAdaptive: number; // 1866, 2163
+  /** Desvío de la normal plegada `foldedNormal1` (media 0). */
+  markUpSigma: number; // 2982
+  initialMarkUpCapital: number; // 1869
+  initialMarkUpConsumption: number; // 2166
+  /** `CapitalFirm.laborProductivity`: bienes de capital por trabajador. */
+  capitalLaborProductivity: number; // 1546
 }
 
 export const RULES: Readonly<RuleParams> = {
   inventoryShareCapital: 0.1,
   inventoryShareConsumption: 0.1,
   centralBankAdvancesRate: 0.005,
+  markUpThreshold: 0.1,
+  markUpAdaptive: 1,
+  markUpSigma: 0.0094,
+  initialMarkUpCapital: 0.075,
+  initialMarkUpConsumption: 0.318857,
+  capitalLaborProductivity: 2,
 };

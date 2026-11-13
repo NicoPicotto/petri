@@ -15,7 +15,8 @@
 - [x] **Algoritmo de las mezclas en modo PRNG** (Nico, 2026-11-13): el de JMAB por defecto, defecto reproducido a propósito, con un interruptor `'uniform'`. Ver [inicializacion.md](inicializacion.md), sec. 3.
 - [ ] **Medir cuánto influye el sesgo de las mezclas** (interruptor `shuffle: 'uniform'`), cuando el port corra entero (P4).
 - [x] **Empleo público inicial** (pedido de Nico): el gobierno arranca con 0 y contrata 1.360 en el tick 1; al final del tick 1 el estado es el del paper (u₀ = 8%). Ver [inicializacion.md](inicializacion.md), sec. 6.
-- [ ] **P3, evento por evento** ([reglas-caiani.md](reglas-caiani.md)): evento 0 hecho; siguen 1 (precios de capital) y 2 (precios de consumo).
+- [ ] **P3, evento por evento** ([reglas-caiani.md](reglas-caiani.md)): eventos 0, 1 y 2 hechos (V3 bit a bit en los ticks 1 y 50); sigue el 3 (primera etapa del mercado de capital).
+- [ ] **P3, rama del piso del precio sin producción deseada** (`consumptionLowerBound`): sin cobertura de V3 (no aparece en los ticks 1 ni 50); buscar un tick donde aparezca.
 - [ ] **P3, impuestos:** portar la rama de `Households.payTaxes` con efectivo o rechazarla con un error (nunca se ejecuta en la corrida base).
 - [ ] **P3: valor contable de los bienes reales** en `double` (como JMAB, hoy) o en µ; se decide cuando entren sus flujos.
 - [x] **Efectivo de los hogares** (rama rara de `Households.payTaxes`): nadie arranca con efectivo y `DepositMechanism` lo mantiene en 0 (`shareDeposits = 1`). Verificado con el oráculo: ningún efectivo distinto de cero en 400 trimestres ([inicializacion.md](inicializacion.md), sec. 5).

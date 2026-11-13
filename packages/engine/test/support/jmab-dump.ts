@@ -270,6 +270,8 @@ export function stateFromDump(d: Dump): CaianiState {
       id,
       desiredOutput: j['AbstractFirm.desiredOutput'],
       bailoutCost: toMicro(j['AbstractFirm.bailoutCost']),
+      markUp: strat(j, 5)['markUp'],
+      expectedVariableCosts: j[consumption ? 'ConsumptionFirm.expectedVariableCosts' : 'CapitalFirm.expectedVariableCosts'],
       employees: (j['AbstractFirm.employees'] as J[]).map((e) => fromJ(ref(e)!)),
       consumptionGoods: goods(id, 2).map((it) => consumptionGoodOf(it, fromJ)),
       capitalGoods: goods(id, 3).map((it) => capitalGoodOf(it, fromJ)),
@@ -562,6 +564,9 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
     same(`${w} empleados`, f.employees.map(toJ).join(), (j['AbstractFirm.employees'] as J[]).map(ref).join());
     close(`${w} producción deseada`, f.desiredOutput, j['AbstractFirm.desiredOutput']);
     amount(`${w} costo de rescate`, f.bailoutCost, j['AbstractFirm.bailoutCost']);
+    close(`${w} margen`, f.markUp, strat(j, 5)['markUp']);
+    const evc = j['ConsumptionFirm.expectedVariableCosts'] ?? j['CapitalFirm.expectedVariableCosts'];
+    close(`${w} costo variable esperado`, f.expectedVariableCosts, evc);
     same(`${w} banco previo`, toJ(f.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
     same(`${w} prestamista previo`, f.previousLender === null ? null : toJ(f.previousLender), ref(strat(j, 1)['previousLender']));
     if (f.previousCapitalSupplier !== null) {

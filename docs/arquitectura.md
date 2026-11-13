@@ -17,6 +17,12 @@ Requiere **Node ≥ 22.12** (Vite 7 no anda con Node 18). Ojo: si pnpm está ins
 | `pnpm --filter @petri/engine report:fase1` | Diagnóstico con G = 0 (paso 1a.0): liquidez contra demanda, ahorro forzoso, dinero contra masa salarial, en tres escenarios (~25 s). Con argumento: `report:fase1 g0`, `report:fase1 escala` (volatilidad según el tamaño, ~45 s) o `report:fase1 variantes [frio|g0|caliente]` (variantes experimentales, ~1–2 min por escenario). |
 | `pnpm --filter @petri/app e2e` | Prueba de punta a punta de la interfaz en Chrome headless (con `pnpm dev` corriendo). |
 
+### Corridas largas (norma operativa, Nico, 2026-11-13)
+
+- **No se edita un script mientras hay corridas largas usándolo** (réplicas del `.jar`, oráculo). Bash lee el script de a pedazos mientras lo ejecuta: si cambia en el medio, la corrida falla o hace otra cosa. Pasó el 2026-11-13 con `run-oracle.sh`: las simulaciones terminaron, pero el script cortó al final con un error de sintaxis.
+- **Si hace falta cambiar un script, cada corrida usa una copia.** `reference/tools/run-oracle.sh` y `run-baseline.sh` ya lo hacen solos: al arrancar se copian a un archivo temporal y siguen desde la copia (variables `PETRI_SCRIPT_COPY` y `PETRI_REF`). Un script nuevo para corridas largas tiene que hacer lo mismo.
+- Lo que las corridas leen además del script (el `.jar` del oráculo, el lanzador) también se copia a la carpeta de cada corrida.
+
 ## Paquetes
 
 - `packages/engine`: TypeScript puro, sin DOM (`lib: ES2022`, `types: []`). Lo consume la app como código fuente (`exports: ./src/index.ts`), sin build.
