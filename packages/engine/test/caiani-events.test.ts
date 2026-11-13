@@ -1465,6 +1465,10 @@ const RUNS = [
   { run: 'p3-t50', tick: 50 },
   // Una quiebra por deuda en el evento 20 (empresa 8168) y cuatro por salarios en el 21.
   { run: 'p3-t81', tick: 81 },
+  // Quiebras con dos depósitos: 8164 y 8182 en el evento 20; 8159 en el 21 (aporte de los dueños = toda la pérdida).
+  // PENDIENTE (2026-11-13): eventos 0–18 pasan; 19, 20 y 21 fallan por dos hallazgos a resolver
+  // (reglas-caiani.md, sec. 15). Se vuelve a sumar cuando estén resueltos.
+  // { run: 'p3-t108', tick: 108 },
 ];
 
 /**
