@@ -155,7 +155,23 @@ export interface RuleParams {
   initialMarkUpConsumption: number; // 2166
   /** `CapitalFirm.laborProductivity`: bienes de capital por trabajador. */
   capitalLaborProductivity: number; // 1546
+  /** `BrochureSelectionRandomRobinBuyerMixer.nbSellers`: vendedores de capital que ve cada comprador (evento 3). */
+  capitalMarketSellers: number; // 255
+  /** `RandDInvestmentSharePastSales.researchShare`: I+D / ventas nominales pasadas (apagada en el base). */
+  researchShare: number; // 1821
+  /**
+   * `SwitchingStrategySimple` del proveedor de capital (`switchingStrategy4`): λ = −ln(0,5) / thresholdMean,
+   * con thresholdMean = 0,20 (XML 1791) y `payOrReceive` = true (1794).
+   */
+  capitalSwitchingLambda: number;
+  capitalSwitchingPayOrReceive: boolean; // 1794
 }
+
+/**
+ * −Math.log(0.5) de Java (el double más cercano a ln 2). Constante para no usar `Math.log` en el motor
+ * (principio 4).
+ */
+export const LN2 = 0.6931471805599453;
 
 export const RULES: Readonly<RuleParams> = {
   inventoryShareCapital: 0.1,
@@ -167,4 +183,8 @@ export const RULES: Readonly<RuleParams> = {
   initialMarkUpCapital: 0.075,
   initialMarkUpConsumption: 0.318857,
   capitalLaborProductivity: 2,
+  capitalMarketSellers: 5,
+  researchShare: 0,
+  capitalSwitchingLambda: LN2 / 0.2,
+  capitalSwitchingPayOrReceive: true,
 };

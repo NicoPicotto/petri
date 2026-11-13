@@ -154,6 +154,24 @@ export interface FirmState extends AgentFlags {
   previousLender: AgentId | null;
   /** Solo empresas de consumo: `BestQualityPriceCapitalSupplierWithSwitching.previousSupplier`. */
   previousCapitalSupplier: AgentId | null;
+  /**
+   * Solo empresas de consumo: `ConsumptionFirm.selectedCapitalGoodSuppliers`, los vendedores que le
+   * tocó ver en la primera etapa del mercado de capital (evento 3), en el orden de JMAB. `null` hasta
+   * la primera vez. Si en un tick no le toca ninguno, conserva la lista anterior (como JMAB).
+   */
+  selectedCapitalSuppliers: AgentId[] | null;
+  /**
+   * Solo empresas de capital: `CapitalFirm.amountResearch`, gasto en I+D del tick (evento 4). Con
+   * `researchShare` = 0 es siempre 0, pero JMAB lo usa en la demanda de trabajo y en el pedido de crédito.
+   */
+  amountResearch: number;
+  /**
+   * Solo empresas de consumo: `ConsumptionFirm.desiredCapacityGrowth`. Lo calcula la segunda etapa del
+   * mercado de capital (evento 19); el evento 5 usa el valor del tick anterior.
+   */
+  desiredCapacityGrowth: number;
+  /** Solo empresas de consumo: `ConsumptionFirm.desiredRealCapitalDemand` (unidades de capital, entero). */
+  desiredRealCapitalDemand: number;
   lags: Lags;
   expectations: Expectations;
 }

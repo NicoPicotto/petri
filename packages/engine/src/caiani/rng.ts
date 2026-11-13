@@ -19,7 +19,8 @@
  * - `bern`: Bernoulli; `p:resultado`. Solo se sortea si 0 < p < 1 (si no, no hay registro).
  * - `shuffle`: AgentList.shuffle; `qué:ids en el orden resultante`.
  * - `shuffleEmp`: Collections.shuffle de los empleados; `id del dueño:ids en el orden resultante`.
- * - `sample`: vendedores elegidos por un comprador; `id del comprador:ids elegidos, en orden`.
+ * - `sample`: vendedores elegidos por un comprador; `id del comprador:ids elegidos, en orden`. Desde el
+ *   2026-11-13 los mezcladores del oráculo registran la mezcla completa (`shuffle sellers`) en su lugar.
  * - `unif`: Math.random del rescate de bancos; `qué:valor`.
  * Los ids son los de JMAB: el arnés de V3 pasa la función que da el id de JMAB de cada agente.
  */
@@ -185,6 +186,13 @@ function reorderByIds<T>(items: T[], ids: readonly number[], idOf: (t: T) => num
 export interface OracleOptions {
   /** Tolerancia relativa para comparar la p de una Bernoulli con la registrada (por defecto 1e-6, sec. 2.6). */
   pTolerance?: number;
+  /**
+   * Id de JMAB de un agente del port. Se aplica a lo que devuelve `idOf` (y a los ids de dueño y de
+   * comprador) antes de compararlo con el registro. Por defecto, la identidad: así lo usa
+   * `initialize`, que ya pasa un `idOf` con ids de JMAB. Los eventos pasan los ids del port y el arnés
+   * de V3 fija acá la traducción.
+   */
+  agentId?: (id: number) => number;
 }
 
 export class OracleCaianiRng implements CaianiRng {
@@ -194,12 +202,14 @@ export class OracleCaianiRng implements CaianiRng {
   /** Bernoullis cuya p difirió de la registrada (dentro de la tolerancia, si no es error). */
   readonly pDiffs: { seq: number; site: string; logged: number; port: number }[] = [];
   private readonly pTolerance: number;
+  private readonly agentId: (id: number) => number;
 
   constructor(
     private readonly records: readonly DrawRecord[],
     options: OracleOptions = {},
   ) {
     this.pTolerance = options.pTolerance ?? 1e-6;
+    this.agentId = options.agentId ?? ((id) => id);
   }
 
   /** Cantidad de registros consumidos. */
@@ -255,28 +265,28 @@ export class OracleCaianiRng implements CaianiRng {
     const r = this.next('shuffle', site);
     const [w, ids] = splitDetail(r);
     if (w !== what) throw new Error(`oráculo: shuffle de "${what}" en ${site}, el registro mezcla "${w}" (secuencia ${r.seq})`);
-    return reorderByIds(items, parseIds(ids), idOf, `shuffle ${site}, secuencia ${r.seq}`);
+    return reorderByIds(items, parseIds(ids), (t) => this.agentId(idOf(t)), `shuffle ${site}, secuencia ${r.seq}`);
   }
 
   shuffleEmployees<T>(site: string, ownerId: number, items: T[], idOf: (t: T) => number): T[] {
     const r = this.next('shuffleEmp', site);
     const [owner, ids] = splitDetail(r);
-    if (Number(owner) !== ownerId) {
-      throw new Error(`oráculo: empleados de ${ownerId} en ${site}, el registro es de ${owner} (secuencia ${r.seq})`);
+    if (Number(owner) !== this.agentId(ownerId)) {
+      throw new Error(`oráculo: empleados de ${this.agentId(ownerId)} en ${site}, el registro es de ${owner} (secuencia ${r.seq})`);
     }
-    return reorderByIds(items, parseIds(ids), idOf, `shuffleEmp ${site}, secuencia ${r.seq}`);
+    return reorderByIds(items, parseIds(ids), (t) => this.agentId(idOf(t)), `shuffleEmp ${site}, secuencia ${r.seq}`);
   }
 
   sample<T>(site: string, buyerId: number, candidates: readonly T[], n: number, idOf: (t: T) => number): T[] {
     const r = this.next('sample', site);
     const [buyer, ids] = splitDetail(r);
-    if (Number(buyer) !== buyerId) {
-      throw new Error(`oráculo: muestra del comprador ${buyerId} en ${site}, el registro es de ${buyer} (secuencia ${r.seq})`);
+    if (Number(buyer) !== this.agentId(buyerId)) {
+      throw new Error(`oráculo: muestra del comprador ${this.agentId(buyerId)} en ${site}, el registro es de ${buyer} (secuencia ${r.seq})`);
     }
     const chosen = parseIds(ids);
     if (chosen.length > n) throw new Error(`oráculo: muestra de ${chosen.length} con n = ${n} (secuencia ${r.seq})`);
     return chosen.map((id) => {
-      const c = candidates.find((x) => idOf(x) === id);
+      const c = candidates.find((x) => this.agentId(idOf(x)) === id);
       if (c === undefined) throw new Error(`oráculo: el vendedor ${id} de la muestra no es candidato en el port (secuencia ${r.seq})`);
       return c;
     });

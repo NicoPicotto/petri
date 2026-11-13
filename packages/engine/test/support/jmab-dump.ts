@@ -93,6 +93,10 @@ export function idMaps(meta: DumpMeta): { toJ: (id: AgentId) => number; fromJ: (
 }
 
 const ref = (x: J | null | undefined): number | null => (x === null || x === undefined ? null : (x['@agent'] as number));
+/** Lista de referencias a agentes (`{"@agent": id}`) → ids del port; `null` si JMAB tiene null. */
+function agentRefs(x: J[] | null | undefined, fromJ: (j: number) => AgentId): AgentId[] | null {
+  return x === null || x === undefined ? null : x.map((e) => fromJ(ref(e)!));
+}
 const strat = (j: J, key: number): J => j['AbstractAgent.strategy'].strategies[String(key)];
 
 function flagsOf(j: J): AgentFlags {
@@ -278,6 +282,10 @@ export function stateFromDump(d: Dump): CaianiState {
       previousBank: fromJ(ref(strat(j, 11)['previousDepositSupplier'])!),
       previousLender: lender === null ? null : fromJ(lender),
       previousCapitalSupplier: capSup === null ? null : fromJ(capSup),
+      amountResearch: consumption ? 0 : j['CapitalFirm.amountResearch'],
+      desiredCapacityGrowth: consumption ? j['ConsumptionFirm.desiredCapacityGrowth'] : 0,
+      desiredRealCapitalDemand: consumption ? j['ConsumptionFirm.desiredRealCapitalDemand'] : 0,
+      selectedCapitalSuppliers: agentRefs(j['ConsumptionFirm.selectedCapitalGoodSuppliers'], fromJ),
       lags: lagsOf(j['SimpleAbstractAgent.passedValues'], `empresa ${toJ(id)}`),
       expectations: expectationsOf(j['SimpleAbstractAgent.expectations']),
     };
@@ -569,6 +577,14 @@ export function compareState(s: CaianiState, d: Dump): CompareResult {
     close(`${w} costo variable esperado`, f.expectedVariableCosts, evc);
     same(`${w} banco previo`, toJ(f.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
     same(`${w} prestamista previo`, f.previousLender === null ? null : toJ(f.previousLender), ref(strat(j, 1)['previousLender']));
+    if (j['ConsumptionFirm.desiredCapacityGrowth'] !== undefined) {
+      close(`${w} crecimiento deseado de la capacidad`, f.desiredCapacityGrowth, j['ConsumptionFirm.desiredCapacityGrowth'], true);
+      close(`${w} demanda real de capital`, f.desiredRealCapitalDemand, j['ConsumptionFirm.desiredRealCapitalDemand'], true);
+    }
+    if (j['CapitalFirm.amountResearch'] !== undefined) close(`${w} I+D`, f.amountResearch, j['CapitalFirm.amountResearch']);
+    const sel = (l: AgentId[] | null) => (l === null ? 'null' : l.map(toJ).join());
+    const jsel = j['ConsumptionFirm.selectedCapitalGoodSuppliers'] as J[] | null | undefined;
+    same(`${w} vendedores de capital vistos`, sel(f.selectedCapitalSuppliers), jsel === null || jsel === undefined ? 'null' : jsel.map(ref).join());
     if (f.previousCapitalSupplier !== null) {
       same(`${w} proveedor de capital previo`, toJ(f.previousCapitalSupplier), ref(strat(j, 0)['previousSupplier']));
     }

@@ -18,6 +18,7 @@
 
 import { contractIds, contractOf, firstAsset, type AgentId, type ContractKind, type Ledger } from './ledger';
 import { toUnits, type Micro } from './money';
+import { expNeg } from '../detmath';
 import type { CaianiRng } from './rng';
 import {
   EXPECTATION,
@@ -37,6 +38,9 @@ export const EVENT = {
   COMPUTE_EXPECTATIONS: 0,
   CAPITAL_PRICE: 1,
   CONSUMPTION_PRICE: 2,
+  CAPITAL_MARKET_1: 3,
+  RD_DECISION: 4,
+  INVESTMENT_DEMAND: 5,
 } as const;
 
 /**
@@ -264,5 +268,223 @@ export function consumptionPriceEvent(s: CaianiState, rng: CaianiRng): void {
     );
     inv.price = price;
     setLag(c.lags, LAG.PRICE, s.round, price);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 3: primera etapa del mercado de capital
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BROCHURE_FIRST = 'BrochureSelectionRandomRobinBuyerMixer.invokeFirstInteractions';
+
+/** Identidad: los eventos piden las mezclas con ids del port (el arnés de V3 los traduce a JMAB). */
+const ownId = (id: AgentId): number => id;
+
+/**
+ * Elección de vendedores de los mezcladores `…SelectionRandomRobinBuyerMixer`: mezcla la lista de
+ * vendedores **en el lugar** (`sellers.shuffle(prng)`: el orden queda para el comprador siguiente y
+ * para el tick siguiente) y toma los primeros `nbSellers` activos en el mercado, en ese orden.
+ */
+function selectSellers(
+  sellers: AgentId[],
+  nbSellers: number,
+  isActive: (id: AgentId) => boolean,
+  rng: CaianiRng,
+  site: string,
+): AgentId[] {
+  rng.shuffle(site, 'sellers', sellers, ownId);
+  const selected: AgentId[] = [];
+  for (let i = 0; i < sellers.length && selected.length < nbSellers; i++) {
+    const k = sellers[i]!;
+    if (isActive(k)) selected.push(k);
+  }
+  return selected;
+}
+
+/**
+ * Evento 3, `capitalMarketTic1` (TIC_CAPITALMARKET1): primera etapa del `BrochureMarket` de capital
+ * (`AbstractTwoStepMarketSimulation.eventOccurred` → `BrochureMarket.firstStep` →
+ * `BrochureSelectionRandomRobinBuyerMixer.invokeFirstInteractions`). Ningún agente lo tiene en
+ * `activeTicEvents`: actúa solo el mezclador.
+ * - Compradores: la lista de la **población** de empresas de consumo (el `BrochureMarket` no tiene
+ *   lista propia), mezclada en el lugar; no se filtra por activas.
+ * - Para cada comprador, en ese orden: la lista de la población de empresas de capital se mezcla en el
+ *   lugar y se toman las primeras `nbSellers` (5, XML 255) activas en el mercado de capital
+ *   (`active[MKT_CAPGOOD]`, fijado en el evento 0).
+ * - Si hay al menos una, `ConsumptionFirm.onAgentArrival` (208–216) guarda la lista en
+ *   `selectedCapitalGoodSuppliers`. Si no, no hay evento y la empresa conserva la lista anterior.
+ */
+export function capitalMarketFirstStepEvent(s: CaianiState, rng: CaianiRng): void {
+  const buyers = s.populations.consumptionFirms;
+  const sellers = s.populations.capitalFirms;
+  const firstC = s.consumptionFirms[0]!.id;
+  const firstK = s.capitalFirms[0]!.id;
+  const consumptionFirm = (id: AgentId): FirmState => {
+    const c = s.consumptionFirms[id - firstC];
+    if (!c || c.id !== id) throw new Error(`el agente ${id} no es una empresa de consumo`);
+    return c;
+  };
+  const isActive = (id: AgentId): boolean => {
+    const k = s.capitalFirms[id - firstK];
+    if (!k || k.id !== id) throw new Error(`el agente ${id} no es una empresa de capital`);
+    return k.active[MKT.CAPGOOD]!;
+  };
+  rng.shuffle(SITE_BROCHURE_FIRST, 'buyers', buyers, ownId);
+  for (const b of buyers) {
+    const selected = selectSellers(sellers, s.rules.capitalMarketSellers, isActive, rng, SITE_BROCHURE_FIRST);
+    if (selected.length > 0) consumptionFirm(b).selectedCapitalSuppliers = selected;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 4: decisión de I+D
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 4, `rdDecisionTic` (TIC_RDDECISION): solo lo escuchan las empresas de capital
+ * (`CopyOfCapitalFirm2WagesEnd.onTicArrived` 69–70 → `CapitalFirm.researchDecision` 542–545):
+ *   amountResearch = ventas nominales del período anterior (`getPassedValue(LAG_NOMINALSALES, 1)`)
+ *                    × researchShare
+ * (`RandDInvestmentSharePastSales.computeRandDInvestment`). En el base `researchShare` = 0 (XML 1821):
+ * da 0 salvo que las ventas sean infinitas o NaN; igual se calcula como JMAB, incluida la excepción si
+ * falta el rezago. Sin sorteos.
+ */
+export function rdDecisionEvent(s: CaianiState): void {
+  for (const k of s.capitalFirms) {
+    k.amountResearch = getLag(k.lags, LAG.NOMINALSALES, s.round, 1) * s.rules.researchShare;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 5: demanda de inversión
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_SWITCHING = 'AbstractSwitchingStrategy.switches';
+
+/**
+ * `SwitchingStrategySimple.getProbability(previous, potential)`:
+ * - pago (`payOrReceive` = true): si potential < previous, 1 − e^{λ(potential − previous)/potential}; si no, 0;
+ * - cobro: si previous < potential, 1 − e^{λ(previous − potential)/previous}; si no, 0.
+ * La exponencial va con `expNeg` (detmath). Un exponente positivo (montos negativos) no se porta: error.
+ */
+export function switchingProbability(previous: number, potential: number, lambda: number, payOrReceive: boolean): number {
+  let x: number;
+  if (payOrReceive) {
+    if (!(potential < previous)) return 0;
+    x = (lambda * (previous - potential)) / potential;
+  } else {
+    if (!(previous < potential)) return 0;
+    x = (lambda * (potential - previous)) / previous;
+  }
+  if (!(x >= 0)) throw new Error(`switchingProbability: exponente positivo (previous ${previous}, potential ${potential})`);
+  return 1 - expNeg(x);
+}
+
+/**
+ * `AbstractSwitchingStrategy.switches`: con p = 1 cambia y con p = 0 no, **sin sortear**; si no, una
+ * Bernoulli(p).
+ */
+export function switches(previous: number, potential: number, lambda: number, payOrReceive: boolean, rng: CaianiRng): boolean {
+  const p = switchingProbability(previous, potential, lambda, payOrReceive);
+  if (p === 1) return true;
+  if (p === 0) return false;
+  return rng.bernoulli(SITE_SWITCHING, p);
+}
+
+/**
+ * Atractivo de un bien de capital (`BestQualityPriceCapitalSupplierWithSwitching.selectGoodSupplier`):
+ *   ((salario esperado / (productividad × capital/trabajo)) × duración) / precio
+ * = ahorro de salarios por unidad de capital durante su vida, por peso.
+ */
+export function capitalAttractiveness(expectedWages: number, g: CapitalGoodStock): number {
+  const laborProductivity = g.productivity * g.capitalLaborRatio;
+  return ((expectedWages / laborProductivity) * g.duration) / g.price;
+}
+
+/**
+ * `RealCapitalDemandWithPayBackPeriod.computeRealCapitalDemand(seller)`. Recorre las añadas de la
+ * empresa (en el orden de la lista):
+ * - capacidad actual += productividad × cantidad, si la edad no es −1;
+ * - si ((productividad del trabajo vieja − nueva) / salario esperado × (duración − edad)) − precio nuevo > 0,
+ *   la añada queda obsoleta (`setObsolete(true)`; nunca se vuelve a false acá);
+ * - si no, y le queda más de un período (duración − edad > 1), suma a la capacidad residual.
+ * Capacidad deseada = (1 + crecimiento deseado) × capacidad actual; demanda =
+ * `(int) Math.round((deseada − residual) / productividad nueva)` si deseada ≥ residual, si no 0.
+ */
+export function realCapitalDemand(c: FirmState, newCapital: CapitalGoodStock): number {
+  const lpNew = newCapital.productivity * newCapital.capitalLaborRatio;
+  const w = wageExpectation(c);
+  let currentCapacity = 0;
+  let residualCapacity = 0;
+  for (const old of c.capitalGoods) {
+    const lpOld = old.productivity * old.capitalLaborRatio;
+    if (old.age !== -1) currentCapacity += old.productivity * old.quantity;
+    if (((lpOld - lpNew) / w) * (old.duration - old.age) - newCapital.price > 0) {
+      old.obsolete = true;
+    } else if (old.duration - old.age > 1) {
+      residualCapacity += old.productivity * old.quantity;
+    }
+  }
+  const desiredCapacity = (1 + c.desiredCapacityGrowth) * currentCapacity;
+  if (desiredCapacity >= residualCapacity) return javaRoundToInt((desiredCapacity - residualCapacity) / newCapital.productivity);
+  return 0;
+}
+
+/** `(int) Math.round(x)` de Java 6 para x ≥ 0 finito: ⌊x + 0,5⌋. */
+function javaRoundToInt(x: number): number {
+  if (!(x >= 0) || x >= 2147483647) throw new Error(`javaRoundToInt: fuera de rango ${x}`);
+  return Math.floor(x + 0.5);
+}
+
+/**
+ * Evento 5, `investmentDemandTic` (TIC_INVESTMENTDEMAND): solo las empresas de consumo, en orden de
+ * creación (`CopyOfConsumptionFirm2WagesEnd.onTicArrived` 72–75):
+ * 1. `BestQualityPriceCapitalSupplierWithSwitching.selectGoodSupplier` (114–150) sobre `selectedCapitalGoodSuppliers`:
+ *    el más atractivo de los vistos en el evento 3 (el primero en caso de empate); el proveedor previo
+ *    se reemplaza si está inactivo en el mercado de capital, o con probabilidad `switchingProbability`
+ *    si es menos atractivo. Con `payOrReceive` = true y "más atractivo = mayor", esa probabilidad es
+ *    siempre 0 (ver reglas-caiani.md): en la práctica solo se cambia de proveedor si el previo está
+ *    inactivo. Se porta tal cual.
+ * 2. `ConsumptionFirm.computeDesiredInvestment` (421–427) con `RealCapitalDemandWithPayBackPeriod` (97–130): demanda real de capital al proveedor elegido; si es
+ *    > 0, la empresa queda activa en el mercado de capital (nunca se desactiva acá).
+ * El "mercado activo" de `isActive` es el último que fijó un evento de mercado: el de capital (evento 3).
+ */
+export function investmentDemandEvent(s: CaianiState, rng: CaianiRng): void {
+  const firstK = s.capitalFirms[0]!.id;
+  const capitalFirm = (id: AgentId): FirmState => {
+    const k = s.capitalFirms[id - firstK];
+    if (!k || k.id !== id) throw new Error(`el agente ${id} no es una empresa de capital`);
+    return k;
+  };
+  const offered = (id: AgentId): CapitalGoodStock => {
+    const g = capitalFirm(id).capitalGoods[0];
+    if (!g) throw new Error(`empresa de capital ${id} sin inventario (JMAB: NullPointerException)`);
+    return g;
+  };
+  for (const c of s.consumptionFirms) {
+    const sellers = c.selectedCapitalSuppliers;
+    if (sellers === null || sellers.length === 0) {
+      throw new Error(`empresa de consumo ${c.id} sin vendedores de capital (JMAB: excepción en sellers.get(0))`);
+    }
+    const w = wageExpectation(c);
+    let best = sellers[0]!;
+    let maxAttr = -Infinity;
+    for (const k of sellers) {
+      const a = capitalAttractiveness(w, offered(k));
+      if (a > maxAttr) {
+        best = k;
+        maxAttr = a;
+      }
+    }
+    const prev = c.previousCapitalSupplier;
+    if (prev === null) throw new Error(`empresa de consumo ${c.id} sin proveedor de capital previo (JMAB: NullPointerException)`);
+    const prevAttr = capitalFirm(prev).active[MKT.CAPGOOD] ? capitalAttractiveness(w, offered(prev)) : -Infinity;
+    if (prevAttr < maxAttr) {
+      if (prevAttr === -Infinity || switches(prevAttr, maxAttr, s.rules.capitalSwitchingLambda, s.rules.capitalSwitchingPayOrReceive, rng)) {
+        c.previousCapitalSupplier = best;
+      }
+    }
+    c.desiredRealCapitalDemand = realCapitalDemand(c, offered(c.previousCapitalSupplier!));
+    if (c.desiredRealCapitalDemand > 0) c.active[MKT.CAPGOOD] = true;
   }
 }

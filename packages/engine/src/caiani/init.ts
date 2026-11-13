@@ -238,6 +238,10 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     previousBank: -1,
     previousLender: null,
     previousCapitalSupplier: null,
+    selectedCapitalSuppliers: null,
+    amountResearch: 0,
+    desiredCapacityGrowth: 0,
+    desiredRealCapitalDemand: 0,
     lags: {},
     expectations: {},
   });

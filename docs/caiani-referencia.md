@@ -133,7 +133,7 @@ Texto extraído en `reference/p0/paper-wp.txt` (`pdftotext -layout`). Secuencia 
   - El `prng` de la configuración se siembra con un número fijo en vez de la fecha.
   - Se arranca con `net.sourceforge.jabm.SimulationManager` (como el `.jar`), sin interfaz.
   - La distribución de cada sorteo es la misma que en el `.jar`.
-- **Registro de sorteos** (`draws.tsv`, una línea por sorteo: secuencia, tick, tipo, lugar, resultado). Tipos: `fn` (normal plegada), `bern` (cambio de proveedor, con su p), `shuffle` (orden de compradores y de candidatos a empleo público), `sample` (vendedores que ve cada comprador), `shuffleEmp` (orden de los empleados de una empresa), `unif` (rescate de bancos). Se registra el **resultado**, no el número crudo: el port no necesita reproducir los algoritmos de Colt, solo pedir los mismos sorteos.
+- **Registro de sorteos** (`draws.tsv`, una línea por sorteo: secuencia, tick, tipo, lugar, resultado). Tipos: `fn` (normal plegada), `bern` (cambio de proveedor, con su p), `shuffle` (orden de compradores, de vendedores en cada mezcla de los mercados y de candidatos a empleo público), `sample` (vendedores que ve cada comprador; desde el 2026-11-13 los mezcladores ya no lo emiten: ver `reglas-caiani.md`, sec. 1), `shuffleEmp` (orden de los empleados de una empresa), `unif` (rescate de bancos). Se registra el **resultado**, no el número crudo: el port no necesita reproducir los algoritmos de Colt, solo pedir los mismos sorteos.
 - **Reproducibilidad verificada (2026-11-12):**
   - Dos corridas con la semilla 12345 y 6 trimestres: los mismos 212.680 sorteos y los mismos 36 CSV.
   - Dos corridas con la semilla 777 y 60 trimestres (14 quiebras de empresas en el medio): los mismos CSV.
