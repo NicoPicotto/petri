@@ -139,6 +139,20 @@ export function rounding(site: string, x: number, rounded: number, tolerance: To
   return rounded;
 }
 
+/**
+ * Piso (`Math.floor`): la decisión es entre qué enteros cae x; el umbral es el entero más cercano (un x
+ * apenas por debajo de un entero k da k − 1, apenas por encima da k). Devuelve `Math.floor(x)`.
+ * Distancia relativa a max(|x|, |k|).
+ */
+export function flooring(site: string, x: number, tolerance: Tolerance): number {
+  const r = Math.floor(x);
+  if (active) {
+    const k = Math.round(x);
+    active.record(site, r, x, k, decisionDistance(x, k, tolerance), tolerance);
+  }
+  return r;
+}
+
 export interface DecisionFlip {
   event: number;
   site: string;

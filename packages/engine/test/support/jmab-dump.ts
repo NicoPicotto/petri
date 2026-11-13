@@ -259,7 +259,7 @@ export function stateFromDump(d: Dump): CaianiState {
 
   const households: HouseholdState[] = range('household').map((id) => {
     const j = agentOf(id);
-    if (goods(id, 2).length + goods(id, 3).length > 0) throw new Error(`hogar ${toJ(id)} con bienes: falta portar`);
+    if (goods(id, 3).length > 0) throw new Error(`hogar ${toJ(id)} con bienes de capital: falta portar`);
     const emp = ref(j['AbstractHousehold.employer']);
     return {
       ...flagsOf(j),
@@ -268,6 +268,8 @@ export function stateFromDump(d: Dump): CaianiState {
       employer: emp === null ? null : fromJ(emp),
       dividendsReceived: toMicro(j['Households.dividendsReceived']),
       interestReceived: toMicro(j['Households.interestsReceived']),
+      demand: j['Households.demand'],
+      consumptionGoods: goods(id, 2).map((it) => consumptionGoodOf(it, fromJ)),
       previousSeller: fromJ(ref(strat(j, 0)['previousGoodSupplier'])!),
       previousBank: fromJ(ref(strat(j, 11)['previousDepositSupplier'])!),
       lags: lagsOf(j['SimpleAbstractAgent.passedValues'], `hogar ${toJ(id)}`),
@@ -292,6 +294,7 @@ export function stateFromDump(d: Dump): CaianiState {
       previousLender: lender === null ? null : fromJ(lender),
       previousCapitalSupplier: capSup === null ? null : fromJ(capSup),
       amountResearch: consumption ? 0 : j['CapitalFirm.amountResearch'],
+      capitalProductivity: consumption ? 0 : j['CapitalFirm.capitalProductivity'],
       desiredCapacityGrowth: consumption ? j['ConsumptionFirm.desiredCapacityGrowth'] : 0,
       desiredRealCapitalDemand: consumption ? j['ConsumptionFirm.desiredRealCapitalDemand'] : 0,
       interestReceived: toMicro(j[consumption ? 'ConsumptionFirm.interestReceived' : 'CapitalFirm.interestReceived']),
@@ -390,6 +393,11 @@ export interface CompareResult {
    * compararon y cuántos superan la tolerancia. Es lo que se informa en cada corrida de V3.
    */
   amountFields: Record<string, { max: number; n: number; over: number }>;
+  /**
+   * `double` que superan su tolerancia, por tipo de campo: diferencia relativa máxima y cuántos. Sirve para
+   * informar los campos reportados (`REPORTED_FIELDS` del test) sin que tapen otras diferencias.
+   */
+  doubleFieldsOver: Record<string, { max: number; over: number }>;
 }
 
 /**
@@ -405,6 +413,13 @@ export interface CompareOptions {
   /** Tolerancia de los montos, en µ (por defecto, la del evento suelto). */
   amountTol?: number;
 }
+
+/**
+ * Rezagos que se calculan a partir de montos (tolerancia relativa 10⁻⁶): patrimonio, ingreso neto del hogar
+ * (salario + intereses + dividendos − impuestos, evento 17) y consumo real deseado (sale del ingreso y del
+ * patrimonio, evento 17).
+ */
+const LAGS_FROM_AMOUNTS: readonly number[] = [LAG.NETWEALTH, LAG.INCOME, LAG.CONSUMPTION];
 
 const PURE_TOL = 1e-9;
 const AMOUNTS_TOL = 1e-6;
@@ -424,6 +439,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   let total = 0;
   const counts = { contracts: 0, goods: 0, lags: 0, expectations: 0, maxAmountDiff: 0, maxRelPure: 0, maxRelFromAmounts: 0 };
   const amountFields: CompareResult['amountFields'] = {};
+  const doubleFieldsOver: CompareResult['doubleFieldsOver'] = {};
   const note = (msg: string) => {
     total++;
     if (diffs.length < 40) diffs.push(msg);
@@ -434,7 +450,12 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     const tol = fromAmounts ? AMOUNTS_TOL : PURE_TOL;
     if (fromAmounts) counts.maxRelFromAmounts = Math.max(counts.maxRelFromAmounts, r);
     else counts.maxRelPure = Math.max(counts.maxRelPure, r);
-    if (!(r <= tol)) note(`${what}: port ${port}, JMAB ${java} (rel ${r})`);
+    if (!(r <= tol)) {
+      const st = (doubleFieldsOver[fieldKind(what)] ??= { max: 0, over: 0 });
+      st.over++;
+      st.max = Math.max(st.max, r);
+      note(`${what}: port ${port}, JMAB ${java} (rel ${r})`);
+    }
   };
   /** Montos: la misma tolerancia para todos (`amountTol`, arriba). */
   const amount = (what: string, port: number, java: number) => {
@@ -494,7 +515,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
           note(`${w} rezago ${lid}[${period}]: falta en el port (JMAB ${v})`);
           continue;
         }
-        close(`${w} rezago ${lid}[${period}]`, p, v, Number(lid) === LAG.NETWEALTH);
+        close(`${w} rezago ${lid}[${period}]`, p, v, LAGS_FROM_AMOUNTS.includes(Number(lid)));
       }
     }
     for (const [lid, m] of Object.entries(port)) {
@@ -507,6 +528,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
 
   const firmOf = new Map<AgentId, FirmState>();
   for (const f of [...s.consumptionFirms, ...s.capitalFirms]) firmOf.set(f.id, f);
+  const householdOf = new Map<AgentId, HouseholdState>();
+  for (const h of s.households) householdOf.set(h.id, h);
 
   // Contratos y bienes reales, agente por agente.
   for (let id = 0; id < s.ledger.agents.length; id++) {
@@ -547,29 +570,33 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
         });
       }
     }
-    const f = firmOf.get(id);
+    const f = firmOf.get(id) ?? householdOf.get(id);
     const jc = sm[0]![2]!;
     const jk = sm[0]![3]!;
     if (!f) {
-      if (jc.length + jk.length > 0) note(`${toJ(id)} tiene bienes en JMAB y no es empresa en el port`);
+      if (jc.length + jk.length > 0) note(`${toJ(id)} tiene bienes en JMAB y no es empresa ni hogar en el port`);
       continue;
     }
+    const isHousehold = householdOf.has(id);
     same(`${toJ(id)} cantidad de bienes de consumo`, f.consumptionGoods.length, jc.length);
-    same(`${toJ(id)} cantidad de bienes de capital`, f.capitalGoods.length, jk.length);
+    same(`${toJ(id)} cantidad de bienes de capital`, isHousehold ? 0 : (f as FirmState).capitalGoods.length, jk.length);
     f.consumptionGoods.forEach((g, n) => {
       const it = jc[n];
       if (!it) return;
       const w = `${toJ(id)} bien de consumo [${n}]`;
       counts.goods++;
-      close(`${w} cantidad`, g.quantity, it['AbstractItem.quantity']);
-      close(`${w} valor`, g.value, it['AbstractItem.value']);
+      // Lo vendido sale de la demanda de los hogares, que sale de montos (eventos 17 y 18); lo comprado por
+      // un hogar vale lo que pagó.
+      close(`${w} cantidad`, g.quantity, it['AbstractItem.quantity'], true);
+      close(`${w} valor`, g.value, it['AbstractItem.value'], isHousehold);
       close(`${w} precio`, g.price, it['AbstractGood.price']);
       close(`${w} costo unitario`, g.unitCost, it['AbstractGood.unitCost']);
       same(`${w} edad`, g.age, it['AbstractItem.age']);
       same(`${w} productor`, toJ(g.producer), ref(it['AbstractGood.producer']));
       same(`${w} duración`, g.duration, it['consumptionGoodDuration']);
     });
-    f.capitalGoods.forEach((g, n) => {
+    if (isHousehold) continue;
+    (f as FirmState).capitalGoods.forEach((g, n) => {
       const it = jk[n];
       if (!it) return;
       const w = `${toJ(id)} bien de capital [${n}]`;
@@ -616,6 +643,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} salario`, h.wage, j['AbstractHousehold.wage']);
     amount(`${w} dividendos`, h.dividendsReceived, j['Households.dividendsReceived']);
     amount(`${w} intereses de depósitos`, h.interestReceived, j['Households.interestsReceived']);
+    close(`${w} demanda de consumo`, h.demand, j['Households.demand'], true);
     same(`${w} vendedor previo`, toJ(h.previousSeller), ref(strat(j, 0)['previousGoodSupplier']));
     same(`${w} banco previo`, toJ(h.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
     lagsCompare(w, h.lags, j['SimpleAbstractAgent.passedValues']);
@@ -638,6 +666,9 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
       close(`${w} demanda real de capital`, f.desiredRealCapitalDemand, j['ConsumptionFirm.desiredRealCapitalDemand'], true);
     }
     if (j['CapitalFirm.amountResearch'] !== undefined) close(`${w} I+D`, f.amountResearch, j['CapitalFirm.amountResearch']);
+    if (j['CapitalFirm.capitalProductivity'] !== undefined) {
+      close(`${w} productividad del capital`, f.capitalProductivity, j['CapitalFirm.capitalProductivity']);
+    }
     amount(`${w} intereses de depósitos`, f.interestReceived, j['ConsumptionFirm.interestReceived'] ?? j['CapitalFirm.interestReceived']);
     const jf = (k: string) => j[`ConsumptionFirm.${k}`] ?? j[`CapitalFirm.${k}`];
     amount(`${w} servicio de la deuda`, f.debtBurden, jf('debtBurden'));
@@ -678,5 +709,5 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   amount('BC intereses de adelantos', s.centralBank.interestsOnAdvances, jcb['interestsOnAdvances']);
   amount('BC intereses de bonos', s.centralBank.interestsOnBonds, jcb['interestsOnBonds']);
 
-  return { diffs, total, counts, amountFields };
+  return { diffs, total, counts, amountFields, doubleFieldsOver };
 }

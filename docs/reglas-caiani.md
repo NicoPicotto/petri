@@ -1,6 +1,6 @@
 # Reglas del port de Caiani (P3)
 
-Estado al 2026-11-13: **infraestructura de V3 por evento lista; eventos 0 a 15 portados y verificados en los ticks 1 y 50 (bit a bit en los `double` puros; montos con la regla general de tolerancia, sec. 1, todos ≤ 2 µ desde el redondeo con arrastre); contador de decisiones discretas en el V3.** Para retomar en una sesión nueva, ver la sec. 15. Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
+Estado al 2026-11-13: **infraestructura de V3 por evento lista; eventos 0 a 18 portados y verificados en los ticks 1 y 50 (bit a bit en los `double` puros; montos con la regla general de tolerancia, sec. 1); pagos con redondeo controlado por evento (`payments.ts`, sec. 1, "Reservas"); contador de decisiones discretas en el V3.** En el encadenado hasta el evento 18 hay campos reportados (sec. 17), que esperan decisión. Para retomar en una sesión nueva, ver la sec. 15. Plan general en [plan-port-caiani.md](plan-port-caiani.md) (sec. 4 y 7). Código: `packages/engine/src/caiani/events.ts` (eventos), `state.ts` (estado), `params.ts` (`RULES`); tests en `packages/engine/test/caiani-events.test.ts`, arnés en `test/support/jmab-dump.ts`.
 
 Todo lo que se afirma sobre JMAB sale de `reference/jmab-2015/src` (fuente equivalente al `.jar`, V0), de `paper-launcher/Model/modelFile.xml` y de los volcados del oráculo.
 
@@ -31,7 +31,7 @@ Implementación: `V3_AMOUNT_TOL` y `chainedAmountTol(k)` en `test/support/jmab-d
 
 **Redondeo con arrastre (decisión de Nico, 2026-11-13).** Cuando un agente recorre una lista de montos que JMAB acumula en `double`, cada monto se redondea como m_i = round(S_i) − round(S_{i−1}), con S_i la suma acumulada en `double` (`CarryRounder`, `money.ts`). Cada monto queda a < 1 µ de su `double` y la suma de cualquier tramo seguido de la lista, a ≤ 1 µ de la suma de JMAB; el agregado sigue siendo la suma de lo acreditado o pagado (consistencia SFC). Aplicado en el evento 8 (intereses de los depósitos de cada banco) y en las cuotas de los préstamos (`installments`: eventos 9 y 20; cambio de la decisión 3 de P1, ver [ledger-contratos.md](ledger-contratos.md), sec. 4). **Resultado en los ticks 1 y 50:** todos los montos ≤ 2 µ en el suelto y en el encadenado (`totInterestsDeposits` ≤ 1 µ, `debtBurden` ≤ 1 µ, `creditDemanded` ≤ 2 µ, préstamos y depósitos ≤ 2 µ).
 
-**Reservas y cuentas con muchos pagadores (propuesta para antes del primer evento con pagos entre agentes, el 18; a decidir por Nico).**
+**Reservas y cuentas con muchos pagadores: redondeo controlado por evento (aprobado por Nico el 2026-11-13; implementado en `caiani/payments.ts`, ver "Implementación" al final de este apartado).**
 
 *El problema.* El arrastre resuelve las cuentas que pagan (o cobran) un tramo seguido de una lista: el depósito de la empresa que paga 50 salarios, el total de intereses de un banco. No resuelve las cuentas que reciben montos **intercalados** de muchos pagadores. Un pago de P (banco a) a Q (banco b) mueve cuatro cuentas: el depósito de P, el de Q y, si a ≠ b, las reservas de a y de b. Cada monto es entero y las reservas se mueven exactamente por el monto, así que el error de las reservas de un banco es la suma de los errores de redondeo de todos los pagos entre bancos que lo tocan. Con el arrastre por pagador, esos errores no se cancelan: con ~600 pagos que entran a un banco en un evento de salarios, ~0,3·√600 ≈ 7 µ típico. Lo mismo para el depósito de una empresa de consumo que cobra a cientos de hogares (cada uno con su propio arrastre) y para la cuenta del gobierno con los impuestos.
 
@@ -51,6 +51,15 @@ Implementación: `V3_AMOUNT_TOL` y `chainedAmountTol(k)` en `test/support/jmab-d
 
 *Alternativas descartadas.* (a) Arrastre por par de bancos: acota las reservas pero deja sin acotar los depósitos de los pagadores. (b) Comparar las reservas descontando el residuo de redondeo que registra el ledger: es estricto con la lógica, pero lo que se calcula después a partir de las reservas (adelantos, ratio de liquidez) heredaría el residuo y habría que propagarlo. (c) Una tolerancia por cantidad de pagos que tocaron la cuenta: es lo que se quiere evitar.
 
+*Implementación (2026-11-13).* `caiani/payments.ts`, tests a mano y de propiedades en `test/caiani-payments.test.ts`.
+- `PaymentBatch`: el evento lo crea al empezar; `pay(desde, hacia, monto en µ como double, categoría)` anota el pago pendiente (las mismas patas que `pay` del ledger, incluida la liquidación entre bancos, pero sin tocar el ledger); `balance(contrato)` = saldo en µ + pendientes, para las decisiones del evento; `settle()` redondea y registra, y cierra el lote.
+- `controlledRound`: red fuente → bancos que pagan → cuentas que pagan → pagos → cuentas que cobran → bancos que cobran → sumidero, con cotas [⌊s⌋, ⌈s⌉] en cada arista (s = suma en `double`, en el orden de los pagos); circulación entera factible por reducción de las cotas inferiores a un flujo máximo (Dinic, aristas en orden de inserción: determinista). Verifica que las familias sean laminares (cada cuenta en un solo banco).
+- `applyPayments` (ledger): registra el lote de forma **atómica** (valida los saldos finales de todas las cuentas antes de tocar nada) y cada pago queda en el registro de flujos con su categoría. Los saldos intermedios no se validan: con montos redondeados, una cuenta que cobra y paga en el mismo evento puede pasar por −1 µ en el medio.
+- **Dos detalles de implementación** (no cambian la regla; los anoto para que Nico los vea):
+  - *Techo de las cuentas que solo pagan:* la suma de lo que paga una cuenta que no cobra nada en el lote (y no es de reservas) tiene además el techo de su saldo al empezar el lote. Sin eso, si la suma en `double` supera el saldo por ruido de redondeo (p. ej. 0,3 + 7,9 + 1,8 = 10,000000000000002 µ), el redondeo podía dar saldo + 1 y dejar un depósito negativo.
+  - *Cotas relajadas:* si las cotas estrictas no tienen solución (solo puede pasar si una suma exacta está pegada a un entero y la suma en `double` cae del otro lado), se reintenta con [⌊s − 10⁻³⌋, ⌈s + 10⁻³⌉] y la garantía de esa familia pasa a ser ≤ 1 µ. Se informa en `relaxed`. En los 600 lotes al azar del test y en los cuatro lotes del V3 (8.000–8.037 pagos) no hizo falta nunca.
+- **Medición en el evento 18** (el único con pagos portado hasta ahora): en los ticks 1 y 50 el cierre registra 8.000 y 8.037 pagos, con la diferencia máxima de cada pago y de cada suma < 1 µ; en el evento suelto, todos los montos (depósitos, reservas de los 10 bancos) quedan a ≤ 1 µ de JMAB. Encadenado: ver sec. 17.
+
 
 **Decisiones discretas (contador de V3, 2026-11-13, pedido de Nico).** Módulo `caiani/decisions.ts`, test a mano en `test/caiani-decisions.test.ts`.
 - Cada comparación que define una rama en un evento pasa por un helper (`gt`, `ge`, `lt`, `record`, `rounding`) que devuelve lo mismo que la comparación sola. Con un registrador activo (`withDecisions(rec, evento, fn)`) anota, por evento y por lugar, la **distancia al umbral** en la escala de la tolerancia del valor comparado (µ absolutos para montos; relativa para los `double`, a la escala de los operandos o de los términos de los que sale el valor) y el resultado. Si la distancia es ≤ la tolerancia, la decisión es **frágil**: una diferencia que V3 admite alcanzaría para darla vuelta. El registro solo observa: sin registrador, los helpers no hacen nada más que comparar.
@@ -58,8 +67,10 @@ Implementación: `V3_AMOUNT_TOL` y `chainedAmountTol(k)` en `test/support/jmab-d
 - **Qué no se registra:** comparaciones entre enteros exactos (edades, plazos, cantidades de la lista), banderas de actividad que vienen de otro evento (se registran donde se deciden), y la comparación del atractivo del proveedor previo cuando el previo **es** el mejor (es el mismo cálculo dos veces, no puede darse vuelta). El piso de la producción deseada (`max(0, …)`) se mide contra la escala de los términos de la resta, no contra el resultado.
 - **Qué no se registra (evento 15):** la comparación "trabajadores de la añada < restantes" de `ConsumptionFirm.produce`. En el umbral las dos ramas dan la misma producción (la función es continua), así que un vuelco no cambia el resultado más allá de la diferencia que lo provocó. Antes de sacarla daba 100 empates exactos en el tick 1 (50 trabajadores = 16 añadas × 3,125) y 2 en el 50.
 - **Qué no se registra (eventos 11–14):** la referencia micro del salario (vale k/4 exacto, sec. 12) y `laborDemand` contra los empleados (enteros).
+- **Qué no se registra (evento 18):** la comparación del precio del proveedor previo cuando el previo **es** el más barato de los vistos (el mismo precio dos veces; daba 76–79 "frágiles" con distancia 0 por tick). Las condiciones `demanda == 0` y `inventario == 0` después de la compra tampoco: son consecuencia exacta de la decisión `demanda ≤ inventario`, que sí se registra.
+- **`flooring` (2026-11-13):** decisión de un piso (`Math.floor`): el umbral es el entero más cercano. La usa el evento 18 (unidades que compra un hogar al que no le alcanza el depósito).
 - **`rounding` (corregido el 2026-11-13):** la distancia de x a k + 0,5 se mide relativa a max(|x|, |k + 0,5|); antes era relativa a |x|, y un 0 exacto (la I+D nula del evento 12) contaba como frágil con distancia 0.
-- **Resultado en los ticks 1 y 50 (eventos 0–14):** ninguna decisión se da vuelta. Frágiles:
+- **Resultado en los ticks 1 y 50 (eventos 0–18):** ninguna decisión se da vuelta. Frágiles:
 
   | Evento | Tick 1 | Tick 50 |
   |---|---|---|
@@ -78,12 +89,15 @@ Implementación: `V3_AMOUNT_TOL` y `chainedAmountTol(k)` en `test/support/jmab-d
   | 13 | sin comparaciones numéricas | ídem |
   | 14 | 0 de 3.600 (salario más barato; distancia mínima 1,2·10⁻⁶) | 0 de 5.250 (6,8·10⁻⁶) |
   | 15 | 0 de 2.000 | 0 de 2.186 |
+  | 16 | sin comparaciones numéricas | ídem |
+  | 17 | 0 de 8.000 | 0 de 8.000 |
+  | 18 | 0 de ~70.600 (el más barato a 2,1·10⁻⁷ como mínimo) | 0 de ~70.500 (cambio de proveedor a 1,3·10⁻⁶) |
 
   Las frágiles del tick 1 vienen de que la inicialización deja a todas las empresas y bancos de cada tipo iguales y justo en los umbrales (y el desempleo justo en el 8% del umbral de los salarios). En el tick 50 la distancia más chica es 1,8·10⁻⁴ (redondeo de los trabajadores requeridos).
 
 **Ticks de referencia del V3 (Nico, 2026-11-13).** Como el tick 1 tiene decisiones frágiles por la simetría de la inicialización, **las verificaciones V3 de referencia son las que arrancan en los ticks 50, 200 y 399**. El tick 1 es el **caso límite**: se sigue corriendo y se informa, pero una decisión frágil que se dé vuelta ahí no se lee como un error del port sin mirarla primero en los ticks de referencia.
 
-**Corridas de referencia** (semilla 12345; el test `caiani-events.test.ts` las recorre con `describe.each`):
+**Corridas de referencia** (semilla 12345; el test `caiani-events.test.ts` las recorre con `describe.each`; los volcados llegan hasta el evento 37):
 - `DUMP_TICKS=1 DUMP_EVENTS="1:0,1:1,…,1:14" reference/tools/run-oracle.sh p3-t1 12345 1 -1 999999`
 - `DUMP_TICKS=50 DUMP_EVENTS="50:0,50:1,…,50:14" reference/tools/run-oracle.sh p3-t50 12345 50 50 50`
 
@@ -105,7 +119,7 @@ Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y
 
 ## 2. Mapa del tick (eventos de comportamiento)
 
-Índices de la lista `events`. Los 39–134 son reportes (no modifican el estado; a confirmar con los volcados). Sorteos por evento en el tick 1 (semilla 12345) entre paréntesis.
+Índices de la lista `events` **sin los comentarios del XML**: la lista de `modelFile.xml` (líneas 41–188) tiene tres bloques comentados (`<!-- … -->`: líneas 81–141 y 167–170, con 59 y 2 reportes (por eso el mapa viejo daba 74 + 61 = 135), y 184–186, con `serializationTic`), y Spring no los carga. Quedan 76 eventos: 0–37 de comportamiento, **38–73 reportes**, **74 `populationHandlerTic`** y **75 `updateExpectationsTic`**. Antes este mapa contaba las referencias comentadas y daba 135 y 136 para los dos últimos: por eso `DUMP_EVENTS` con esos índices no generaba archivo (el oráculo numera los eventos que de verdad se disparan, `OrderedEventsSimulation.fireListEvents`). Verificado el 2026-11-13 con una corrida del tick 1 (`p3-end-t1`, volcados de los eventos 37, 38, 73, 74 y 75): 37 → 38 y 38 → 73 no cambian nada (los reportes no tocan el estado), 73 → 74 tampoco en el tick 1, y 74 → 75 trae la actualización de expectativas, los rezagos del período y `cleanSM` (edades, préstamos y bienes que se cierran). Sorteos por evento en el tick 1 (semilla 12345) entre paréntesis.
 
 | # | Evento | Estado |
 |---|---|---|
@@ -125,9 +139,9 @@ Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y
 | 13 | `governmentLaborTic` (1) | **portado, V3 ✓** |
 | 14 | `laborMarketTic` (768) | **portado, V3 ✓** |
 | 15 | `productionTic` | **portado, V3 ✓** |
-| 16 | `rdOutcomeTic` | |
-| 17 | `consumptionDemandTic` | |
-| 18 | `consumptionMarketTic` (14.675) | |
+| 16 | `rdOutcomeTic` | **portado, V3 ✓** |
+| 17 | `consumptionDemandTic` | **portado, V3 ✓** |
+| 18 | `consumptionMarketTic` (14.675) | **portado, V3 ✓** (encadenado con campos reportados, sec. 17) |
 | 19 | `capitalMarketTic2` (1) | |
 | 20 | `creditInterestsTic` | |
 | 21 | `payWageTic` (121) | |
@@ -139,8 +153,9 @@ Al portar un evento nuevo e: agregar `t:e` a `DUMP_EVENTS` de las dos corridas y
 | 27 | `depMarketTic` (13.998) | |
 | 28 | `bankruptcyTic` | |
 | 29–37 | bonos y reservas (`bondSupplyTic` … `reservesMarketBaselTic`) (30: 1; 35: 1) | |
-| 135 | `populationHandlerTic` | |
-| 136 | `updateExpectationsTic` (incluye `cleanSM`) | |
+| 38–73 | reportes (no modifican el estado; verificado en el tick 1) | no se portan |
+| 74 | `populationHandlerTic` | |
+| 75 | `updateExpectationsTic` (incluye `cleanSM`) | |
 
 ## 3. Evento 0: `computeExpectationsTic`
 
@@ -375,14 +390,71 @@ Lo escuchan solo las empresas de capital: `CopyOfCapitalFirm2WagesEnd.onTicArriv
 - Empresas de consumo: `selectedCapitalSuppliers` (evento 3), `desiredCapacityGrowth`, `desiredRealCapitalDemand` (evento 5). Empresas de capital: `amountResearch` (evento 4).
 - Empresas: `debtBurden`, `debtInterests`, `creditDemanded` (µ, evento 9).
 - Empresas y gobierno: `laborDemand` (eventos 12–14; el inicializador lo deja en −empleados).
-- Parámetros (`RULES`, con su línea del XML): participación del inventario objetivo, tasa de adelantos del BC, margen (umbral, paso, σ, iniciales), productividad del trabajo en capital, vendedores por comprador en el mercado de capital, `researchShare`, λ y `payOrReceive` del cambio de proveedor de capital, tasas iniciales de los bancos, estrategias de las tasas de préstamos y de depósitos (paso, sentido, σ) y techo de la tasa de depósitos; impuesto a las ganancias, `profitShare` y `shareOfExpIncomeAsDeposit` de las empresas (evento 9); plazo de los préstamos, vendedores del mercado de crédito, λ y `payOrReceive` del cambio de prestamista, aversiones al riesgo, quita y tasa de bonos inicial del banco (evento 10); estrategia del salario (umbrales micro y macro, pasos, σ, `employmentWageLag`), rotación, empleo público objetivo, vendedores y rondas del mercado de trabajo (eventos 11–14).
+- Empresas de capital: `capitalProductivity` (evento 16; 1 en el base).
+- Hogares: `demand` (eventos 17 y 18) y `consumptionGoods` (los bienes que compran en el evento 18, con su valor en unidades de Caiani como `double`, igual que el resto de los bienes reales).
+- Parámetros (`RULES`, con su línea del XML): participación del inventario objetivo, tasa de adelantos del BC, margen (umbral, paso, σ, iniciales), productividad del trabajo en capital, vendedores por comprador en el mercado de capital, `researchShare`, λ y `payOrReceive` del cambio de proveedor de capital, tasas iniciales de los bancos, estrategias de las tasas de préstamos y de depósitos (paso, sentido, σ) y techo de la tasa de depósitos; impuesto a las ganancias, `profitShare` y `shareOfExpIncomeAsDeposit` de las empresas (evento 9); plazo de los préstamos, vendedores del mercado de crédito, λ y `payOrReceive` del cambio de prestamista, aversiones al riesgo, quita y tasa de bonos inicial del banco (evento 10); estrategia del salario (umbrales micro y macro, pasos, σ, `employmentWageLag`), rotación, empleo público objetivo, vendedores y rondas del mercado de trabajo (eventos 11–14); `inventoriesLostShare` (evento 16); seguro de desempleo, alícuotas de los hogares, persistencia y propensiones a consumir (evento 17); vendedores y rondas del mercado de consumo, λ y `payOrReceive` del cambio de proveedor de consumo (evento 18).
 - `OracleCaianiRng`: opción `agentId` (sec. 1).
+- Pagos de un evento: `PaymentBatch` y `controlledRound` (`payments.ts`), `applyPayments` y `paymentLegs` (ledger).
 
 Cada campo nuevo va en `state.ts`, en `initialize` (valor del constructor de JMAB), en `stateFromDump` y en `compareState` (`test/support/jmab-dump.ts`).
 
 ## 15. Para retomar en una sesión nueva
 
 1. Leer este documento (sec. 1: método; sec. 2: mapa) y [inicializacion.md](inicializacion.md).
-2. Siguiente: **evento 16, `rdOutcomeTic`** (I+D, apagada en el base), **17, `consumptionDemandTic`**, y después 18–28 (consumo y pagos). Antes del evento 18 (primer pago entre agentes), decidir la propuesta del redondeo controlado (sec. 1, "Reservas"). Los volcados de las corridas de referencia (2026-11-13) llegan hasta el evento 37; los de los eventos 135 y 136 no se generan (ver pendientes).
-3. Por cada evento: agregar `t:e` a las dos corridas de referencia y correrlas; diff de volcados; leer el código de los agentes que escuchan el evento (`activeTicEvents`); portar en `events.ts` con la línea de JMAB al lado; casos a mano y V3 en `caiani-events.test.ts` (agregar el evento a la tabla `EVENTS`); cada comparación que define una rama, con los helpers de `decisions.ts`; registrar acá.
+2. Siguiente: **evento 19, `capitalMarketTic2`**, y después 20–28 (pagos: todos con `PaymentBatch`, sec. 1, "Reservas"). Antes, las decisiones pendientes de la sec. 17 (campos reportados del encadenado). Los volcados de las corridas de referencia (2026-11-13) llegan hasta el evento 37; los del final del tick son los eventos **74 y 75** (no 135 y 136: sec. 2), y hay que agregarlos a `DUMP_EVENTS` cuando se porten.
+3. Por cada evento: agregar `t:e` a las dos corridas de referencia y correrlas; diff de volcados (herramienta: `dumpdiff.py`, abajo); leer el código de los agentes que escuchan el evento (`activeTicEvents`); portar en `events.ts` con la línea de JMAB al lado; casos a mano y V3 en `caiani-events.test.ts` (agregar el evento a la tabla `EVENTS`); cada comparación que define una rama, con los helpers de `decisions.ts`; registrar acá.
 4. Norma operativa: no editar los scripts de `reference/tools` mientras corre algo largo ([arquitectura.md](arquitectura.md), "Corridas largas").
+5. Norma de Nico (2026-11-13): si al implementar aparece una regla o un cambio no aprobado, **se propone antes de meterlo** en el código.
+
+**Herramienta de diff de volcados** (recreada el 2026-11-13, fuera del repo; se puede volver a escribir en un rato): `python3 -I dumpdiff.py antes.jsonl despues.jsonl [ejemplos]` aplana cada agente (sin los `@oid`), agrupa los campos que cambian por población y por tipo (índices como `#`) y da cuántos agentes y un ejemplo; también compara `meta` (poblaciones, mercados, agregados).
+
+## 16. Eventos 16 y 17: resultado de la I+D y demanda de consumo (`rdOutcomeTic`, `consumptionDemandTic`)
+
+**Qué cambia en JMAB** (diff de volcados, tick 50). Evento 16: nada (el valor contable que recalcula ya estaba al día después del evento 15). Evento 17: `demand`, `active[MKT_CONSGOOD]` (a `true`) y los rezagos `LAG_INCOME` y `LAG_CONSUMPTION` de los 8.000 hogares. Sin sorteos en ninguno de los dos.
+
+| Qué | JMAB | Port |
+|---|---|---|
+| Disparo 16 | `CopyOfCapitalFirm2WagesEnd.onTicArrived` 81–82 → `CapitalFirm.researchOutcome` (360–379), empresas de capital con empleados | `rdOutcomeEvent` |
+| Investigadores | demanda de I+D = `(int) Math.floor(amountResearch / wᵉ)`; con `laborDemand` > 0: empleados − `Math.round(requeridos · empleados / (requeridos + I+D))` con aritmética **entera**; si no, la demanda de I+D | `researchWorkers` (`javaInt` reproduce el `(int)` de Java: NaN da 0) |
+| Ganancia | `RandDOutcomeBetaDistribution` (XML 1831–1837): 0 sin investigadores; si no, Bernoulli(1 − e^{−0,05·n}) y 0,2 × Beta(2, 5) | 0 sin investigadores; **con investigadores, error** (abajo) |
+| Inventario | `UpdateInventoriesProductivityWithCost` (1839–1842): `setQuantity(cantidad × (1 − 0))`, que en `CapitalGood` recalcula el valor contable, y productividad = la de la empresa | `setCapitalGoodQuantity`; `RULES.inventoriesLostShare` |
+| Disparo 17 | `Households.onTicArrived` 189–191 → `computeConsumptionDemand` (263–271) | `consumptionDemandEvent` |
+| Ingreso neto | `getNetIncome` (346–366): ocupado, bruto − impuestos; desocupado, 0,4 × salario medio de los ocupados (`unemploymentBenefit`, XML 2872) + bruto − impuestos. Bruto = salario (si tiene empleador) + intereses + dividendos (`getGrossIncome`, 458–460). Impuestos = max(0 × patrimonio + 0,18 × bruto, 0) (`IncomeWealthTaxStrategy`, 2808–2812) | `householdNetIncome`, `householdGrossIncome`, `householdTaxes` |
+| Salario medio | suma en el orden de la lista de la población, recalculada para cada desocupado (8.000 × 8.000 operaciones) | una vez por evento (nada de lo que lee cambia adentro) |
+| Patrimonio | `getNetWealth` (`getNumericBalanceSheet`): activos − pasivos, incluidos los bienes de consumo | ledger en µ + valor de los bienes (`householdNetWealth`); en el evento 17 los hogares tienen solo efectivo y depósito |
+| Demanda | `ConsumptionFixedPropensitiesOOIWWithPersistency` (2778–2787): 0 × consumo anterior + 1 × (0,385808 × Y/pᵉ + 0,25 × W/pᵉ); rezagos `LAG_INCOME` (antes) y `LAG_CONSUMPTION` (después); activo si > 0 | igual; la decisión "demanda > 0" se mide contra la escala de sus términos |
+
+**Rama no portada (evento 16, a decidir por Nico):** con investigadores (I+D > 0) el resultado necesita una Beta, que el `Rng` semántico no tiene (ni el oráculo la registra como valor). En el base `researchShare` = 0 y nunca hay investigadores, así que el port tira un error explícito si aparecen, en vez de inventar el sorteo. Si en algún momento se quiere la I+D, hay que agregar la Beta al `Rng` (y al registro del oráculo).
+
+**Verificación:**
+- A mano: evento 16 sin I+D (valor contable recalculado con un precio nuevo, productividad), investigadores sin restricción y con restricción (8 − ⌊80/12⌋ = 2), error con investigadores; evento 17 con un ocupado (bruto 6,3, neto 5,166) y un desocupado (seguro sobre el salario medio con dos salarios distintos), rezagos, bandera, y demanda 0 (no activa ni apaga).
+- V3, ticks 1 y 50: evento 16 diferencia 0. Evento 17 suelto: demanda y rezagos a 2·10⁻⁸ (tick 1) y 2,7·10⁻⁷ (tick 50) relativo, por los intereses, dividendos y depósitos en µ; encadenado, 3,4·10⁻⁷ y 4,1·10⁻⁷. En el tick 1 todos los hogares tienen el mismo salario (5); el 50 ejercita salarios distintos y desocupados.
+
+## 17. Evento 18: mercado de consumo (`consumptionMarketTic`)
+
+**Qué cambia en JMAB** (diff de volcados, tick 50): el orden de las listas del mercado de consumo (compradores y vendedores); los depósitos de los hogares y de las empresas (y sus reservas, en el BC); un `ConsumptionGood` nuevo por compra en el balance del hogar (8.037 en 8.000 hogares); el inventario de las 100 empresas; `demand` (a 0) y `active[MKT_CONSGOOD]` de los hogares; `previousGoodSupplier` (814 hogares); `active[MKT_CONSGOOD]` de las empresas que se quedan sin inventario (37). Sorteos: tick 1, 1 ronda (8.001 mezclas y 6.674 Bernoulli del cambio de proveedor); tick 50, 3 rondas (8.040 mezclas, 6.210 Bernoulli).
+
+| Qué | JMAB | Port |
+|---|---|---|
+| Disparo | `SimpleMarketSimulation` (XML 265–283), `nbRuns` = 100: el mezclador se repite mientras haya un comprador activo y un vendedor activo | `consumptionMarketEvent` |
+| Mezclador | `SelectionRandomRobinBuyerMixer` (`nbSellers` = 5, 291–295): mezcla los hogares; para cada uno activo en consumo, mezcla las empresas y toma las primeras 5 activas | `selectSellers` (el del evento 3) |
+| Proveedor | `CheapestGoodSupplierWithSwitching.selectGoodSupplier`: el más barato (el primero si hay empate); el previo vale +∞ si está inactivo; si el previo es más caro, cambia si vale +∞ o con `switches` (pago, λ = ln 2 / 0,2, `switchingStrategy3`, 1780–1786) | `selectGoodSupplier` |
+| Precio | `ConsumptionFirm.getPrice` (802–805): el del inventario | igual |
+| Compra | `AtOnceMechanism.execute`: cantidad = min(demanda, inventario); monto = cantidad × precio; cobra el primer depósito de la empresa (`getPayableStock`), paga el primer depósito del hogar (`getPayingStocks`); si el depósito no alcanza, el hogar queda inactivo y compra ⌊depósito / precio⌋ | `consumptionPurchase`; el depósito es el saldo en µ + los pendientes del lote (`PaymentBatch.balance`) |
+| Pago | `AbstractBank.transfer` (con reservas entre bancos) | `PaymentBatch.pay`; se registra al cerrar el evento con redondeo controlado (sec. 1, "Reservas") |
+| Bien | `new ConsumptionGood(monto, cantidad, hogar, empresa, precio, duración)`: edad 0, costo unitario 0 | igual (valor en unidades de Caiani, `double`) |
+| Después | inventario − cantidad (`ConsumptionGood.setQuantity` no recalcula el valor); demanda − cantidad; hogar inactivo si la demanda o el depósito llegan a 0; empresa inactiva si el inventario llega a 0 | igual |
+| `reallocateLiquidity` | pasa a la cuenta que paga lo que falte desde las otras cuentas del hogar (depósitos y efectivo) | no mueve nada si las otras cuentas están en 0; **si no, error** (abajo) |
+
+**Rama no portada:** `reallocateLiquidity` con otra cuenta del hogar con saldo. En la corrida base no pasa: el efectivo de los hogares es siempre 0 ([inicializacion.md](inicializacion.md), sec. 5) y cada hogar tiene un solo depósito (verificado en los volcados de los ticks 1 y 50, antes del evento 18 y después del mercado de depósitos, evento 27). Es la misma situación que la rama de `Households.payTaxes` con efectivo (pendientes).
+
+**Qué se ejercita.** Tick 1: una ronda; las 8.000 compras cubren la demanda entera; 24 hogares cambian de proveedor. Tick 50: tres rondas; 37 empresas se quedan sin inventario y 35 hogares compran a dos empresas (la segunda compra es el resto de su demanda); 814 cambian de proveedor. **Sin cobertura de V3:** el hogar al que no le alcanza el depósito (solo caso a mano).
+
+**Verificación:**
+- A mano: el proveedor (previo inactivo cambia sin sortear; previo más caro, Bernoulli en los dos sentidos; empate entre empresas distintas, se queda); compra de la demanda entera (2 × 1,25: el pago de 2.500.000 µ es exacto), depósito insuficiente (⌊depósito / 1,25⌋ unidades, queda < 1,25), empresa que se queda sin inventario (el hogar sigue activo y el mercado se cierra).
+- V3, ticks 1 y 50, **evento suelto: `double` bit a bit (diferencia 0) y todos los montos ≤ 1 µ** (depósitos de hogares y empresas, reservas de los 10 bancos). Sin decisiones frágiles ni dadas vuelta.
+- **V3 encadenado desde el principio del tick (0–18): cumple la regla de montos, pero con dos cosas para decidir (Nico):**
+  1. **Montos.** Después del evento 18: depósitos 8 µ (tick 1) y 11 µ (tick 50), reservas 2 y 18 µ; la tolerancia del encadenado es 2 × 19 = 38 µ. Pero el evento 18 solo agrega hasta 16 µ, más que sus 2 µ del evento suelto: no se cumple el supuesto de la regla ("cada evento agrega como mucho su error estricto"). **Causa:** no es el redondeo (en el suelto, ≤ 1 µ). Es una amplificación por suma: en el encadenado, la demanda de cada hogar difiere de la de JMAB en ~10⁻⁷ relativo (sale de sus intereses, dividendos y depósito en µ, eventos 8 y 17), o sea ~0,1–0,4 µ en el monto de cada compra; las reservas de un banco suman ~1.600 compras entre bancos y los depósitos de una empresa ~80, y esos errores se acumulan como una caminata al azar (√1.600 × 0,15 µ ≈ 6 µ típico; 18 µ como máximo en 10 bancos).
+  2. **`double` de bienes de consumo** (reportados, `REPORTED_FIELDS` del test; no se agrandó ninguna tolerancia): en el tick 50, 21 cantidades y 20 valores superan el 10⁻⁶ relativo, hasta 2,2·10⁻⁵. Son **residuos**: lo que queda del inventario de una empresa después de ~80 ventas (la última compra se lleva el resto) o el resto de la demanda de un hogar en su segunda compra. El error absoluto es el de las demandas sumadas (~7·10⁻⁶ unidades), chico frente a lo vendido pero grande frente a un residuo de 0,1–0,4 unidades. En el evento suelto son bit a bit.
+  - **Propuestas (a decidir):** (a) para los residuos, medir la diferencia relativa a la escala de los términos de la resta (el inventario antes del evento, la demanda del hogar al empezar el evento), como ya se hace con las decisiones discretas (sec. 1); (b) para los montos, aceptar que el encadenado supera los 2 µ por evento en los eventos que suman muchos montos derivados de otros (el límite 2·k se sigue cumpliendo con margen), o pasar a una tolerancia del encadenado que crezca con la raíz de la cantidad de pagos que tocan la cuenta (es lo que la regla general quería evitar); (c) dejarlos reportados y mirar cómo evolucionan al encadenar los eventos 19–28.
+

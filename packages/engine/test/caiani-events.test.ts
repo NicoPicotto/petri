@@ -30,6 +30,14 @@ import {
   governmentLaborEvent,
   laborMarketEvent,
   productionEvent,
+  rdOutcomeEvent,
+  researchWorkers,
+  consumptionDemandEvent,
+  consumptionMarketEvent,
+  selectGoodSupplier,
+  firstAsset,
+  netFinancialWorth,
+  toUnits,
   adaptiveWage,
   wageMicroReference,
   expectedReturnCreditSupply,
@@ -880,9 +888,178 @@ describe('evento 15 (producción): casos a mano', () => {
   });
 });
 
+describe('evento 16 (resultado de la I+D): casos a mano', () => {
+  it('sin I+D: sin investigadores ni sorteos; el inventario recalcula su valor contable y toma la productividad', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const k = s.capitalFirms[0]!;
+    const inv = k.capitalGoods[0]!;
+    inv.price = 2.7; // un precio nuevo (evento 1) que todavía no entró al valor contable
+    const q = inv.quantity;
+    rdOutcomeEvent({ ...s, consumptionFirms: [], capitalFirms: [k] });
+    expect(researchWorkers(s, k)).toBe(0);
+    expect(k.capitalProductivity).toBe(1);
+    expect(inv.productivity).toBe(1);
+    expect(inv.quantity).toBe(q * (1 - 0)); // inventoriesLostShare = 0
+    expect(inv.value).toBe(2.7 * q * (1 - inv.age / inv.amortization)); // CapitalGood.setQuantity
+  });
+
+  it('investigadores: ⌊I+D / wᵉ⌋; con demanda de trabajo sin cubrir, empleados − entero(requeridos·empleados / total)', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const k = s.capitalFirms[0]!;
+    const w = k.expectations[EXPECTATION.WAGES]!.expectation; // 5
+    k.amountResearch = 2.5 * w; // ⌊2,5⌋ = 2
+    k.laborDemand = 0;
+    expect(researchWorkers(s, k)).toBe(2);
+    // Restringida: requeridos round(20/2) = 10, total 12, 8 empleados → producir ⌊80/12⌋ = 6, investigar 2.
+    k.desiredOutput = 20;
+    k.laborDemand = 4;
+    k.employees = k.employees.slice(0, 8);
+    expect(researchWorkers(s, k)).toBe(8 - Math.trunc(80 / 12));
+    // Con investigadores, el resultado (Bernoulli y Beta) no está portado: error explícito.
+    expect(() => rdOutcomeEvent({ ...s, consumptionFirms: [], capitalFirms: [k] })).toThrow(/no está portado/);
+  });
+});
+
+describe('evento 17 (demanda de consumo): casos a mano', () => {
+  it('ocupado y desocupado: ingreso neto, rezagos, demanda c₁·Y/pᵉ + c₂·W/pᵉ y bandera del mercado', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const employed = s.households.filter((h) => h.employer !== null);
+    const emp = employed[0]!;
+    const unemp = s.households.find((h) => h.employer === null)!;
+    // Salarios: todos 5 salvo dos ocupados con 6 (y uno de ellos es `emp`). Salario medio de los ocupados:
+    employed[0]!.wage = 6;
+    employed[1]!.wage = 6;
+    const n = employed.length;
+    const avg = (5 * (n - 2) + 12) / n;
+    emp.interestReceived = 100_000; // 0,1
+    emp.dividendsReceived = 200_000; // 0,2
+    unemp.interestReceived = 0;
+    unemp.dividendsReceived = 500_000; // 0,5
+    const pe = emp.expectations[EXPECTATION.CONSPRICE]!.expectation;
+    const wEmp = toUnits(netFinancialWorth(s.ledger, emp.id));
+    const wUnemp = toUnits(netFinancialWorth(s.ledger, unemp.id));
+    consumptionDemandEvent(s);
+    // Ocupado: bruto 6 + 0,1 + 0,2 = 6,3; impuestos 18% = 1,134; neto 5,166.
+    expect(emp.lags[LAG.INCOME]![1]).toBeCloseTo(5.166, 12);
+    expect(emp.demand).toBeCloseTo(0.385808 * (5.166 / pe) + 0.25 * (wEmp / pe), 12);
+    expect(emp.lags[LAG.CONSUMPTION]![1]).toBe(emp.demand);
+    expect(emp.active[MKT.CONSGOOD]).toBe(true);
+    // Desocupado: seguro 0,4 × salario medio; bruto 0,5 (dividendos); impuestos 0,09.
+    const yU = 0.4 * avg + 0.5 - 0.09;
+    expect(unemp.lags[LAG.INCOME]![1]).toBeCloseTo(yU, 12);
+    expect(unemp.demand).toBeCloseTo(0.385808 * (yU / pe) + 0.25 * (wUnemp / pe), 12);
+  });
+
+  it('demanda 0 no activa al hogar en el mercado de consumo (y no apaga una bandera ya prendida)', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const [h, g] = [s.households[0]!, s.households[1]!];
+    h.expectations[EXPECTATION.CONSPRICE]!.expectation = Infinity; // Y/∞ + W/∞ = 0
+    g.expectations[EXPECTATION.CONSPRICE]!.expectation = Infinity;
+    g.active[MKT.CONSGOOD] = true;
+    consumptionDemandEvent({ ...s, households: [h, g] });
+    expect(h.demand).toBe(0);
+    expect(h.active[MKT.CONSGOOD]).toBe(false);
+    expect(g.active[MKT.CONSGOOD]).toBe(true);
+  });
+});
+
+describe('evento 18 (mercado de consumo): casos a mano', () => {
+  /** Rng que devuelve una secuencia fija de Bernoulli (y falla con cualquier otro sorteo). */
+  const fixedBernoulli = (xs: boolean[]): CaianiRng => {
+    let k = 0;
+    const no = () => {
+      throw new Error('no se esperaba este sorteo');
+    };
+    return { foldedNormal: no, bernoulli: () => xs[k++]!, shuffle: no, shuffleEmployees: no, sample: no, uniform01: no };
+  };
+
+  it('proveedor: el más barato; previo inactivo → cambia sin sortear; previo más caro → Bernoulli; previo igual de barato → se queda', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    const [a, b, c] = [s.consumptionFirms[0]!, s.consumptionFirms[1]!, s.consumptionFirms[2]!];
+    a.consumptionGoods[0]!.price = 1.3;
+    b.consumptionGoods[0]!.price = 1.2;
+    c.consumptionGoods[0]!.price = 1.25;
+    for (const f of [a, b, c]) f.active[MKT.CONSGOOD] = true;
+    const h = s.households[0]!;
+    // Previo inactivo: precio +∞, cambia al más barato (b) sin sortear.
+    h.previousSeller = c.id;
+    c.active[MKT.CONSGOOD] = false;
+    expect(selectGoodSupplier(s, h, [a.id, b.id], fixedBernoulli([]))).toBe(b.id);
+    // Previo activo y más caro (a, 1,3 > 1,2): Bernoulli con p = 1 − e^{λ(1,2 − 1,3)/1,2}; si sale falso, se queda.
+    h.previousSeller = a.id;
+    expect(selectGoodSupplier(s, h, [c.id, b.id], fixedBernoulli([false]))).toBe(a.id);
+    expect(selectGoodSupplier(s, h, [c.id, b.id], fixedBernoulli([true]))).toBe(b.id);
+    // Previo igual de barato que el mejor visto (otra empresa con el mismo precio): no es más caro, se queda.
+    c.active[MKT.CONSGOOD] = true;
+    c.consumptionGoods[0]!.price = 1.2;
+    h.previousSeller = c.id;
+    expect(selectGoodSupplier(s, h, [a.id, b.id], fixedBernoulli([]))).toBe(c.id);
+  });
+
+  /** Estado inicial con un solo hogar y una sola empresa activos en el mercado de consumo. */
+  const oneBuyerOneSeller = (demand: number, inventory: number) => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    for (const h of s.households) h.active[MKT.CONSGOOD] = false;
+    for (const f of s.consumptionFirms) f.active[MKT.CONSGOOD] = false;
+    const h = s.households[0]!;
+    const c = s.consumptionFirms[3]!;
+    h.active[MKT.CONSGOOD] = true;
+    h.demand = demand;
+    h.previousSeller = s.consumptionFirms[0]!.id; // inactivo: cambia a c sin sortear
+    c.active[MKT.CONSGOOD] = true;
+    c.consumptionGoods[0]!.price = 1.25;
+    c.consumptionGoods[0]!.quantity = inventory;
+    const hDep = firstAsset(s.ledger, h.id, 'deposit')!;
+    const cDep = firstAsset(s.ledger, c.id, 'deposit')!;
+    return { s, h, c, hDep, cDep, h0: hDep.amount, c0: cDep.amount };
+  };
+
+  it('compra la demanda entera: paga cantidad × precio, recibe el bien, queda inactivo; la empresa cobra', () => {
+    const { s, h, c, hDep, cDep, h0, c0 } = oneBuyerOneSeller(2, 100);
+    expect(h0).toBeGreaterThan(2_500_000);
+    const r = consumptionMarketEvent(s, new PrngCaianiRng(Rng.fromSeed(3)));
+    expect(r.payments).toBe(1);
+    expect(hDep.amount).toBe(h0 - 2_500_000); // 2 × 1,25, un monto entero de µ: exacto
+    expect(cDep.amount).toBe(c0 + 2_500_000);
+    expect(h.consumptionGoods).toEqual([{ quantity: 2, value: 2.5, price: 1.25, unitCost: 0, age: 0, producer: c.id, duration: c.consumptionGoods[0]!.duration }]);
+    expect(c.consumptionGoods[0]!.quantity).toBe(98);
+    expect(h.demand).toBe(0);
+    expect(h.active[MKT.CONSGOOD]).toBe(false);
+    expect(h.previousSeller).toBe(c.id);
+    expect(c.active[MKT.CONSGOOD]).toBe(true);
+  });
+
+  it('depósito insuficiente: compra ⌊depósito / precio⌋ y queda inactivo', () => {
+    const { s, h, hDep, h0 } = oneBuyerOneSeller(1e9, 1e12);
+    consumptionMarketEvent(s, new PrngCaianiRng(Rng.fromSeed(3)));
+    const q = Math.floor(toUnits(h0) / 1.25);
+    expect(h.consumptionGoods[0]!.quantity).toBe(q);
+    expect(hDep.amount).toBe(h0 - q * 1_250_000);
+    expect(hDep.amount).toBeLessThan(1_250_000);
+    expect(h.demand).toBe(1e9 - q);
+    expect(h.active[MKT.CONSGOOD]).toBe(false);
+  });
+
+  it('la empresa se queda sin inventario: vende lo que tiene, queda inactiva; el hogar sigue activo y el mercado se cierra', () => {
+    const { s, h, c, hDep, h0 } = oneBuyerOneSeller(2, 1.5);
+    consumptionMarketEvent(s, new PrngCaianiRng(Rng.fromSeed(3)));
+    expect(h.consumptionGoods[0]!.quantity).toBe(1.5);
+    expect(hDep.amount).toBe(h0 - 1_875_000);
+    expect(c.consumptionGoods[0]!.quantity).toBe(0);
+    expect(c.active[MKT.CONSGOOD]).toBe(false);
+    expect(h.demand).toBe(0.5);
+    expect(h.active[MKT.CONSGOOD]).toBe(true);
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
-/** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–14. */
+/** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–37. */
 const RUNS = [
   { run: 'p3-t1', tick: 1 },
   { run: 'p3-t50', tick: 50 },
@@ -906,14 +1083,33 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   { e: 13, run: governmentLaborEvent },
   { e: 14, run: laborMarketEvent },
   { e: 15, run: (s) => productionEvent(s) },
+  { e: 16, run: (s) => rdOutcomeEvent(s) },
+  { e: 17, run: (s) => consumptionDemandEvent(s) },
+  {
+    e: 18,
+    run: (s, rng) => {
+      const r = consumptionMarketEvent(s, rng);
+      console.log(`evento 18, cierre del lote: ${JSON.stringify(r)}`);
+    },
+  },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
 /**
- * Montos que no cumplen la regla general de tolerancia y quedan reportados (no se agranda la tolerancia):
- * se informan en cada corrida y esperan una decisión. Ver reglas-caiani.md, sec. 1, "Tolerancias".
+ * Campos que no cumplen la regla general de tolerancia y quedan **reportados** (no se agranda la tolerancia):
+ * se informan en cada corrida y esperan una decisión de Nico. Ver reglas-caiani.md, sec. 1, "Tolerancias".
+ * Cada entrada es el tipo de campo (la etiqueta sin ids ni índices, como la imprime `compareState`) y en qué
+ * modalidad se reporta.
+ * - Montos: ninguno desde el redondeo con arrastre (2026-11-13).
+ * - Bienes de consumo después del evento 18, encadenado (2026-11-13): cantidades y valores que son **residuos**
+ *   (lo que queda del inventario de una empresa después de decenas de ventas, o el resto de la demanda de un
+ *   hogar en su segunda compra). El error absoluto es el de las demandas del encadenado (~10⁻⁶), pero relativo
+ *   a un residuo chico pasa el 10⁻⁶. En el evento suelto son bit a bit. Ver reglas-caiani.md, sec. 17.
  */
-const REPORTED_AMOUNT_FIELDS: string[] = []; // vacía desde el redondeo con arrastre (2026-11-13)
+const REPORTED_FIELDS: { field: string; chainedOnly: boolean }[] = [
+  { field: '# bien de consumo [#] cantidad', chainedOnly: true },
+  { field: '# bien de consumo [#] valor', chainedOnly: true },
+];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;
@@ -933,20 +1129,25 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     return rng;
   };
   /**
-   * Compara contra el volcado y devuelve las diferencias que superan la tolerancia. Los montos de los
-   * campos de `REPORTED_AMOUNT_FIELDS` que la superan se informan aparte y no hacen fallar el test
-   * (reglas-caiani.md, sec. 1, "Tolerancias": campos reportados).
+   * Compara contra el volcado y falla con las diferencias que superan la tolerancia. Los campos de
+   * `REPORTED_FIELDS` (en su modalidad) que la superan se informan aparte y no hacen fallar el test
+   * (reglas-caiani.md, sec. 1, "Tolerancias": campos reportados). Sin `amountTol`, es el evento suelto.
    */
   const check = (s: CaianiState, name: string, label: string, amountTol?: number) => {
+    const chained = amountTol !== undefined;
     const r = compareState(s, dumpOf(name), { amountTol });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     report(label, r);
-    const unexpected = r.diffs.filter((d) => !REPORTED_AMOUNT_FIELDS.some((f) => d.includes(f)));
+    const reported = REPORTED_FIELDS.filter((f) => chained || !f.chainedOnly).map((f) => f.field);
+    const isReported = (kind: string) => reported.includes(kind);
+    const reportedRows = [...Object.entries(r.amountFields), ...Object.entries(r.doubleFieldsOver)].filter(([k, v]) => isReported(k) && v.over > 0);
+    if (reportedRows.length > 0) {
+      console.log(`Campos reportados, tick ${tick}, ${label}:\n  ${reportedRows.map(([k, v]) => `${k}: ${v.over} sobre la tolerancia, máx ${v.max}`).join('\n  ')}`);
+    }
+    const unexpected = r.diffs.filter((d) => !isReported(d.slice(0, d.indexOf(':')).replace(/\d+/g, '#')));
     expect(unexpected).toEqual([]);
     // `diffs` guarda solo las primeras 40: si se llenó con reportados, el total tiene que cuadrar con ellos.
-    const reportedOver = Object.entries(r.amountFields)
-      .filter(([k]) => REPORTED_AMOUNT_FIELDS.some((f) => k.includes(f)))
-      .reduce((a, [, v]) => a + v.over, 0);
+    const reportedOver = reportedRows.reduce((a, [, v]) => a + v.over, 0);
     expect(r.total - reportedOver).toBe(unexpected.length);
   };
   /** Montos con diferencia > 0, por tipo de campo: máximo, cuántos superan la tolerancia y de cuántos. */

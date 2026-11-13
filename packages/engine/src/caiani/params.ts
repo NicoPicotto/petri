@@ -238,6 +238,30 @@ export interface RuleParams {
   laborMarketSellers: number; // 377
   /** `SimpleMarketSimulation.nbRuns` del mercado de trabajo: rondas del mezclador, mientras no se cierre. */
   laborMarketRuns: number; // 364
+  /** `UpdateInventoriesProductivityWithCost.inventoriesLostShare`: inventario que se pierde al innovar (evento 16). */
+  inventoriesLostShare: number; // 1841
+  /** `GovernmentAntiCyclical.unemploymentBenefit`: seguro de desempleo, como fracción del salario medio de los ocupados. */
+  unemploymentBenefit: number; // 2872
+  /** `IncomeWealthTaxStrategy` de los hogares: alícuotas sobre el ingreso bruto y sobre el patrimonio (eventos 17 y 24). */
+  householdIncomeTaxRate: number; // 2810
+  householdWealthTaxRate: number; // 2811
+  /**
+   * `ConsumptionFixedPropensitiesOOIWWithPersistency` (evento 17): persistencia del consumo pasado y propensiones
+   * a consumir del ingreso neto y del patrimonio.
+   */
+  consumptionPersistency: number; // 2780
+  propensityOutOfIncome: number; // 2781
+  propensityOutOfWealth: number; // 2782
+  /** `SelectionRandomRobinBuyerMixer.nbSellers` del mercado de consumo: empresas que ve cada hogar (evento 18). */
+  consumptionMarketSellers: number; // 294
+  /** `SimpleMarketSimulation.nbRuns` del mercado de consumo: rondas del mezclador, mientras no se cierre. */
+  consumptionMarketRuns: number; // 282
+  /**
+   * `SwitchingStrategySimple` del proveedor de consumo (`switchingStrategy3`): λ = −ln(0,5) / thresholdMean, con
+   * thresholdMean = 0,2 (1783) y `payOrReceive` = true (1785).
+   */
+  consumerSwitchingLambda: number;
+  consumerSwitchingPayOrReceive: boolean; // 1785
 }
 
 /**
@@ -292,4 +316,15 @@ export const RULES: Readonly<RuleParams> = {
   governmentLaborDemand: 1360,
   laborMarketSellers: 10,
   laborMarketRuns: 8000,
+  inventoriesLostShare: 0,
+  unemploymentBenefit: 0.4,
+  householdIncomeTaxRate: 0.18,
+  householdWealthTaxRate: 0,
+  consumptionPersistency: 0,
+  propensityOutOfIncome: 0.385808,
+  propensityOutOfWealth: 0.25,
+  consumptionMarketSellers: 5,
+  consumptionMarketRuns: 100,
+  consumerSwitchingLambda: LN2 / 0.2,
+  consumerSwitchingPayOrReceive: true,
 };

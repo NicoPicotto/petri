@@ -17,11 +17,12 @@
  */
 
 import { contractIds, contractOf, credit, firstAsset, installments, netFinancialWorth, open, type AgentId, type ContractKind, type Ledger } from './ledger';
-import { CarryRounder, toMicro, toUnits, type Micro } from './money';
+import { CarryRounder, MICRO_PER_UNIT, toMicro, toUnits, type Micro } from './money';
+import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
-import { ge, gt, lt, record, rounding } from './decisions';
+import { flooring, ge, gt, lt, record, rounding } from './decisions';
 import {
   EXPECTATION,
   LAG,
@@ -33,6 +34,7 @@ import {
   type BankState,
   type CaianiState,
   type CapitalGoodStock,
+  type ConsumptionGoodStock,
   type Expectations,
   type FirmState,
   type GovernmentState,
@@ -57,6 +59,9 @@ export const EVENT = {
   GOVERNMENT_LABOR: 13,
   LABOR_MARKET: 14,
   PRODUCTION: 15,
+  RD_OUTCOME: 16,
+  CONSUMPTION_DEMAND: 17,
+  CONSUMPTION_MARKET: 18,
 } as const;
 
 /**
@@ -1399,4 +1404,301 @@ function capitalProduce(s: CaianiState, k: FirmState): void {
 export function productionEvent(s: CaianiState): void {
   for (const c of s.consumptionFirms) consumptionProduce(s, c);
   for (const k of s.capitalFirms) capitalProduce(s, k);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 16: resultado de la I+D
+// ---------------------------------------------------------------------------------------------
+
+/** `(int)` de Java aplicado a un double: trunca hacia 0; NaN da 0; satura en los extremos de `int`. */
+function javaInt(x: number): number {
+  if (Number.isNaN(x)) return 0;
+  if (x >= 2147483647) return 2147483647;
+  if (x <= -2147483648) return -2147483648;
+  return Math.trunc(x);
+}
+
+/**
+ * Investigadores de la empresa de capital en el tick (`CapitalFirm.researchOutcome` 361–373), con empleados:
+ * - demanda de I+D = `(int) Math.floor(amountResearch / wᵉ)`;
+ * - si no cubrió su demanda de trabajo (`laborDemand` > 0): requeridos para producir (`getRequiredWorkers()`),
+ *   total = requeridos + I+D, dedicados a producir = `Math.round(requeridos · empleados / total)` con aritmética
+ *   **entera** de Java (el `Math.round` de un `int` no cambia nada), investigadores = empleados − dedicados;
+ * - si no: investigadores = demanda de I+D.
+ * Con I+D nula (el base) da 0. Un total 0 es la `ArithmeticException` de JMAB: error.
+ */
+export function researchWorkers(s: CaianiState, k: FirmState): number {
+  const researchLaborDemand = javaInt(Math.floor(k.amountResearch / wageExpectation(k)));
+  if (k.laborDemand > 0) {
+    const outputLaborDemand = capitalRequiredWorkersInt(s, k);
+    const totalLaborDesired = outputLaborDemand + researchLaborDemand;
+    const actualLabor = k.employees.length;
+    if (totalLaborDesired === 0) throw new Error(`empresa de capital ${k.id}: división entera por 0 (JMAB: ArithmeticException)`);
+    const actualOutputLabor = Math.trunc((outputLaborDemand * actualLabor) / totalLaborDesired);
+    return actualLabor - actualOutputLabor;
+  }
+  return researchLaborDemand;
+}
+
+/**
+ * Evento 16, `rdOutcomeTic` (TIC_RDOUTCOME): solo las empresas de capital, en orden de creación
+ * (`CopyOfCapitalFirm2WagesEnd.onTicArrived` 81–82 → `CapitalFirm.researchOutcome` 360–379). Con empleados:
+ * - ganancia de productividad (`RandDOutcomeBetaDistribution.computeRandDOutcome`): 0 sin investigadores, sin
+ *   sorteos; con investigadores, una Bernoulli(1 − e^{−0,05·n}) y, si sale, 0,2 × Beta(2, 5) (XML 1831–1837);
+ * - `capitalProductivity` += ganancia;
+ * - `UpdateInventoriesProductivityWithCost.updateInventoriesProductivity` (XML 1839–1842): el inventario pasa
+ *   a cantidad × (1 − `inventoriesLostShare`) con `CapitalGood.setQuantity` (que **recalcula el valor
+ *   contable**, `setCapitalGoodQuantity`) y toma la productividad de la empresa.
+ * Sin empleados no hace nada.
+ *
+ * **Rama no portada:** con investigadores (I+D > 0) el resultado necesita una Beta, que el `Rng` no tiene. En
+ * el base `researchShare` = 0 (XML 1821) y nunca hay investigadores: el port tira un error si aparecen.
+ */
+export function rdOutcomeEvent(s: CaianiState): void {
+  for (const k of s.capitalFirms) {
+    if (k.employees.length === 0) continue;
+    const researchers = researchWorkers(s, k);
+    if (researchers !== 0) {
+      throw new Error(
+        `empresa de capital ${k.id}: ${researchers} investigadores; el resultado de la I+D (Bernoulli y Beta) no está ` +
+          'portado (researchShare = 0 en el base; reglas-caiani.md, sec. 16)',
+      );
+    }
+    const productivityGain = 0; // computeRandDOutcome(0)
+    k.capitalProductivity = k.capitalProductivity + productivityGain;
+    const inventories = k.capitalGoods[0];
+    if (!inventories) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
+    setCapitalGoodQuantity(inventories, inventories.quantity * (1 - s.rules.inventoriesLostShare));
+    inventories.productivity = k.capitalProductivity;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 17: demanda de consumo
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_CONSUMPTION_DEMAND = 'Households.computeConsumptionDemand';
+
+/**
+ * Salario medio de los ocupados que usa el ingreso del desocupado (`Households.getNetIncome` 352–364): suma de
+ * los salarios de los hogares con empleador, en el orden de la lista de la población, sobre cuántos son
+ * (0/0 = NaN sin ocupados, como en Java).
+ */
+export function averageEmployedWage(s: CaianiState): number {
+  let averageWage = 0;
+  let employed = 0;
+  for (const id of s.populations.households) {
+    const h = householdById(s, id);
+    if (h.employer !== null) {
+      averageWage += h.wage;
+      employed += 1;
+    }
+  }
+  return averageWage / employed;
+}
+
+/**
+ * `getNetWealth` del hogar (`SimpleAbstractAgent.getNumericBalanceSheet`): activos − pasivos. Los financieros
+ * salen del ledger (µ, exactos) y los bienes de consumo que compró en el tick, de su valor (`double`).
+ */
+export function householdNetWealth(s: CaianiState, h: HouseholdState): number {
+  let goods = 0;
+  for (const g of h.consumptionGoods) goods += g.value;
+  return toUnits(netFinancialWorth(s.ledger, h.id)) + goods;
+}
+
+/** `Households.getGrossIncome` (458–460): salario si tiene empleador (`AbstractHousehold` 67–74) + intereses + dividendos. */
+export function householdGrossIncome(h: HouseholdState): number {
+  return (h.employer === null ? 0 : h.wage) + toUnits(h.interestReceived) + toUnits(h.dividendsReceived);
+}
+
+/** `IncomeWealthTaxStrategy.computeTaxes`: max(alícuota del patrimonio × patrimonio + alícuota del ingreso × ingreso bruto, 0). */
+export function householdTaxes(s: CaianiState, h: HouseholdState): number {
+  return Math.max(s.rules.householdWealthTaxRate * householdNetWealth(s, h) + s.rules.householdIncomeTaxRate * householdGrossIncome(h), 0);
+}
+
+/**
+ * `Households.getNetIncome` (346–366): ocupado, ingreso bruto − impuestos; desocupado, seguro de desempleo
+ * (`unemploymentBenefit` × salario medio de los ocupados) + ingreso bruto − impuestos.
+ */
+export function householdNetIncome(s: CaianiState, h: HouseholdState, averageWage: () => number): number {
+  const taxes = householdTaxes(s, h);
+  if (h.employer !== null) return householdGrossIncome(h) - taxes;
+  return s.rules.unemploymentBenefit * averageWage() + householdGrossIncome(h) - taxes;
+}
+
+/**
+ * Evento 17, `consumptionDemandTic` (TIC_CONSUMPTIONDEMAND): los hogares, en orden de creación
+ * (`Households.onTicArrived` 189–191 → `computeConsumptionDemand` 263–271):
+ * - `updateIncome`: rezago `LAG_INCOME` = ingreso neto;
+ * - demanda real (`ConsumptionFixedPropensitiesOOIWWithPersistency.computeRealConsumptionDemand`, XML 2778–2787):
+ *   persistencia × consumo del período anterior + (1 − persistencia) × (c₁ × ingreso neto / pᵉ + c₂ × patrimonio / pᵉ),
+ *   con pᵉ la expectativa del precio de consumo, persistencia 0, c₁ = 0,385808 y c₂ = 0,25;
+ * - rezago `LAG_CONSUMPTION` = demanda; activo en el mercado de consumo si la demanda es > 0 (nunca lo apaga).
+ * Sin sorteos ni interacción: el salario medio de los ocupados (que JMAB recalcula para cada desocupado) se
+ * calcula una vez, porque nada de lo que lee cambia dentro del evento.
+ */
+export function consumptionDemandEvent(s: CaianiState): void {
+  const r = s.rules;
+  let avg: number | undefined;
+  const averageWage = (): number => (avg ??= averageEmployedWage(s));
+  for (const h of s.households) {
+    const netIncome = householdNetIncome(s, h, averageWage);
+    setLag(h.lags, LAG.INCOME, s.round, netIncome);
+    const pe = h.expectations[EXPECTATION.CONSPRICE];
+    if (!pe) throw new Error(`hogar ${h.id} sin expectativa del precio de consumo`);
+    const pastConsumption = getLag(h.lags, LAG.CONSUMPTION, s.round, 1);
+    const fromIncome = r.propensityOutOfIncome * (netIncome / pe.expectation);
+    const fromWealth = r.propensityOutOfWealth * (householdNetWealth(s, h) / pe.expectation);
+    h.demand = r.consumptionPersistency * pastConsumption + (1 - r.consumptionPersistency) * (fromIncome + fromWealth);
+    setLag(h.lags, LAG.CONSUMPTION, s.round, h.demand);
+    // La demanda sale de una suma: la escala de la decisión es la de sus términos.
+    if (gt(`${SITE_CONSUMPTION_DEMAND} demanda > 0`, h.demand, 0, 'fromAmounts', Math.abs(fromIncome) + Math.abs(fromWealth))) {
+      h.active[MKT.CONSGOOD] = true;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 18: mercado de consumo
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_CONSUMPTION_MIXER = 'SelectionRandomRobinBuyerMixer.invokeInteractions';
+export const SITE_CHEAPEST_SUPPLIER = 'CheapestGoodSupplierWithSwitching.selectGoodSupplier';
+export const SITE_AT_ONCE = 'AtOnceMechanism.execute';
+
+function consumptionFirmById(s: CaianiState, id: AgentId): FirmState {
+  const c = s.consumptionFirms[id - s.consumptionFirms[0]!.id];
+  if (!c || c.id !== id) throw new Error(`el agente ${id} no es una empresa de consumo`);
+  return c;
+}
+
+/** `ConsumptionFirm.getPrice` (802–805): el precio de su inventario. */
+function consumptionPrice(c: FirmState): number {
+  const inv = c.consumptionGoods[0];
+  if (!inv) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
+  return inv.price;
+}
+
+/**
+ * `CheapestGoodSupplierWithSwitching.selectGoodSupplier`: el más barato de los vistos (el primero si hay
+ * empate); precio del proveedor previo = +∞ si está inactivo en el mercado activo (consumo); si el previo es
+ * más caro, cambia si su precio es +∞ o con `switches` (pago, λ = ln 2 / 0,2: `switchingStrategy3`, XML
+ * 1780–1786). Devuelve el proveedor (el previo, actualizado). `isDead` es siempre falso (población fija).
+ */
+export function selectGoodSupplier(s: CaianiState, h: HouseholdState, sellers: readonly AgentId[], rng: CaianiRng): AgentId {
+  let minPrice = Infinity;
+  let minSupplier = sellers[0]!;
+  for (const id of sellers) {
+    const p = consumptionPrice(consumptionFirmById(s, id));
+    if (lt(`${SITE_CHEAPEST_SUPPLIER} más barato`, p, minPrice, 'pure')) {
+      minPrice = p;
+      minSupplier = id;
+    }
+  }
+  const previous = consumptionFirmById(s, h.previousSeller);
+  const previousPrice = previous.active[MKT.CONSGOOD] ? consumptionPrice(previous) : Infinity;
+  // Si el previo es el más barato, los dos precios son el mismo: no es una decisión que pueda darse vuelta.
+  const previousDearer =
+    h.previousSeller === minSupplier ? previousPrice > minPrice : gt(`${SITE_CHEAPEST_SUPPLIER} previo más caro`, previousPrice, minPrice, 'pure');
+  if (previousDearer) {
+    if (previousPrice === Infinity || switches(previousPrice, minPrice, s.rules.consumerSwitchingLambda, s.rules.consumerSwitchingPayOrReceive, rng)) {
+      h.previousSeller = minSupplier;
+    }
+  }
+  return h.previousSeller;
+}
+
+/**
+ * `AtOnceMechanism.execute` (hogar, empresa de consumo), con los pagos al lote del evento (`batch`):
+ * 1. cantidad = min(demanda, inventario); monto = cantidad × precio;
+ * 2. cuenta que cobra: el primer depósito de la empresa (`ConsumptionFirm.getPayableStock`); cuenta que paga:
+ *    el primer depósito del hogar (`Households.getPayingStocks`: depósitos y después efectivo);
+ *    `reallocateLiquidity` no mueve nada mientras las demás cuentas del hogar estén en 0 (el efectivo de los
+ *    hogares es siempre 0: inicializacion.md, sec. 5); si no, error (rama no portada);
+ * 3. si el depósito (saldo en µ + pagos pendientes del lote) no alcanza: el hogar queda inactivo y compra
+ *    ⌊depósito / precio⌋;
+ * 4. si compra algo: pago al depósito de la empresa (`AbstractBank.transfer`, al lote), un `ConsumptionGood`
+ *    nuevo al final de los bienes del hogar (valor = monto, unidades de Caiani; costo unitario 0; edad 0;
+ *    duración la del inventario), el inventario baja (`ConsumptionGood.setQuantity` no recalcula el valor),
+ *    la demanda baja; el hogar queda inactivo si la demanda llegó a 0 o el depósito a 0; la empresa, si se
+ *    quedó sin inventario.
+ */
+function consumptionPurchase(s: CaianiState, h: HouseholdState, c: FirmState, batch: PaymentBatch): void {
+  const L = s.ledger;
+  const demand = h.demand;
+  const output = c.consumptionGoods[0];
+  if (!output) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
+  const price = output.price;
+  let quantity = record(`${SITE_AT_ONCE} demanda ≤ inventario`, demand <= output.quantity, demand, output.quantity, 'fromAmounts')
+    ? demand
+    : output.quantity; // Math.min(demand, inventario)
+  let totalAmount = quantity * price;
+  const payable = firstAsset(L, c.id, 'deposit');
+  if (!payable) throw new Error(`empresa de consumo ${c.id} sin depósito (JMAB: NullPointerException)`);
+  const target = firstAsset(L, h.id, 'deposit');
+  if (!target) throw new Error(`hogar ${h.id} sin depósito (JMAB: NullPointerException)`);
+  const needed = totalAmount * MICRO_PER_UNIT;
+  if (batch.balance(target.id) < needed) {
+    const others = [...contractIds(L, h.id, 'assets', 'deposit'), ...contractIds(L, h.id, 'assets', 'cash')];
+    if (others.some((id) => id !== target.id && batch.balance(id) !== 0)) {
+      throw new Error(`hogar ${h.id}: reallocateLiquidity con otra cuenta con saldo (no portado; reglas-caiani.md, sec. 17)`);
+    }
+  }
+  if (lt(`${SITE_AT_ONCE} depósito < monto`, batch.balance(target.id), needed, 'amount')) {
+    h.active[MKT.CONSGOOD] = false;
+    quantity = flooring(`${SITE_AT_ONCE} cantidad con el depósito`, batch.balance(target.id) / MICRO_PER_UNIT / price, 'fromAmounts');
+    totalAmount = quantity * price;
+  }
+  if (quantity > 0) {
+    batch.pay(target.id, payable.id, totalAmount * MICRO_PER_UNIT, 'consumption');
+    const good: ConsumptionGoodStock = {
+      quantity,
+      value: totalAmount,
+      price,
+      unitCost: 0,
+      age: 0,
+      producer: c.id,
+      duration: output.duration,
+    };
+    h.consumptionGoods.push(good);
+    output.quantity = output.quantity - quantity;
+    h.demand = demand - quantity;
+    if (h.demand === 0 || record(`${SITE_AT_ONCE} depósito agotado`, batch.balance(target.id) === 0, batch.balance(target.id), 0, 'amount')) {
+      h.active[MKT.CONSGOOD] = false;
+    }
+    if (output.quantity === 0) c.active[MKT.CONSGOOD] = false;
+  }
+}
+
+/**
+ * Evento 18, `consumptionMarketTic` (TIC_CONSUMPTIONMARKET): `SimpleMarketSimulation` del consumo (XML 265–283),
+ * con listas propias (`s.markets.consumption`: compradores = hogares, vendedores = empresas de consumo) y
+ * `nbRuns` = 100: repite el mezclador mientras el mercado no esté cerrado. En cada ronda,
+ * `SelectionRandomRobinBuyerMixer` (`nbSellers` = 5, XML 291–295) mezcla los compradores y, para cada hogar
+ * activo en consumo, mezcla los vendedores y toma los primeros 5 activos (`selectSellers`). Llegada
+ * (`Households.onAgentArrival` 163–167): elige el proveedor (`selectGoodSupplier`) y compra
+ * (`AtOnceMechanism`, `consumptionPurchase`).
+ *
+ * Los pagos van a un lote (`PaymentBatch`) y se registran al cerrar el evento con redondeo controlado
+ * (decisión de Nico, 2026-11-13; reglas-caiani.md, sec. 1, "Reservas"). Devuelve el informe del cierre.
+ */
+export function consumptionMarketEvent(s: CaianiState, rng: CaianiRng): SettleReport {
+  const m = s.markets.consumption;
+  const r = s.rules;
+  const batch = new PaymentBatch(s.ledger);
+  const sellerActive = (id: AgentId) => consumptionFirmById(s, id).active[MKT.CONSGOOD]!;
+  const closed = () => !(m.buyers.some((id) => householdById(s, id).active[MKT.CONSGOOD]) && m.sellers.some(sellerActive));
+  for (let run = 0; run < r.consumptionMarketRuns && !closed(); run++) {
+    rng.shuffle(SITE_CONSUMPTION_MIXER, 'buyers', m.buyers, ownId);
+    for (const id of m.buyers) {
+      const h = householdById(s, id);
+      if (!h.active[MKT.CONSGOOD]) continue;
+      const selected = selectSellers(m.sellers, r.consumptionMarketSellers, sellerActive, rng, SITE_CONSUMPTION_MIXER);
+      if (selected.length === 0) continue;
+      const seller = selectGoodSupplier(s, h, selected, rng);
+      consumptionPurchase(s, h, consumptionFirmById(s, seller), batch);
+    }
+  }
+  return batch.settle();
 }

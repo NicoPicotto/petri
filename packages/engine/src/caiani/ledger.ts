@@ -257,16 +257,8 @@ function mergeLegs(legs: readonly Leg[]): Leg[] {
   return out;
 }
 
-/** Valida todas las patas y recién después las aplica; registra el flujo. */
-function applyLegs(
-  ledger: Ledger,
-  legs: readonly Leg[],
-  category: FlowCategory,
-  payer: AgentId,
-  payee: AgentId,
-  amount: Micro,
-): void {
-  const merged = mergeLegs(legs);
+/** Verifica que las patas (ya fusionadas) dejen saldos enteros y con el signo permitido. No modifica nada. */
+function checkLegs(ledger: Ledger, merged: readonly Leg[], category: FlowCategory | string): void {
   for (const [id, d] of merged) {
     const c = contractOf(ledger, id);
     const after = c.amount + d;
@@ -278,6 +270,31 @@ function applyLegs(
       );
     }
   }
+}
+
+/** Valida todas las patas y recién después las aplica; registra el flujo. */
+function applyLegs(
+  ledger: Ledger,
+  legs: readonly Leg[],
+  category: FlowCategory,
+  payer: AgentId,
+  payee: AgentId,
+  amount: Micro,
+): void {
+  const merged = mergeLegs(legs);
+  checkLegs(ledger, merged, category);
+  commitLegs(ledger, merged, category, payer, payee, amount);
+}
+
+/** Aplica patas ya validadas y registra el flujo. */
+function commitLegs(
+  ledger: Ledger,
+  merged: readonly Leg[],
+  category: FlowCategory,
+  payer: AgentId,
+  payee: AgentId,
+  amount: Micro,
+): void {
   for (const [id, d] of merged) {
     if (d === 0) continue;
     const c = contractOf(ledger, id);
@@ -427,11 +444,56 @@ export function pay(ledger: Ledger, from: ContractId, to: ContractId, amount: Mi
   if (amount === 0) return;
   const f = contractOf(ledger, from);
   const t = contractOf(ledger, to);
+  applyLegs(ledger, paymentLegs(ledger, from, to, amount), category, f.holder, t.holder, amount);
+}
+
+/**
+ * Patas de un pago de cuenta a cuenta (las de `pay`): [contrato, variación]. Con un monto en `double` sirve
+ * para llevar los pagos pendientes de un evento (payments.ts) sin tocar el ledger.
+ */
+export function paymentLegs(ledger: Ledger, from: ContractId, to: ContractId, amount: number): [ContractId, number][] {
+  const f = contractOf(ledger, from);
+  const t = contractOf(ledger, to);
   assertMoney(f, 'la cuenta que paga');
   assertMoney(t, 'la cuenta que cobra');
   const via = f.kind === 'cash' || t.kind === 'cash' ? 'cash' : 'reserves';
-  const legs: Leg[] = [[from, -amount], [to, amount], ...settlementLegs(ledger, f.issuer, t.issuer, via, amount)];
-  applyLegs(ledger, legs, category, f.holder, t.holder, amount);
+  return [[from, -amount], [to, amount], ...settlementLegs(ledger, f.issuer, t.issuer, via, amount)];
+}
+
+export interface IntegerPayment {
+  from: ContractId;
+  to: ContractId;
+  amount: Micro;
+  category: FlowCategory;
+}
+
+/**
+ * Aplica un lote de pagos de cuenta a cuenta (los de `pay`), en el orden dado, de forma **atómica**: valida
+ * primero los saldos finales de todas las cuentas que toca el lote y, si alguno quedaría con un signo
+ * prohibido, tira un error sin modificar nada. Los saldos intermedios no se validan: el lote es el cierre de
+ * un evento (redondeo controlado, payments.ts), y el orden de los montos redondeados no tiene por qué
+ * respetar el de los `double` (una cuenta que cobra y paga puede pasar por −1 µ en el medio).
+ * Cada pago queda en el registro de flujos con su categoría, como con `pay`.
+ */
+export function applyPayments(ledger: Ledger, payments: readonly IntegerPayment[]): void {
+  const perPayment: Leg[][] = [];
+  const all: Leg[] = [];
+  for (const p of payments) {
+    assertNonNegativeMicro(p.amount, 'monto del pago');
+    const legs = p.amount === 0 ? [] : mergeLegs(paymentLegs(ledger, p.from, p.to, p.amount));
+    perPayment.push(legs);
+    all.push(...legs);
+  }
+  // Fusión del lote entero por contrato (lineal: `mergeLegs` busca en la lista y el lote puede ser grande).
+  const net = new Map<ContractId, number>();
+  for (const [id, d] of all) net.set(id, (net.get(id) ?? 0) + d);
+  checkLegs(ledger, [...net.entries()], 'lote de pagos');
+  payments.forEach((p, k) => {
+    if (p.amount === 0) return;
+    const f = contractOf(ledger, p.from);
+    const t = contractOf(ledger, p.to);
+    commitLegs(ledger, perPayment[k] as Leg[], p.category, f.holder, t.holder, p.amount);
+  });
 }
 
 /**

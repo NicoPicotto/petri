@@ -178,6 +178,8 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       previousSeller: cIds[idiv(i, hhPercFirm)] as AgentId,
       previousBank: bank,
       interestReceived: 0,
+      demand: 0,
+      consumptionGoods: [],
       lags: {},
       expectations: {},
     };
@@ -247,6 +249,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     previousCapitalSupplier: null,
     selectedCapitalSuppliers: null,
     amountResearch: 0,
+    capitalProductivity: 0,
     desiredCapacityGrowth: 0,
     desiredRealCapitalDemand: 0,
     interestReceived: 0,
@@ -271,6 +274,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   for (let i = 0; i < kSize; i++) {
     const k = newFirm(kIds[i] as AgentId);
     k.markUp = R.initialMarkUpCapital;
+    k.capitalProductivity = S.capitalProductivity; // propiedad del prototipo de la empresa de capital
     const inv: CapitalGoodStock = {
       quantity: kInv,
       value: kInv * P.kPrice,

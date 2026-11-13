@@ -130,6 +130,16 @@ export interface HouseholdState extends AgentFlags {
   previousBank: AgentId;
   /** `Households.interestsReceived`: interés del depósito del tick (evento 8; se asigna, no se suma). */
   interestReceived: Micro;
+  /**
+   * `Households.demand`: demanda real de consumo del tick (evento 17); el mercado de consumo (evento 18) le
+   * resta lo que compra.
+   */
+  demand: number;
+  /**
+   * SM_CONSGOOD del hogar: los bienes de consumo que compró en el tick (evento 18, uno por compra), en el orden
+   * de JMAB. Su valor es lo que pagó, en unidades de Caiani (`double`, como JMAB; ledger-contratos.md, sec. 2.2).
+   */
+  consumptionGoods: ConsumptionGoodStock[];
   lags: Lags;
   expectations: Expectations;
 }
@@ -167,6 +177,11 @@ export interface FirmState extends AgentFlags {
    * `researchShare` = 0 es siempre 0, pero JMAB lo usa en la demanda de trabajo y en el pedido de crédito.
    */
   amountResearch: number;
+  /**
+   * Solo empresas de capital: `CapitalFirm.capitalProductivity`, productividad de las máquinas que produce.
+   * El evento 16 (resultado de la I+D) le suma la ganancia y la copia al inventario; sin I+D no cambia (1).
+   */
+  capitalProductivity: number;
   /**
    * Solo empresas de consumo: `ConsumptionFirm.desiredCapacityGrowth`. Lo calcula la segunda etapa del
    * mercado de capital (evento 19); el evento 5 usa el valor del tick anterior.
