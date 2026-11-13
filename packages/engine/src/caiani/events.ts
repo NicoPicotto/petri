@@ -1921,8 +1921,9 @@ function integerBalance(batch: PaymentBatch, contract: number, what: string): Mi
  *    D × patrimonio del hogar / patrimonio total × pérdida del préstamo / pérdida total, con el patrimonio del
  *    hogar recalculado en cada pago y las pérdidas actualizadas después de cada uno (como JMAB). Va al lote como
  *    `bailout` (categoría `ownersBailout`, redondeo controlado). Lo que supere el saldo de un préstamo va como
- *    sobrepago (`bailoutExcess`). Un depósito de hogar que quedaría negativo es un error explícito (JMAB no lo
- *    chequea; no pasa en los 400 trimestres de la corrida base).
+ *    sobrepago (`bailoutExcess`). Si la pérdida total cruza 0 por el sobrepago, el aporte da negativo y el hogar
+ *    cobra (`bailoutRefund`: el préstamo sube; decisión de Nico, 2026-11-13). Un depósito de hogar que quedaría
+ *    negativo es un error explícito (JMAB no lo chequea; no pasa en los 400 trimestres de la corrida base).
  * 6. Lo que queda de cada préstamo se condona (`writeOff`) y suma a `currentNonPerformingLoans` del prestamista,
  *    menos el sobrepago (la pérdida negativa de JMAB).
  * Si la deuda es 0, JMAB no hace nada más (ni pone el depósito en 0).
@@ -1973,13 +1974,39 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
     for (const [i] of loans.entries()) excess[i] = [];
     let totalWealth = 0;
     for (const id of s.populations.households) totalWealth += wealth(householdById(s, id));
+    const initialLosses = losses.map((x) => x);
+    const initialTotalLoss = totalLoss;
     for (const id of s.populations.households) {
       const h = householdById(s, id);
       const target = firstAsset(L, h.id, 'deposit');
       if (!target) throw new Error(`hogar ${h.id} sin depósito (JMAB: NullPointerException)`);
       loans.forEach((loan, i) => {
         const amount = (((owners * wealth(h)) / totalWealth) * losses[i]!) / totalLoss;
-        if (!(amount >= 0)) throw new Error(`${SITE_BANKRUPTCY}: aporte ${amount} del hogar ${h.id} (patrimonio negativo o NaN: no portado)`);
+        if (!Number.isFinite(amount)) throw new Error(`${SITE_BANKRUPTCY}: aporte ${amount} del hogar ${h.id} (pérdida total 0: no portado)`);
+        // El signo del aporte es el de pérdida del préstamo / pérdida total (el patrimonio de los hogares es > 0).
+        // Las dos bajan con cada aporte y, por el sobrepago, pueden cruzar el 0 (rareza de JMAB, caiani-referencia.md):
+        // la decisión se mide con la más cercana a 0, relativa a su valor al empezar el reparto.
+        const dLoss = Math.abs(losses[i]!) / initialLosses[i]!;
+        const dTotal = Math.abs(totalLoss) / initialTotalLoss;
+        const refund = record(
+          `${SITE_BANKRUPTCY} aporte negativo`,
+          amount < 0,
+          dLoss <= dTotal ? losses[i]! : totalLoss,
+          0,
+          'fromAmounts',
+          dLoss <= dTotal ? initialLosses[i]! : initialTotalLoss,
+        );
+        if (refund) {
+          // Aporte negativo (decisión de Nico, 2026-11-13): el hogar cobra y el préstamo sube (`bailoutRefund`).
+          // JMAB: `depositHH.setValue(dep − amountToPay)` y `loan.setValue(loan − amountToPay)` con amountToPay < 0,
+          // y las reservas al revés.
+          const micro = -amount * MICRO_PER_UNIT;
+          batch.refundBailout(loan, target.id, micro);
+          room[i] = room[i]! + micro;
+          losses[i] = losses[i]! - amount;
+          totalLoss -= amount;
+          return;
+        }
         const micro = amount * MICRO_PER_UNIT;
         if (batch.balance(target.id) < micro) {
           throw new Error(`${SITE_BANKRUPTCY}: el depósito del hogar ${h.id} quedaría negativo (JMAB no lo chequea; no portado, reglas-caiani.md, sec. 19)`);
@@ -2173,5 +2200,52 @@ export function wagePaymentEvent(s: CaianiState, rng: CaianiRng): SettleReport {
   payGovernmentWagesAndDole(s, batch, rng);
   const report = batch.settle();
   for (const fn of after) fn();
+  return report;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 22: intereses y rescate de los bonos
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 22, `bondInterestTic` (TIC_BONDINTERESTS): solo el gobierno (`GovernmentAntiCyclical.onTicArrived` 81–83
+ * → `Government.payInterests`, 204–236). Sin sorteos. Por cada bono de la lista de pasivos del gobierno, en orden:
+ * - si el gobierno se lo tiene a sí mismo (emisión sin vender): `setQuantity(0)`. En el port la emisión sin vender
+ *   no es un contrato (ledger-contratos.md, sec. 2.2): no hay nada que hacer;
+ * - si no, el tenedor (banco o BC) cobra interés = `getValue()` × tasa, con `getValue()` = cantidad × precio
+ *   (`Bond`), y `setBondInterestsReceived` lo **asigna** (con más de un bono, queda el del último);
+ * - si edad = vencimiento, cobra además el valor y el bono queda en cantidad 0 (`setQuantity(0)`; JMAB lo saca en
+ *   `cleanSM`, eventos 74–75);
+ * - todo sale de la cuenta del gobierno en el BC: a un banco, sube sus reservas; al BC, baja su pasivo (la cuenta
+ *   del gobierno) y nada más;
+ * - `totInterestsBonds` = Σ intereses (`double`, en el orden de la lista).
+ * Pagos: interés y rescate al lote (`interest` y `repay` con un bono: categorías `bondInterest` y `bonds`), con
+ * redondeo controlado. El rescate paga el saldo entero del bono (cantidad × precio en µ), así que lo deja en 0.
+ */
+export function bondInterestEvent(s: CaianiState): SettleReport {
+  const L = s.ledger;
+  const g = s.government;
+  const account = contractIds(L, g.id, 'assets', 'reserves')[0];
+  if (account === undefined) throw new Error('gobierno sin cuenta en el BC');
+  const batch = new PaymentBatch(L);
+  const redeemed: number[] = [];
+  let total = 0;
+  for (const id of contractIds(L, g.id, 'liabilities', 'bond')) {
+    const b = contractOf(L, id);
+    if (b.holder === g.id) throw new Error(`bono ${id} del gobierno consigo mismo: la emisión sin vender no es un contrato`);
+    const value = (b.quantity as number) * (b.price as number); // Bond.getValue()
+    const interest = value * b.rate;
+    if (b.holder === s.centralBank.id) s.centralBank.bondInterestsReceived = toMicro(interest);
+    else bankById(s, b.holder).bondInterestReceived = toMicro(interest);
+    total += interest;
+    batch.payLoan('interest', account, id, interest * MICRO_PER_UNIT);
+    if (b.age === b.maturity) {
+      batch.payLoan('repay', account, id, b.amount);
+      redeemed.push(id);
+    }
+  }
+  g.totInterestsBonds = toMicro(total);
+  const report = batch.settle();
+  for (const id of redeemed) contractOf(L, id).quantity = 0;
   return report;
 }

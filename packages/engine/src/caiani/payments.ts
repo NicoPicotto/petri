@@ -15,11 +15,13 @@
  *    fuente → bancos que pagan → cuentas que pagan → pagos → cuentas que cobran → bancos que cobran → sumidero.
  * 3. **Registro** de los montos enteros en el ledger, en el orden de los pagos (`applyPayments`, atómico).
  *
- * Qué garantiza: cada cuenta queda a < 1 µ de lo que pagó o cobró en `double` en el evento (< 2 µ si paga y
- * cobra); las reservas de un banco cambian en (lo que cobraron sus clientes) − (lo que pagaron), con los
- * pagos dentro del mismo banco cancelados, así que quedan a < 2 µ. La cuenta del gobierno es una cuenta más,
- * con el BC como "banco". Un monto que ya es entero queda exacto. Una cuenta que solo paga nunca paga más
- * que su saldo al empezar el lote (se agrega ese techo a su suma).
+ * Qué garantiza: cada cuenta queda a < 1 µ de lo que pagó o cobró en `double` en el evento; una cuenta que
+ * cobra y paga en el lote, a < 1 µ en lo cobrado y en el neto (lo pagado solo, a < 2 µ); las reservas de un
+ * banco cambian en (lo que cobraron sus clientes) − (lo que pagaron), con los pagos dentro del mismo banco
+ * cancelados, así que quedan a < 2 µ. La cuenta del gobierno es una cuenta más, con el BC como "banco". Un
+ * monto que ya es entero queda exacto. **Techo sobre el neto** (decisión de Nico, 2026-11-13): ninguna cuenta
+ * que no sea de reservas paga en neto más que su saldo al empezar el lote, así que si su saldo final en
+ * `double` es ≥ 0, el redondeado también, y si es 0 exacto, queda en 0 exacto.
  *
  * Determinismo: el flujo se calcula con Dinic, recorriendo las aristas en orden de inserción (el de los
  * pagos), sin azar ni `Map` iterados por claves no enteras. Solo las cuatro operaciones, `floor` y `ceil`.
@@ -68,11 +70,22 @@ export class PaymentBatch {
   /**
    * Anota un pago a un préstamo desde la cuenta `from` (`ledger.paymentRecords`): `interest` (al prestamista,
    * el préstamo no cambia), `repay` (capital: el préstamo baja; categoría `loans`) o `bailout` (aporte de los
-   * dueños: el hogar paga y el préstamo de la empresa baja; categoría `ownersBailout`).
+   * dueños: el hogar paga y el préstamo de la empresa baja; categoría `ownersBailout`). Con un bono, `interest` y
+   * `repay` van con las categorías `bondInterest` y `bonds` (evento 22).
    */
-  payLoan(kind: Exclude<PaymentKind, 'account'>, from: ContractId, loan: ContractId, amount: number): number {
-    const category: FlowCategory = kind === 'interest' ? 'loanInterest' : kind === 'repay' ? 'loans' : 'ownersBailout';
+  payLoan(kind: Exclude<PaymentKind, 'account' | 'bailoutRefund'>, from: ContractId, loan: ContractId, amount: number): number {
+    const bond = contractOf(this.ledger, loan).kind === 'bond';
+    const category: FlowCategory =
+      kind === 'interest' ? (bond ? 'bondInterest' : 'loanInterest') : kind === 'repay' ? (bond ? 'bonds' : 'loans') : 'ownersBailout';
     return this.add(kind, from, loan, amount, category);
+  }
+
+  /**
+   * Anota un aporte de los dueños negativo (`bailoutRefund`): el préstamo sube y el depósito del hogar cobra
+   * (con las reservas del prestamista al banco del hogar). Categoría `ownersBailout`. Devuelve el índice.
+   */
+  refundBailout(loan: ContractId, deposit: ContractId, amount: number): number {
+    return this.add('bailoutRefund', loan, deposit, amount, 'ownersBailout');
   }
 
   /** Monto entero con que se registró el pago `index` (el que devuelve `payLoan`), después de `settle`. */
@@ -118,17 +131,22 @@ export class PaymentBatch {
     // −(id + 1); nunca van juntos: el sobrepago es de una empresa que quebró y no paga intereses), así el techo
     // del préstamo (abajo) no los incluye.
     const toAcc = this.pending.map((p) => (p.kind === 'interest' || p.kind === 'bailoutExcess' ? -(p.to + 1) : p.to));
-    const fromBank = this.pending.map((p) => contractOf(L, p.from).issuer);
+    // Banco que paga: el emisor de la cuenta que paga, o el prestamista en la devolución de un aporte (el préstamo
+    // "paga": las reservas salen del prestamista).
+    const fromBank = this.pending.map((p) => (p.kind === 'bailoutRefund' ? contractOf(L, p.from).holder : contractOf(L, p.from).issuer));
     // Banco que cobra: el emisor de la cuenta que cobra, o el prestamista (el que recibe las reservas).
-    const toBank = this.pending.map((p) => (p.kind === 'account' ? contractOf(L, p.to).issuer : contractOf(L, p.to).holder));
-    // Techo de las cuentas que solo pagan (y no son reservas, que pueden quedar negativas): su saldo actual.
-    const receives = new Set<number>(toAcc);
+    const toBank = this.pending.map((p) =>
+      p.kind === 'account' || p.kind === 'bailoutRefund' ? contractOf(L, p.to).issuer : contractOf(L, p.to).holder,
+    );
+    // Techo de lo que paga en neto (pagado − cobrado) cada cuenta que no es de reservas (las reservas pueden
+    // quedar negativas): su saldo al empezar el lote. Para una cuenta que solo paga es el techo de lo pagado.
+    // Un préstamo que "paga" (la devolución de un aporte) sube: no tiene techo de ese lado.
     const payerCap = (acc: number): number | undefined => {
-      if (receives.has(acc)) return undefined;
       const c = contractOf(L, acc);
-      return c.kind === 'reserves' ? undefined : c.amount;
+      return c.kind === 'reserves' || c.kind === 'loan' ? undefined : c.amount;
     };
-    // Techo de los préstamos que bajan: su saldo (un préstamo no puede quedar negativo).
+    // Techo de los préstamos que bajan: su saldo (un préstamo no puede quedar negativo). Si además sube en el lote
+    // (devolución de un aporte), el techo es de lo que baja en neto (`controlledRound`).
     const loanGroups = new Set<number>();
     this.pending.forEach((p) => {
       if (p.kind === 'repay' || p.kind === 'bailout') loanGroups.add(p.to);
@@ -179,8 +197,14 @@ export const RELAXED_EPSILON = 1e-3;
  * Redondeo controlado de los montos `x` (en µ, `double` ≥ 0): enteros mᵢ ∈ {⌊xᵢ⌋, ⌈xᵢ⌉} tales que la suma
  * de cada grupo de cada familia (cuenta que paga ⊂ banco de la que paga; cuenta que cobra ⊂ banco de la que
  * cobra) quede en {⌊s⌋, ⌈s⌉}, con s la suma en `double` de sus xᵢ (en el orden de los pagos). `cap(cuenta)`
- * agrega un techo entero a la suma de una cuenta que paga (su saldo), y `receiverCap(cuenta)`, a la de una
- * cuenta que cobra (el saldo de un préstamo que baja).
+ * agrega un techo entero a lo que paga en neto una cuenta (su saldo), y `receiverCap(cuenta)`, a lo que cobra
+ * en neto una cuenta (el saldo de un préstamo que baja; si además "paga", lo que baja en neto).
+ *
+ * **Cuentas que cobran y pagan** (la misma clave en `fromAcc` y en `toAcc`, en el mismo banco): en vez de lo
+ * pagado P, se acota el neto P − R en {⌊p − r⌋, ⌈p − r⌉} (con el techo `cap`) y lo cobrado R en {⌊r⌋, ⌈r⌉};
+ * los bancos de esas cuentas, sin lo que ellas cobran (P_banco − ΣR, R_banco − ΣR, cada uno a < 1 µ de su
+ * `double`: las reservas, que cambian en la diferencia, a < 2 µ). Sigue siendo una red de flujo: hay solución
+ * entera si la hay fraccionaria (Hoffman), y los xᵢ lo son si ninguna cuenta paga en neto más que su techo.
  *
  * Tira un error si los grupos no son laminares (una cuenta con dos bancos) o si no hay solución ni con las
  * cotas relajadas (no debería pasar salvo por un techo que la suma en `double` ya supera: un sobregiro real).
@@ -233,6 +257,33 @@ export function controlledRound(
   const sQA = sums(QA.of, QA.key.length);
   const sQB = sums(QB.of, QB.key.length);
 
+  // Cuentas que cobran y pagan en el lote ("mixtas"): la arista banco → cuenta del lado que paga lleva el neto
+  // pagado (P − R), con el techo de la cuenta (`cap`), y lo cobrado (R) va por una arista cuenta que cobra →
+  // cuenta que paga, en vez de ir al banco que cobra. Las aristas de los bancos llevan entonces las sumas sin lo
+  // cobrado por sus cuentas mixtas (P_banco − ΣR y R_banco − ΣR): la variación de las reservas, que es la
+  // diferencia, no cambia (decisión de Nico, 2026-11-13; reglas-caiani.md, sec. 1, "Techo sobre el neto").
+  const qaOfKey = new Map<number, number>();
+  QA.key.forEach((k, j) => qaOfKey.set(k, j));
+  /** Por cuenta que paga: índice de la misma cuenta del lado que cobra, o −1. */
+  const mixedQA = PA.key.map((k) => qaOfKey.get(k) ?? -1);
+  const isMixedQA = new Array<boolean>(QA.key.length).fill(false);
+  const tPB = [...sPB];
+  const tQB = [...sQB];
+  /** Neto pagado (en double) de cada cuenta que paga: p − r si es mixta, p si no. */
+  const tPA = [...sPA];
+  mixedQA.forEach((j, k) => {
+    if (j < 0) return;
+    const b = bankOfPA[k] as number;
+    if (PB.key[b] !== QB.key[bankOfQA[j] as number]) {
+      throw new Error(`controlledRound: la cuenta ${PA.key[k]} paga desde el banco ${PB.key[b]} y cobra en el ${QB.key[bankOfQA[j] as number]}`);
+    }
+    isMixedQA[j] = true;
+    const r = sQA[j] as number;
+    tPA[k] = (sPA[k] as number) - r;
+    tPB[b] = (tPB[b] as number) - r;
+    tQB[bankOfQA[j] as number] = (tQB[bankOfQA[j] as number] as number) - r;
+  });
+
   const attempt = (eps: number): number[] | null => {
     const lo = (s: number) => Math.floor(s - eps);
     const hi = (s: number) => Math.ceil(s + eps);
@@ -243,17 +294,24 @@ export function controlledRound(
     const oQB = oQA + QA.key.length;
     const nodes = oQB + QB.key.length;
     const net = new LowerBoundNetwork(nodes);
-    sPB.forEach((s, k) => net.edge(0, oPB + k, lo(s), hi(s)));
-    sPA.forEach((s, k) => {
+    tPB.forEach((s, k) => net.edge(0, oPB + k, lo(s), hi(s)));
+    tPA.forEach((s, k) => {
       const c = cap(PA.key[k] as number);
-      net.edge(oPB + (bankOfPA[k] as number), oPA + k, lo(s), c === undefined ? hi(s) : Math.min(hi(s), c));
+      // Cuenta mixta con techo del lado que cobra (un préstamo que baja con aportes y sube con devoluciones): lo
+      // que baja en neto (R − P) no supera su saldo, o sea P − R ≥ −techo.
+      const rc = (mixedQA[k] as number) >= 0 ? receiverCap(PA.key[k] as number) : undefined;
+      net.edge(oPB + (bankOfPA[k] as number), oPA + k, rc === undefined ? lo(s) : Math.max(lo(s), -rc), c === undefined ? hi(s) : Math.min(hi(s), c));
     });
     const payEdges = x.map((v, i) => net.edge(oPA + (PA.of[i] as number), oQA + (QA.of[i] as number), Math.floor(v), Math.ceil(v)));
+    mixedQA.forEach((j, k) => {
+      if (j >= 0) net.edge(oQA + j, oPA + k, lo(sQA[j] as number), hi(sQA[j] as number));
+    });
     sQA.forEach((s, k) => {
+      if (isMixedQA[k]) return;
       const c = receiverCap(QA.key[k] as number);
       net.edge(oQA + k, oQB + (bankOfQA[k] as number), lo(s), c === undefined ? hi(s) : Math.min(hi(s), c));
     });
-    sQB.forEach((s, k) => net.edge(oQB + k, 1, lo(s), hi(s)));
+    tQB.forEach((s, k) => net.edge(oQB + k, 1, lo(s), hi(s)));
     net.edge(1, 0, 0, INF);
     if (!net.feasible()) return null;
     return payEdges.map((e) => net.flowOn(e));
@@ -268,16 +326,32 @@ export function controlledRound(
   if (m === null) throw new Error('controlledRound: no hay redondeo factible (¿una cuenta paga más que su saldo?)');
   let maxPaymentDiff = 0;
   m.forEach((v, i) => (maxPaymentDiff = Math.max(maxPaymentDiff, Math.abs(v - (x[i] as number)))));
+  // Diferencia de cada arista de grupo (las que acota la red): bancos sin lo cobrado por sus cuentas mixtas, neto
+  // pagado de las cuentas que pagan, lo cobrado por cada cuenta que cobra.
   let maxGroupDiff = 0;
-  for (const [f, s] of [
-    [PB, sPB],
-    [PA, sPA],
-    [QA, sQA],
-    [QB, sQB],
+  const groupTotals = (of: readonly number[], size: number) => {
+    const t = new Array<number>(size).fill(0);
+    for (let i = 0; i < n; i++) t[of[i] as number] = (t[of[i] as number] as number) + (m![i] as number);
+    return t;
+  };
+  const mPB = groupTotals(PB.of, PB.key.length);
+  const mPA = groupTotals(PA.of, PA.key.length);
+  const mQA = groupTotals(QA.of, QA.key.length);
+  const mQB = groupTotals(QB.of, QB.key.length);
+  mixedQA.forEach((j, k) => {
+    if (j < 0) return;
+    const r = mQA[j] as number;
+    mPA[k] = (mPA[k] as number) - r;
+    mPB[bankOfPA[k] as number] = (mPB[bankOfPA[k] as number] as number) - r;
+    mQB[bankOfQA[j] as number] = (mQB[bankOfQA[j] as number] as number) - r;
+  });
+  for (const [mt, st] of [
+    [mPB, tPB],
+    [mPA, tPA],
+    [mQA, sQA],
+    [mQB, tQB],
   ] as const) {
-    const t = new Array<number>(s.length).fill(0);
-    for (let i = 0; i < n; i++) t[f.of[i] as number] = (t[f.of[i] as number] as number) + (m[i] as number);
-    t.forEach((v, k) => (maxGroupDiff = Math.max(maxGroupDiff, Math.abs(v - (s[k] as number)))));
+    mt.forEach((v, k) => (maxGroupDiff = Math.max(maxGroupDiff, Math.abs(v - (st[k] as number)))));
   }
   return { m, relaxed, maxPaymentDiff, maxGroupDiff };
 }

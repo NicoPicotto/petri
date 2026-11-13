@@ -233,6 +233,11 @@ export interface BankState extends AgentFlags {
    * Es el piso de la tasa de los préstamos (`Bank.getInterestRate`, evento 10).
    */
   bondInterestRate: number;
+  /**
+   * `Bank.bondInterestReceived` (µ): interés del último bono que le pagó el gobierno en el evento 22
+   * (`setBondInterestsReceived` asigna, no suma).
+   */
+  bondInterestReceived: Micro;
 }
 
 export interface GovernmentState extends AgentFlags {
@@ -245,6 +250,8 @@ export interface GovernmentState extends AgentFlags {
   wageBill: Micro;
   /** `GovernmentAntiCyclical.doleExpenditure` (µ): seguro de desempleo pagado en el tick (evento 21). */
   doleExpenditure: Micro;
+  /** `Government.totInterestsBonds` (µ): intereses de los bonos pagados en el tick (evento 22). */
+  totInterestsBonds: Micro;
 }
 
 export interface CentralBankState extends AgentFlags {
@@ -252,6 +259,8 @@ export interface CentralBankState extends AgentFlags {
   /** `CentralBank.interestsOnAdvances` / `interestsOnBonds`: ganancias del BC del tick (van al gobierno). */
   interestsOnAdvances: Micro;
   interestsOnBonds: Micro;
+  /** `CentralBank.bondInterestsReceived` (µ): interés del último bono que le pagó el gobierno (evento 22; asigna). */
+  bondInterestsReceived: Micro;
 }
 
 export function newFlags(): AgentFlags {

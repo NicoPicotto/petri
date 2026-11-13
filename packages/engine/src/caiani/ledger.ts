@@ -485,6 +485,8 @@ export function paymentLegs(ledger: Ledger, from: ContractId, to: ContractId, am
  *   (no cambia su saldo).
  * - `repay`: capital de un préstamo desde una cuenta del deudor: `payTo` al prestamista y baja el préstamo
  *   (`serviceLoan`, categoría `loans`); `to` es el préstamo.
+ * - `interest` y `repay` sirven también para un **bono** (evento 22: el gobierno paga el interés y rescata el bono
+ *   desde su cuenta en el BC; categorías `bondInterest` y `bonds`); `to` es el bono.
  * - `bailout`: aporte de los dueños en la quiebra de una empresa de consumo (`FirmBankruptcyFireSales`): el
  *   hogar paga desde su depósito y el préstamo de la empresa baja. Dos registros: una transferencia corriente
  *   hogar → empresa (`ownersBailout`) y la cancelación del préstamo (`loans`). `to` es el préstamo.
@@ -492,8 +494,14 @@ export function paymentLegs(ledger: Ledger, from: ContractId, to: ContractId, am
  *   negativo hasta el `setValue(0)`; decisión de Nico, 2026-11-13): el hogar paga igual al prestamista. Dos
  *   registros: la transferencia hogar → empresa (`ownersBailout`) y una quita empresa → prestamista (`writeOff`,
  *   sin patas: la ganancia del banco). El préstamo no cambia. `to` es el préstamo.
+ * - `bailoutRefund`: aporte de los dueños **negativo** (decisión de Nico, 2026-11-13): cuando la pérdida total
+ *   de los bancos (`totalBanksLoss`, el denominador del aporte) cruza 0 por el sobrepago, JMAB calcula un aporte
+ *   negativo y el hogar **cobra**: su depósito sube y el préstamo de la empresa sube lo mismo (reservas del
+ *   prestamista al banco del hogar). Es el espejo de `bailout`: `from` es el **préstamo** y `to` el depósito del
+ *   hogar. Dos registros: el prestamista le presta a la empresa (`loans`, el préstamo sube) y la empresa le
+ *   transfiere al hogar (`ownersBailout`, del depósito del hogar, con la liquidación entre bancos).
  */
-export type PaymentKind = 'account' | 'interest' | 'repay' | 'bailout' | 'bailoutExcess';
+export type PaymentKind = 'account' | 'interest' | 'repay' | 'bailout' | 'bailoutExcess' | 'bailoutRefund';
 
 export interface IntegerPayment {
   from: ContractId;
@@ -528,9 +536,20 @@ export function paymentRecords(
   if (kind === 'account') {
     return [{ legs: paymentLegs(ledger, from, to, amount), category, payer: f.holder, payee: contractOf(ledger, to).holder }];
   }
+  if (kind === 'bailoutRefund') {
+    if (f.kind !== 'loan') throw new Error(`pago bailoutRefund: el contrato ${from} es ${f.kind}, no un préstamo`);
+    const d = contractOf(ledger, to);
+    assertMoney(d, 'la cuenta que cobra');
+    return [
+      { legs: [[from, amount]], category: 'loans', payer: f.holder, payee: f.issuer },
+      { legs: [[to, amount], ...settlementLegs(ledger, f.holder, d.issuer, 'reserves', amount)], category, payer: f.issuer, payee: d.holder },
+    ];
+  }
   assertMoney(f, 'la cuenta que paga');
   const loan = contractOf(ledger, to);
-  if (loan.kind !== 'loan' && loan.kind !== 'advance') throw new Error(`pago ${kind}: el contrato ${to} es ${loan.kind}, no un préstamo`);
+  if (loan.kind !== 'loan' && loan.kind !== 'advance' && !(loan.kind === 'bond' && (kind === 'interest' || kind === 'repay'))) {
+    throw new Error(`pago ${kind}: el contrato ${to} es ${loan.kind}, no un préstamo`);
+  }
   const via = f.kind === 'cash' ? 'cash' : 'reserves';
   const toLender: [ContractId, number][] = [[from, -amount], ...settlementLegs(ledger, f.issuer, loan.holder, via, amount)];
   if (kind === 'interest') return [{ legs: toLender, category, payer: f.holder, payee: loan.holder }];

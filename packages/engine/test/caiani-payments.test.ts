@@ -85,8 +85,9 @@ describe('controlledRound: casos a mano', () => {
 });
 
 describe('controlledRound: propiedades con semilla', () => {
-  it('600 lotes al azar: cada monto y cada suma de las cuatro familias a < 1 µ, sin relajar', () => {
+  it('600 lotes al azar: cada monto, cada cuenta y cada banco dentro de su garantía, sin relajar', () => {
     const rng = Rng.fromSeed(2026);
+    let mixedSeen = 0;
     for (let t = 0; t < 600; t++) {
       const banks = 1 + Math.floor(rng.nextFloat() * 6);
       const accounts = 1 + Math.floor(rng.nextFloat() * 40);
@@ -105,16 +106,118 @@ describe('controlledRound: propiedades con semilla', () => {
       const g = groups(rows);
       const r = controlledRound(x, g);
       expect(r.relaxed).toBe(false);
+      expect(r.maxGroupDiff).toBeLessThan(1);
       r.m.forEach((m, i) => {
         expect(Number.isInteger(m)).toBe(true);
         expect(Math.abs(m - x[i]!)).toBeLessThan(1);
       });
-      for (const keys of [g.fromBank, g.fromAcc, g.toAcc, g.toBank]) {
-        const sx = sumBy(keys, x);
-        const sm = sumBy(keys, r.m);
-        for (const [k, v] of sx) expect(Math.abs(sm.get(k)! - v)).toBeLessThan(1);
+      const px = sumBy(g.fromAcc, x);
+      const pm = sumBy(g.fromAcc, r.m);
+      const rx = sumBy(g.toAcc, x);
+      const rm = sumBy(g.toAcc, r.m);
+      // Lo cobrado por cada cuenta, a < 1 µ.
+      for (const [k, v] of rx) expect(Math.abs(rm.get(k)! - v)).toBeLessThan(1);
+      for (const [k, v] of px) {
+        const rec = rx.get(k);
+        if (rec === undefined) {
+          expect(Math.abs(pm.get(k)! - v)).toBeLessThan(1); // solo paga: lo pagado a < 1 µ
+        } else {
+          mixedSeen++;
+          // Cobra y paga: el neto a < 1 µ (lo pagado solo, a < 2 µ).
+          expect(Math.abs(pm.get(k)! - rm.get(k)! - (v - rec))).toBeLessThan(1);
+          expect(Math.abs(pm.get(k)! - v)).toBeLessThan(2);
+        }
+      }
+      // Reservas: la variación de cada banco (lo que cobran sus cuentas − lo que pagan), a < 2 µ.
+      for (let b = 0; b < banks; b++) {
+        let dx = 0;
+        let dm = 0;
+        rows.forEach((row, i) => {
+          if (row[3] === b) (dx += x[i]!), (dm += r.m[i]!);
+          if (row[0] === b) (dx -= x[i]!), (dm -= r.m[i]!);
+        });
+        expect(Math.abs(dm - dx)).toBeLessThan(2);
       }
     }
+    expect(mixedSeen).toBeGreaterThan(1000);
+  });
+
+  it('cuentas que cobran y pagan en el mismo lote: saldo ≥ 0 si en double lo es, y 0 exacto si en double es 0 exacto', () => {
+    const rng = Rng.fromSeed(1113);
+    let zeros = 0;
+    let fractional = 0;
+    for (let t = 0; t < 600; t++) {
+      const banks = 1 + Math.floor(rng.nextFloat() * 4);
+      const accounts = 2 + Math.floor(rng.nextFloat() * 20);
+      const bankOf = Array.from({ length: accounts }, () => Math.floor(rng.nextFloat() * banks));
+      const balance = Array.from({ length: accounts }, () => Math.floor(rng.nextFloat() * (rng.nextFloat() < 0.5 ? 20 : 1e8)));
+      // Con montos diádicos (múltiplos de 1/1024) las sumas en double son exactas y un 0 en double es 0 de verdad;
+      // con montos cualesquiera se prueba solo el ≥ 0.
+      const dyadic = t % 2 === 0;
+      const amount = (max: number) => (dyadic ? Math.floor(rng.nextFloat() * max * 1024) / 1024 : rng.nextFloat() * max);
+      const rows: [number, number, number, number][] = [];
+      const x: number[] = [];
+      const add = (a: number, b: number, v: number) => {
+        if (!(v > 0)) return;
+        rows.push([bankOf[a]!, a, b, bankOf[b]!]);
+        x.push(v);
+      };
+      // Saldo en double de cada cuenta con los pagos anotados (como `PaymentBatch.balance`).
+      const live = balance.map((b) => b);
+      const n = 1 + Math.floor(rng.nextFloat() * 120);
+      for (let i = 0; i < n; i++) {
+        const a = Math.floor(rng.nextFloat() * accounts);
+        const b = Math.floor(rng.nextFloat() * accounts);
+        if (a === b) continue;
+        // Paga una parte de lo que tiene, o todo (como `reallocateLiquidity` y la compra de todo lo que alcanza).
+        const all = rng.nextFloat() < 0.3;
+        const v = all ? live[a]! : Math.min(live[a]!, amount(Math.max(1, live[a]! / 3)));
+        if (!(v > 0)) continue;
+        add(a, b, v);
+        live[a] = live[a]! - v;
+        live[b] = live[b]! + v;
+      }
+      if (x.length === 0) continue;
+      const g = groups(rows);
+      const r = controlledRound(x, g, (acc) => balance[acc]);
+      const px = sumBy(g.fromAcc, x);
+      const rx = sumBy(g.toAcc, x);
+      const pm = sumBy(g.fromAcc, r.m);
+      const rm = sumBy(g.toAcc, r.m);
+      for (const [k, p] of px) {
+        const rec = rx.get(k);
+        if (rec === undefined) continue; // las que solo pagan ya tenían el techo
+        const finalDouble = balance[k]! + rec - p;
+        const finalInt = balance[k]! + rm.get(k)! - pm.get(k)!;
+        if (finalDouble >= 0) expect(finalInt).toBeGreaterThanOrEqual(0);
+        // El 0 exacto vale para el neto que suma el algoritmo (p − r en el orden de los pagos). Con montos
+        // diádicos la cuenta en double es exacta y coincide con la de acá; con montos cualesquiera, un 0 que
+        // sale de redondear puede ser p − r = saldo − ε en las sumas del algoritmo (queda en 0 o en +1 µ).
+        if (dyadic && finalDouble === 0) {
+          zeros++;
+          expect(finalInt).toBe(0);
+        } else if (finalDouble > 0 && finalDouble < 1) fractional++;
+      }
+    }
+    // Que el test ejercite los dos casos.
+    expect(zeros).toBeGreaterThan(50);
+    expect(fractional).toBeGreaterThan(50);
+  });
+
+  it('el caso del tick 108 (evento 19): cobra el faltante desde su segundo depósito y paga todo; queda en 0, no en −1', () => {
+    // Depósito 126 (empresa JMAB 8179): saldo 56.404.056 µ; cobra 37.961.232,534… µ y paga 94.365.288,534… µ
+    // (misma parte fraccionaria). Antes, el redondeo podía bajar lo cobrado y subir lo pagado: −1 µ.
+    const r1 = 37961232.53404787;
+    const p1 = 94365288.53404787;
+    const r = controlledRound(
+      [r1, p1],
+      groups([
+        [7, 127, 126, 3],
+        [3, 126, 900, 5],
+      ]),
+      (acc) => (acc === 126 ? 56404056 : acc === 127 ? 107354869 : undefined),
+    );
+    expect(56404056 + r.m[0]! - r.m[1]!).toBe(0);
   });
 
   it('un lote del tamaño del mercado de consumo (8.000 pagos, 100 cobradores, 10 bancos) es rápido', () => {
@@ -213,6 +316,40 @@ describe('PaymentBatch: pagos pendientes en double y cierre del evento', () => {
     expect(owners.map((r) => [r.payer, r.payee])).toEqual([
       [h1, f],
       [contractOf(L, w.d3).holder, f],
+    ]);
+    assertLedger(L);
+    assertFlows(L, cp);
+  });
+
+  it('aporte negativo (bailoutRefund): el préstamo sube, el hogar cobra y las reservas van del prestamista a su banco', () => {
+    const w = world();
+    const L = w.L;
+    const [h1, h3, f, b2] = [contractOf(L, w.d1).holder, contractOf(L, w.d3).holder, contractOf(L, w.fd).holder, contractOf(L, w.res2).holder];
+    const loan = open(L, 'loan', b2, f, 100, { rate: 0, length: 20, amortization: 'fixedCapital' }, 'loans');
+    const cp = beginPeriod(L);
+    const batch = new PaymentBatch(L);
+    // El hogar 1 (banco 1) aporta 69,6 y el 3 (banco 2, el prestamista) 30,7: el préstamo recibiría 100,3 > 100.
+    // Después el hogar 1 cobra 2,5 (aporte negativo): el préstamo baja en neto 97,8 y queda en 2,2.
+    batch.payLoan('bailout', w.d1, loan, 69.6);
+    batch.payLoan('bailout', w.d3, loan, 30.7);
+    batch.refundBailout(loan, w.d1, 2.5);
+    expect(batch.balance(loan)).toBeCloseTo(2.2, 12);
+    expect(batch.balance(w.d1)).toBeCloseTo(232.9, 12);
+    const [r1, r2] = [amt(L, w.res1), amt(L, w.res2)];
+    batch.settle();
+    // Préstamo (cuenta que cobra y "paga"): baja en neto 97,8 → {97, 98}; queda en 2 o 3.
+    expect([2, 3]).toContain(amt(L, loan));
+    // Hogar 1 (cobra y paga): neto −67,1 → 300 − {67, 68}.
+    expect([232, 233]).toContain(amt(L, w.d1));
+    // Reservas: entre el banco 1 y el 2 se mueve el neto del hogar 1; el pago del hogar 3 queda en el banco 2.
+    expect(amt(L, w.res2) - r2).toBe(r1 - amt(L, w.res1));
+    expect(r1 - amt(L, w.res1)).toBe(300 - amt(L, w.d1));
+    // Registros del aporte negativo: el prestamista le presta a la empresa (loans) y la empresa le paga al hogar.
+    const owners = L.flowLog.filter((r) => r.category === 'ownersBailout');
+    expect(owners.map((r) => [r.payer, r.payee])).toEqual([
+      [h1, f],
+      [h3, f],
+      [f, h1],
     ]);
     assertLedger(L);
     assertFlows(L, cp);

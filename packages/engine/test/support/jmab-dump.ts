@@ -62,6 +62,17 @@ export interface Dump {
 const NON_FINITE: Record<string, number> = { NaN: NaN, Infinity: Infinity, '-Infinity': -Infinity };
 const reviveNonFinite = (_k: string, v: unknown): unknown => (typeof v === 'string' && Object.hasOwn(NON_FINITE, v) ? NON_FINITE[v] : v);
 
+/**
+ * Valor de un contrato como lo ve JMAB (`getValue`): el campo `value` del ítem, salvo en los bonos, donde
+ * `Bond.getValue()` es cantidad × precio (0 si el gobierno se lo tiene a sí mismo). El campo `value` de un bono
+ * no se actualiza al rescatarlo (`Government.payInterests` solo hace `setQuantity(0)`; evento 22): queda viejo.
+ */
+export function itemValue(it: J, kind: ContractKind): number {
+  if (kind !== 'bond') return it['AbstractItem.value'] as number;
+  if (ref(it['AbstractItem.assetHolder']) === ref(it['AbstractItem.liabilityHolder'])) return 0;
+  return (it['AbstractItem.quantity'] as number) * (it['price'] as number);
+}
+
 export function readDump(path: string): Dump {
   const lines = readFileSync(path, 'utf8').split('\n').filter((l) => l.length > 0);
   const meta = JSON.parse(lines[0]!, reviveNonFinite).meta as DumpMeta;
@@ -225,7 +236,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
           kind,
           holder,
           issuer,
-          amount: toMicro(it['AbstractItem.value']),
+          amount: toMicro(itemValue(it, kind)),
           age: it['AbstractItem.age'],
           rate: it['interestRate'] ?? 0,
         };
@@ -242,7 +253,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
           c.maturity = it['maturity'];
         }
         ledger.contracts[next] = c;
-        inputValues.set(next, (it['AbstractItem.value'] as number) * MICRO_PER_UNIT);
+        inputValues.set(next, itemValue(it, kind) * MICRO_PER_UNIT);
         (ledger.agents[id]!.assets[KIND_INDEX[kind]] as number[]).push(next);
         byOid.set(oid, next);
         next++;
@@ -346,6 +357,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
       depositInterestRate: j['depositInterestRate'],
       totInterestsDeposits: toMicro(j['totInterestsDeposits']),
       bondInterestRate: j['bondInterestRate'],
+      bondInterestReceived: toMicro(j['bondInterestReceived']),
     };
   });
   const gov = firstOf('government');
@@ -389,12 +401,14 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
       laborDemand: jg['Government.laborDemand'],
       wageBill: toMicro(jg['Government.wageBill']),
       doleExpenditure: toMicro(jg['doleExpenditure']),
+      totInterestsBonds: toMicro(jg['Government.totInterestsBonds']),
     },
     centralBank: {
       ...flagsOf(jc),
       id: cb,
       interestsOnAdvances: toMicro(jc['interestsOnAdvances']),
       interestsOnBonds: toMicro(jc['interestsOnBonds']),
+      bondInterestsReceived: toMicro(jc['bondInterestsReceived']),
     },
     aggregateLags: lagsOf(meta.aggregate, 'agregados'),
   };
@@ -627,7 +641,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
           counts.contracts++;
           same(`${w} tenedor`, toJ(c.holder), ref(it['AbstractItem.assetHolder']));
           same(`${w} emisor`, toJ(c.issuer), ref(it['AbstractItem.liabilityHolder']));
-          amount(`${w} saldo`, c.amount, it['AbstractItem.value'], c.id);
+          amount(`${w} saldo`, c.amount, itemValue(it, kind), c.id);
           same(`${w} edad`, c.age, it['AbstractItem.age']);
           if ('interestRate' in it) same(`${w} tasa`, c.rate, it['interestRate']);
           if (kind === 'loan' || kind === 'advance') {
@@ -770,6 +784,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} tasa de depósitos`, b.depositInterestRate, j['depositInterestRate']);
     amount(`${w} intereses pagados a depósitos`, b.totInterestsDeposits, j['totInterestsDeposits']);
     close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
+    amount(`${w} intereses de bonos cobrados`, b.bondInterestReceived, j['bondInterestReceived']);
     lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues']);
     expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
   }
@@ -779,10 +794,12 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   same('demanda de trabajo del gobierno', s.government.laborDemand, jg['Government.laborDemand']);
   amount('gobierno masa salarial', s.government.wageBill, jg['Government.wageBill']);
   amount('gobierno seguro de desempleo', s.government.doleExpenditure, jg['doleExpenditure']);
+  amount('gobierno intereses de bonos', s.government.totInterestsBonds, jg['Government.totInterestsBonds']);
   const jcb = agentJ(s.centralBank.id);
   flags('BC', s.centralBank, jcb);
   amount('BC intereses de adelantos', s.centralBank.interestsOnAdvances, jcb['interestsOnAdvances']);
   amount('BC intereses de bonos', s.centralBank.interestsOnBonds, jcb['interestsOnBonds']);
+  amount('BC intereses de bonos cobrados', s.centralBank.bondInterestsReceived, jcb['bondInterestsReceived']);
 
   return { diffs, total, counts, amountFields, doubleFieldsOver, scaled };
 }

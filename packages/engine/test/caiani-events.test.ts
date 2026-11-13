@@ -37,6 +37,7 @@ import {
   capitalMarketSecondStepEvent,
   creditInterestsEvent,
   wagePaymentEvent,
+  bondInterestEvent,
   installments,
   rawInstallments,
   closeContract,
@@ -1339,6 +1340,56 @@ describe('evento 20 (servicio de la deuda): casos a mano', () => {
     expect(Math.abs(lossA / (lossA + lossB) - 0.75)).toBeLessThan(1e-5);
   });
 
+  it('quiebra con aporte negativo: la pérdida total cruza 0 por el sobrepago y el último hogar cobra (bailoutRefund)', () => {
+    // Capital 200: D = min(100, 38,1) = 38,1, toda la pérdida (como la empresa 8164 en el tick 108). Con los 8.000
+    // hogares iguales, los aportes inflan las participaciones (la pérdida total baja entre préstamo y préstamo) y al
+    // llegar al último hogar la pérdida total ya es negativa: su aporte a un préstamo da < 0 y JMAB le paga.
+    const { s, L, c, loanA, loanB, bankA, bankB } = bankruptConsumptionFirm(200);
+    const order = [...s.populations.households];
+    const hDep = new Map(s.households.map((h) => [h.id, firstAsset(L, h.id, 'deposit')!]));
+    const before = new Map(order.map((id) => [id, hDep.get(id)!.amount]));
+    // Referencia: el lazo de FirmBankruptcyFireSales 152–176 en double, con el patrimonio de cada hogar (depósito;
+    // sin bienes) actualizado en cada pago y las pérdidas también.
+    const wealth = new Map(order.map((id) => [id, before.get(id)! / 1e6]));
+    let W = 0;
+    for (const id of order) W += wealth.get(id)!;
+    const losses = [28.575, 9.525];
+    let T = losses[0]! + losses[1]!;
+    const D = T;
+    const paid = new Map<number, number>();
+    const refunds: { id: number; loan: number; amount: number }[] = [];
+    for (const id of order) {
+      for (let i = 0; i < 2; i++) {
+        const a = (((D * wealth.get(id)!) / W) * losses[i]!) / T;
+        if (a < 0) refunds.push({ id, loan: i, amount: a });
+        wealth.set(id, wealth.get(id)! - a);
+        paid.set(id, (paid.get(id) ?? 0) + a);
+        losses[i] = losses[i]! - a;
+        T -= a;
+      }
+    }
+    expect(refunds.length).toBe(1);
+    expect(refunds[0]!.id).toBe(order[order.length - 1]);
+    const [nplA, nplB] = [bankA.currentNonPerformingLoans, bankB.currentNonPerformingLoans];
+    const cp = beginPeriod(L);
+    creditInterestsEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(c.bailoutCost).toBe(38_100_000);
+    // Cada hogar, a < 1 µ de lo que paga en JMAB (el último cobra en un préstamo y paga en el otro: cuenta mixta).
+    for (const id of order) expect(Math.abs(before.get(id)! - hDep.get(id)!.amount - paid.get(id)! * 1e6)).toBeLessThan(1);
+    // Hay un registro bailoutRefund: el préstamo sube y el hogar cobra (flujo ownersBailout empresa → hogar).
+    const last = order[order.length - 1]!;
+    const refundLog = L.flowLog.filter((r) => r.category === 'ownersBailout' && r.payee === last && r.payer === c.id);
+    expect(refundLog.length).toBe(1);
+    expect(Math.abs(refundLog[0]!.amount + refunds[0]!.amount * 1e6)).toBeLessThan(1);
+    // Los préstamos se cierran; la morosidad suma la pérdida que queda en JMAB (banksLosses, con el signo).
+    expect(contractOf(L, loanA).amount).toBe(0);
+    expect(contractOf(L, loanB).amount).toBe(0);
+    expect(Math.abs(bankA.currentNonPerformingLoans - nplA - losses[0]! * 1e6)).toBeLessThan(2);
+    expect(Math.abs(bankB.currentNonPerformingLoans - nplB - losses[1]! * 1e6)).toBeLessThan(2);
+  });
+
   it('quiebra con el depósito de un hogar que no alcanza para su aporte: error explícito (JMAB no lo chequea)', () => {
     const { s } = bankruptConsumptionFirm(200); // D = min(100, 38,1) = 38,1
     const h = s.households[0]!;
@@ -1457,6 +1508,66 @@ describe('evento 21 (salarios y seguro de desempleo): casos a mano', () => {
   });
 });
 
+describe('evento 22 (intereses y rescate de los bonos): casos a mano', () => {
+  it('el gobierno paga interés y valor de cada bono vencido desde su cuenta en el BC; un bono no vencido cobra solo interés', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    const g = s.government;
+    const account = contractIds(L, g.id, 'assets', 'reserves')[0]!;
+    const bonds = [...contractIds(L, g.id, 'liabilities', 'bond')];
+    expect(bonds.length).toBeGreaterThan(2);
+    // Caso: todos con precio 1, tasa 0,0025 y vencimiento 1; todos vencidos (edad 1) salvo el primero (edad 0).
+    bonds.forEach((id, i) => {
+      const b = contractOf(L, id);
+      b.price = 1;
+      b.rate = 0.0025;
+      b.maturity = 1;
+      b.age = i === 0 ? 0 : 1;
+      expect(b.amount).toBe(Math.round((b.quantity as number) * 1e6)); // saldo = cantidad × precio
+    });
+    const holderOf = bonds.map((id) => contractOf(L, id).holder);
+    const value = bonds.map((id) => (contractOf(L, id).quantity as number) * 1);
+    const reservesOf = (agent: number) => contractIds(L, agent, 'assets', 'reserves').reduce((a, id) => a + contractOf(L, id).amount, 0);
+    const before = holderOf.map((h) => (h === s.centralBank.id ? 0 : reservesOf(h)));
+    const acc0 = contractOf(L, account).amount;
+    const cp = beginPeriod(L);
+    bondInterestEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    // Interés de cada uno: valor × 0,0025; el gobierno paga Σ intereses + Σ valores de los vencidos.
+    let interests = 0;
+    let principal = 0;
+    bonds.forEach((id, i) => {
+      const b = contractOf(L, id);
+      const interest = value[i]! * 0.0025;
+      interests += interest;
+      if (i === 0) {
+        expect(b.quantity).toBe(value[0]); // no vencido: no se rescata
+        expect(b.amount).toBe(Math.round(value[0]! * 1e6));
+      } else {
+        principal += value[i]!;
+        expect(b.quantity).toBe(0);
+        expect(b.amount).toBe(0);
+      }
+      const h = holderOf[i]!;
+      if (h === s.centralBank.id) {
+        expect(s.centralBank.bondInterestsReceived).toBe(Math.round(interest * 1e6));
+      } else {
+        expect(s.banks.find((x) => x.id === h)!.bondInterestReceived).toBe(Math.round(interest * 1e6));
+        // Reservas del banco: + interés (+ valor si venció), a < 1 µ.
+        expect(Math.abs(reservesOf(h) - before[i]! - (interest + (i === 0 ? 0 : value[i]!)) * 1e6)).toBeLessThan(1);
+      }
+    });
+    expect(g.totInterestsBonds).toBe(Math.round(interests * 1e6));
+    expect(Math.abs(acc0 - contractOf(L, account).amount - (interests + principal) * 1e6)).toBeLessThan(1);
+    const flows = L.flowLog.filter((r) => r.category === 'bondInterest');
+    expect(flows.length).toBe(bonds.length);
+    // Cada rescate son dos registros `bonds`: el pago al tenedor y la baja del bono.
+    expect(L.flowLog.filter((r) => r.category === 'bonds').length).toBe(2 * (bonds.length - 1));
+  });
+});
+
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: semilla 12345, volcados al principio del tick y después de los eventos 0–37. */
@@ -1466,9 +1577,9 @@ const RUNS = [
   // Una quiebra por deuda en el evento 20 (empresa 8168) y cuatro por salarios en el 21.
   { run: 'p3-t81', tick: 81 },
   // Quiebras con dos depósitos: 8164 y 8182 en el evento 20; 8159 en el 21 (aporte de los dueños = toda la pérdida).
-  // PENDIENTE (2026-11-13): eventos 0–18 pasan; 19, 20 y 21 fallan por dos hallazgos a resolver
-  // (reglas-caiani.md, sec. 15). Se vuelve a sumar cuando estén resueltos.
-  // { run: 'p3-t108', tick: 108 },
+  // Ejercita el techo sobre el neto (evento 19: depósito que cobra y paga todo) y el aporte negativo (evento 20:
+  // la pérdida total de 8164 cruza 0 en el último hogar). reglas-caiani.md, sec. 18 y 19.
+  { run: 'p3-t108', tick: 108 },
 ];
 
 /**
@@ -1526,6 +1637,13 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
       console.log(`evento 21, cierre del lote: ${JSON.stringify(r)}`);
     },
   },
+  {
+    e: 22,
+    run: (s) => {
+      const r = bondInterestEvent(s);
+      console.log(`evento 22, cierre del lote: ${JSON.stringify(r)}`);
+    },
+  },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
@@ -1539,8 +1657,14 @@ const LAST = EVENTS[EVENTS.length - 1]!.e;
  *   (lo que queda del inventario de una empresa después de decenas de ventas, o el resto de la demanda de un
  *   hogar en su segunda compra). El error absoluto es el de las demandas del encadenado (~10⁻⁶), pero relativo
  *   a un residuo chico pasa el 10⁻⁶. En el evento suelto son bit a bit. Ver reglas-caiani.md, sec. 17.
+ * - **Morosidad de un banco en el evento 20, suelto (2026-11-13, esperando decisión de Nico):** en el tick 108 la
+ *   morosidad del banco 8255 queda a 3,67 µ de JMAB. Suma lo que queda de los 5 préstamos de la empresa 8182
+ *   (todos de ese banco): cada préstamo está a < 1 µ de lo que recibe en double (redondeo controlado), pero la suma
+ *   de los 5 no tiene cota propia (~3,1 µ), más el error de entrada de los saldos (~0,5 µ). reglas-caiani.md, sec. 19.
  */
-const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [];
+const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [
+  { field: 'banco # morosidad del tick', chainedOnly: false, events: [20] },
+];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
   const dir = `${ORACLE}${run}/state/`;

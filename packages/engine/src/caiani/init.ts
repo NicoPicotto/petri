@@ -414,6 +414,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       depositInterestRate: R.initialDepositInterestRate, // propiedad del prototipo (XML 2299)
       totInterestsDeposits: 0,
       bondInterestRate: R.initialBankBondInterestRate, // propiedad del prototipo (XML 2298)
+      bondInterestReceived: 0,
     };
     open(ledger, 'cash', b.id, cb, toMicro(bCash), {}, 'deposits');
     open(ledger, 'reserves', b.id, cb, toMicro(bRes), { rate: 0 }, 'deposits');
@@ -455,7 +456,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   }
 
   // Gobierno
-  const government = { ...newFlags(), id: gov, employees: [] as AgentId[], laborDemand: 0, wageBill: 0, doleExpenditure: 0 };
+  const government = { ...newFlags(), id: gov, employees: [] as AgentId[], laborDemand: 0, wageBill: 0, doleExpenditure: 0, totInterestsBonds: 0 };
   for (let i = 0; i < P.gEmpl; i++) hire(government);
   open(ledger, 'reserves', gov, cb, 0, { rate: 0 }, 'deposits');
 
@@ -517,7 +518,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     capitalFirms,
     banks,
     government,
-    centralBank: { ...newFlags(), id: cb, interestsOnAdvances: 0, interestsOnBonds: 0 },
+    centralBank: { ...newFlags(), id: cb, interestsOnAdvances: 0, interestsOnBonds: 0, bondInterestsReceived: 0 },
     aggregateLags,
   };
 }
