@@ -188,10 +188,45 @@ function capitalGoodOf(it: J, fromJ: (j: number) => AgentId): CapitalGoodStock {
 /** Saldo de JMAB (en µ, `double` sin redondear) de cada contrato de un estado reconstruido con `stateFromDump`. */
 export const INPUT_VALUES = new WeakMap<CaianiState, Map<number, number>>();
 
+/**
+ * Error de entrada (µ; port − JMAB, |δ| ≤ 0,5) de los campos en µ que no son contratos, de un estado reconstruido con
+ * `stateFromDump`. Clave `<id del port>:<campo del port>`. Lo usa el descuento de los montos calculados (`InputCarry`).
+ */
+export const INPUT_FIELDS = new WeakMap<CaianiState, Map<string, number>>();
+
+/** Campos en µ (nombre en el port → campo del volcado) de hogares, empresas (consumo / capital) y bancos. */
+const MICRO_FIELDS = {
+  household: { dividendsReceived: 'Households.dividendsReceived', interestReceived: 'Households.interestsReceived' },
+  firm: {
+    interestReceived: ['ConsumptionFirm.interestReceived', 'CapitalFirm.interestReceived'],
+    debtBurden: ['ConsumptionFirm.debtBurden', 'CapitalFirm.debtBurden'],
+    debtInterests: ['ConsumptionFirm.debtInterests', 'CapitalFirm.debtInterests'],
+    creditDemanded: ['ConsumptionFirm.creditDemanded', 'CapitalFirm.creditDemanded'],
+    bailoutCost: ['AbstractFirm.bailoutCost', 'AbstractFirm.bailoutCost'],
+  },
+} as const;
+
 export function stateFromDump(d: Dump): CaianiState {
   const inputValues = new Map<number, number>();
   const s = buildStateFromDump(d, inputValues);
   INPUT_VALUES.set(s, inputValues);
+  const { toJ } = idMaps(d.meta);
+  const fields = new Map<string, number>();
+  const rec = (id: AgentId, field: string, port: number, java: number) => fields.set(`${id}:${field}`, port - java * MICRO_PER_UNIT);
+  for (const h of s.households) {
+    const j = d.agents.get(toJ(h.id))!;
+    for (const [f, jf] of Object.entries(MICRO_FIELDS.household)) rec(h.id, f, (h as unknown as Record<string, number>)[f]!, j[jf] as number);
+  }
+  for (const [list, i] of [
+    [s.consumptionFirms, 0],
+    [s.capitalFirms, 1],
+  ] as const) {
+    for (const f of list) {
+      const j = d.agents.get(toJ(f.id))!;
+      for (const [k, jf] of Object.entries(MICRO_FIELDS.firm)) rec(f.id, k, (f as unknown as Record<string, number>)[k]!, j[jf[i]] as number);
+    }
+  }
+  INPUT_FIELDS.set(s, fields);
   return s;
 }
 
@@ -479,6 +514,12 @@ export interface CompareOptions {
    * tolerancia del campo es el máximo entre esta y la general.
    */
   derived?: (agent: AgentId, field: string) => number | undefined;
+  /**
+   * Evento suelto: error de entrada (en unidades; port − JMAB) de un `double` de montos que el motor anotó como
+   * calculado (`derivedValue`; decisión de Nico, 2026-11-13, reglas-caiani.md, sec. 1): se descuenta antes de comparar.
+   * Clave: `lag:<id>:<período>`.
+   */
+  derivedValue?: (agent: AgentId, key: string) => number | undefined;
 }
 
 /** Escalas S(v) del encadenado (las da `ChainScales`, test/support/chain-scale.ts). */
@@ -493,9 +534,26 @@ export interface ScaleSource {
 /**
  * Rezagos que se calculan a partir de montos (tolerancia relativa 10⁻⁶): patrimonio, ingreso neto del hogar
  * (salario + intereses + dividendos − impuestos, evento 17) y consumo real deseado (sale del ingreso y del
- * patrimonio, evento 17).
+ * patrimonio, evento 17); ganancias antes y después de impuestos, flujo de caja operativo e impuestos (evento 24:
+ * salen de intereses cobrados y pagados en µ y, en los bancos, del patrimonio); inventario real y nominal y ventas
+ * reales y nominales (evento 24: salen del inventario, que en el encadenado sale de la demanda de los hogares, como las
+ * cantidades de los bienes, que ya se comparan así).
  */
-const LAGS_FROM_AMOUNTS: readonly number[] = [LAG.NETWEALTH, LAG.INCOME, LAG.CONSUMPTION];
+const LAGS_FROM_AMOUNTS: readonly number[] = [
+  LAG.NETWEALTH,
+  LAG.INCOME,
+  LAG.CONSUMPTION,
+  LAG.PROFITPRETAX,
+  LAG.PROFITAFTERTAX,
+  LAG.OPERATINGCASHFLOW,
+  LAG.TAXES,
+  LAG.INVENTORIES,
+  LAG.NOMINALINVENTORIES,
+  LAG.REALSALES,
+  LAG.NOMINALSALES,
+];
+/** Expectativas que salen de montos: depósitos (bancos) y ventas nominales y reales (por lo mismo que los rezagos). */
+const EXPECTATIONS_FROM_AMOUNTS: readonly number[] = [EXPECTATION.DEPOSITS, EXPECTATION.NOMINALSALES, EXPECTATION.REALSALES];
 
 const PURE_TOL = 1e-9;
 const AMOUNTS_TOL = 1e-6;
@@ -533,12 +591,19 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     if (ok && !baseOk) st.byScale++;
     return ok;
   };
-  const close = (what: string, port: number, java: number, fromAmounts = false) => {
+  /**
+   * `double`: puros, 10⁻⁹ relativo; de montos, max(10⁻⁶ relativo, piso absoluto de la tolerancia de los montos en
+   * unidades: 2 µ en el suelto, 2k µ en el encadenado; decisión de Nico, 2026-11-13: un valor que sale de montos no
+   * puede ser más preciso que ellos). `discount`: error de entrada anotado (suelto), en unidades.
+   */
+  const close = (what: string, portRaw: number, java: number, fromAmounts = false, discount = 0) => {
+    const port = portRaw - discount;
     const r = Number.isNaN(port) && Number.isNaN(java) ? 0 : rel(port, java);
     const tol = fromAmounts ? AMOUNTS_TOL : PURE_TOL;
     if (fromAmounts) counts.maxRelFromAmounts = Math.max(counts.maxRelFromAmounts, r);
     else counts.maxRelPure = Math.max(counts.maxRelPure, r);
-    const baseOk = r <= tol;
+    const floorOk = fromAmounts && Math.abs(port - java) <= amountTol / MICRO_PER_UNIT;
+    const baseOk = r <= tol || floorOk;
     const scaleOk = fromAmounts && scale !== undefined && Number.isFinite(port) && Number.isFinite(java) && byScale(what, Math.abs(port - java), scale.value(what, port), baseOk);
     if (!baseOk && !scaleOk) {
       const st = (doubleFieldsOver[fieldKind(what)] ??= { max: 0, over: 0 });
@@ -600,7 +665,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     same(`mercado ${i} compradores`, m.buyers.map(toJ).join(), meta.markets[i]!.buyers.join());
     same(`mercado ${i} vendedores`, m.sellers.map(toJ).join(), meta.markets[i]!.sellers.join());
   });
-  const lagsCompare = (w: string, port: Lags, jl: J | null) => {
+  const lagsCompare = (w: string, port: Lags, jl: J | null, agent?: AgentId) => {
     const jlags = jl ?? {};
     for (const [lid, pv] of Object.entries(jlags)) {
       for (const [period, v] of Object.entries(pv.passedValues as Record<string, number>)) {
@@ -610,7 +675,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
           note(`${w} rezago ${lid}[${period}]: falta en el port (JMAB ${v})`);
           continue;
         }
-        close(`${w} rezago ${lid}[${period}]`, p, v, LAGS_FROM_AMOUNTS.includes(Number(lid)));
+        const disc = agent !== undefined ? (opts.derivedValue?.(agent, `lag:${lid}:${period}`) ?? 0) : 0;
+        close(`${w} rezago ${lid}[${period}]`, p, v, LAGS_FROM_AMOUNTS.includes(Number(lid)), disc);
       }
     }
     for (const [lid, m] of Object.entries(port)) {
@@ -717,7 +783,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
       const pe = port[Number(eid)];
       if (!pe) continue;
       counts.expectations++;
-      const fromAmounts = Number(eid) === EXPECTATION.DEPOSITS;
+      const fromAmounts = EXPECTATIONS_FROM_AMOUNTS.includes(Number(eid));
       same(`${w} expectativa ${eid} filas`, pe.passed.length, e.passedValues.length);
       (e.passedValues as number[][]).forEach((row, r) => {
         const pr = pe.passed[r];
@@ -741,7 +807,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} demanda de consumo`, h.demand, j['Households.demand'], true);
     same(`${w} vendedor previo`, toJ(h.previousSeller), ref(strat(j, 0)['previousGoodSupplier']));
     same(`${w} banco previo`, toJ(h.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
-    lagsCompare(w, h.lags, j['SimpleAbstractAgent.passedValues']);
+    lagsCompare(w, h.lags, j['SimpleAbstractAgent.passedValues'], h.id);
     expCompare(w, h.expectations, j['SimpleAbstractAgent.expectations']);
   }
   for (const f of [...s.consumptionFirms, ...s.capitalFirms]) {
@@ -776,7 +842,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     if (f.previousCapitalSupplier !== null) {
       same(`${w} proveedor de capital previo`, toJ(f.previousCapitalSupplier), ref(strat(j, 0)['previousSupplier']));
     }
-    lagsCompare(w, f.lags, j['SimpleAbstractAgent.passedValues']);
+    lagsCompare(w, f.lags, j['SimpleAbstractAgent.passedValues'], f.id);
     expCompare(w, f.expectations, j['SimpleAbstractAgent.expectations']);
   }
   for (const b of s.banks) {
@@ -794,7 +860,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
     amount(`${w} intereses de bonos cobrados`, b.bondInterestReceived, j['bondInterestReceived']);
     amount(`${w} intereses de adelantos`, b.advancesInterests, j['advancesInterests']);
-    lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues']);
+    lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues'], b.id);
     expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
   }
   const jg = agentJ(s.government.id);

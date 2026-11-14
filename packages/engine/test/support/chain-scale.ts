@@ -16,7 +16,7 @@
  *
  * No toca el motor: solo lee el estado y el `flowLog` del ledger.
  */
-import type { AgentId, CaianiState, FlowRecord } from '../../src/caiani';
+import type { AgentId, CaianiState, FlowRecord, InputRecorder } from '../../src/caiani';
 import type { ScaleSource } from './jmab-dump';
 
 /** Antes de un evento: cuántos bienes de consumo tiene cada hogar (los nuevos son los que se crean en él). */
@@ -85,6 +85,52 @@ export class ChainScales implements ScaleSource {
     }
     this.pending.clear();
     this.overrides.clear();
+  }
+
+  /**
+   * Escala propagada de los `double` calculados (decisión de Nico, 2026-11-13; reglas-caiani.md, sec. 1): para cada
+   * valor que el motor anotó con sus entradas (`derivedValue`), S = |valor| (o su escala en la cadena) + Σ |coeficiente|
+   * × S(entrada), con S de un contrato la de `contract` y la de un campo en µ la de su etiqueta en `compareState`.
+   * Llamar después de correr el evento y antes de comparar. Devuelve cuántos valores propagó.
+   */
+  propagateInputs(rec: InputRecorder): number {
+    const prefix = new Map<AgentId, string>();
+    for (const h of this.s.households) prefix.set(h.id, 'hogar');
+    for (const f of [...this.s.consumptionFirms, ...this.s.capitalFirms]) prefix.set(f.id, 'empresa');
+    for (const b of this.s.banks) prefix.set(b.id, 'banco');
+    const FIELD_LABEL: Record<string, string> = {
+      interestReceived: 'intereses de depósitos',
+      dividendsReceived: 'dividendos',
+      debtBurden: 'servicio de la deuda',
+      debtInterests: 'intereses de la deuda',
+      creditDemanded: 'crédito pedido',
+      bailoutCost: 'costo de rescate',
+    };
+    const byId = new Map<AgentId, { lags: Record<number, Record<number, number>> }>();
+    for (const a of [...this.s.households, ...this.s.consumptionFirms, ...this.s.capitalFirms, ...this.s.banks]) byId.set(a.id, a);
+    const fieldValue = (agent: AgentId, field: string): number => (byId.get(agent) as unknown as Record<string, number> | undefined)?.[field] ?? 0;
+    let n = 0;
+    for (const [key, terms] of rec.values) {
+      const m = /^(\d+):lag:(\d+):(\d+)$/.exec(key);
+      if (!m) throw new Error(`ChainScales: clave de valor anotado desconocida: ${key}`);
+      const agent = Number(m[1]);
+      const w = `${prefix.get(agent) ?? 'agente'} ${this.toJ(agent)}`;
+      let propagated = 0; // µ
+      for (const t of terms) {
+        if ('contract' in t) propagated += Math.abs(t.coef) * this.contract(t.contract);
+        else {
+          const label = FIELD_LABEL[t.field];
+          if (!label) throw new Error(`ChainScales: campo sin etiqueta: ${t.field}`);
+          propagated += Math.abs(t.coef) * this.peek(`${w} ${label}`, fieldValue(agent, t.field));
+        }
+      }
+      const label = `${w} rezago ${m[2]}[${m[3]}]`;
+      const lags = byId.get(agent)?.lags;
+      const v = lags?.[Number(m[2])]?.[Number(m[3])] ?? 0;
+      this.overrides.set(label, this.peek(label, v) + propagated / 1e6);
+      n++;
+    }
+    return n;
   }
 
   /** Antes de correr un evento. */

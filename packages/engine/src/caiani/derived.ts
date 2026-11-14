@@ -59,3 +59,59 @@ export function derivedRounded(agent: AgentId, field: string, n = 1): void {
 export function derivedInput(agent: AgentId, field: string, contract: ContractId): void {
   if (active) active.entry(agent, field).contracts.push(contract);
 }
+
+/**
+ * Error de entrada de los montos calculados (decisión de Nico, 2026-11-13; docs/reglas-caiani.md, sec. 1). Un pago o
+ * un `double` de montos que el evento **calcula** a partir de entradas en µ (saldos de contratos o campos en µ de un
+ * agente) hereda, en el V3 suelto, el error de redondeo de esas entradas. El motor anota de qué entradas depende
+ * linealmente y con qué coeficiente (adimensional: valor = Σ coeficiente × entrada + lo que no sale de montos); el
+ * arnés calcula ε = Σ coeficiente × δ, lo lleva con signo a cada pata del pago (o lo descuenta del `double`) y
+ * compara el resto con la regla estricta de 2 µ. Solo observa, como lo de arriba.
+ */
+export type InputTerm = { contract: ContractId; coef: number } | { agent: AgentId; field: string; coef: number };
+
+export interface DerivedPayment {
+  from: ContractId;
+  to: ContractId;
+  terms: InputTerm[];
+}
+
+/** Registro de los montos calculados (lo crea el arnés; `withInputs`). */
+export class InputRecorder {
+  readonly payments: DerivedPayment[] = [];
+  /** Clave `agente:clave` (p. ej. `lag:18:50`) → términos. */
+  readonly values = new Map<string, InputTerm[]>();
+}
+
+let inputs: InputRecorder | null = null;
+
+/** Corre `fn` (un evento) anotando las dependencias de los montos calculados en `rec`. */
+export function withInputs<T>(rec: InputRecorder, fn: () => T): T {
+  const prev = inputs;
+  inputs = rec;
+  try {
+    return fn();
+  } finally {
+    inputs = prev;
+  }
+}
+
+/** ¿Hay un registrador activo? Para no armar listas de términos cuando nadie las lee. */
+export function inputsActive(): boolean {
+  return inputs !== null;
+}
+
+/** Términos multiplicados por un coeficiente. */
+export function scaleTerms(terms: readonly InputTerm[], k: number): InputTerm[] {
+  return terms.map((t) => ({ ...t, coef: t.coef * k }));
+}
+
+/** Anota que el pago `from` → `to` (de cuenta a cuenta) depende de esas entradas. */
+export function derivedPayment(from: ContractId, to: ContractId, terms: readonly InputTerm[]): void {
+  if (inputs && terms.length > 0) inputs.payments.push({ from, to, terms: [...terms] });
+}
+
+/** Anota que el valor `key` del agente (un `double` de montos, en unidades) depende de esas entradas. */
+export function derivedValue(agent: AgentId, key: string, terms: readonly InputTerm[]): void {
+  if (inputs && terms.length > 0) inputs.values.set(`${agent}:${key}`, [...terms]);
+}

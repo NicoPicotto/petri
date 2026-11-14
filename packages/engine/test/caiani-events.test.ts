@@ -39,6 +39,7 @@ import {
   wagePaymentEvent,
   bondInterestEvent,
   advanceInterestEvent,
+  taxesEvent,
   installments,
   rawInstallments,
   closeContract,
@@ -86,6 +87,8 @@ import {
   withDecisions,
   DerivedRecorder,
   withDerived,
+  InputRecorder,
+  withInputs,
   type CaianiRng,
   type CaianiState,
   type FirmState,
@@ -1602,6 +1605,196 @@ describe('evento 23 (servicio de los adelantos del BC): casos a mano', () => {
   });
 });
 
+describe('evento 24 (impuestos): casos a mano', () => {
+  /**
+   * Estado inicial en el tick 1 con las poblaciones que recorre el gobierno recortadas a los agentes del caso
+   * (el evento las recorre en el orden de sus listas). Devuelve la cuenta del gobierno y las reservas de un banco.
+   */
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    s.populations.capitalFirms = [];
+    s.populations.consumptionFirms = [];
+    s.populations.banks = [];
+    s.populations.households = [];
+    const gov = contractOf(L, contractIds(L, s.government.id, 'assets', 'reserves')[0]!);
+    const reservesOf = (bank: number) => contractOf(L, contractIds(L, bank, 'assets', 'reserves')[0]!);
+    return { s, L, gov, reservesOf };
+  };
+  const hh = (s: CaianiState, id: number) => s.households.find((h) => h.id === id)!;
+
+  /** Empresa de consumo: inventario 50 a precio 2 y costo 0,8; inventario anterior 40 (nominal 30); producción 100. */
+  const consumptionCase = () => {
+    const env = setup();
+    const { s } = env;
+    const c = s.consumptionFirms[0]!;
+    s.populations.consumptionFirms = [c.id];
+    setLag(c.lags, LAG.INVENTORIES, 0, 40);
+    setLag(c.lags, LAG.NOMINALINVENTORIES, 0, 30);
+    setLag(c.lags, LAG.PRODUCTION, 1, 100);
+    Object.assign(c.consumptionGoods[0]!, { quantity: 50, price: 2, unitCost: 0.8 });
+    // Masa salarial 120 (salario medio 2,4); añadas: 10 × 4 / 20 = 2 de amortización (la de edad −1 no cuenta).
+    for (const id of c.employees) hh(s, id).wage = 120 / c.employees.length;
+    const k0 = c.capitalGoods[0]!;
+    c.capitalGoods = [
+      { ...k0, quantity: 10, price: 4, amortization: 20, age: 0 },
+      { ...k0, quantity: 99, price: 4, amortization: 20, age: -1 },
+    ];
+    c.debtInterests = 2_000_000;
+    c.debtBurden = 5_000_000; // capital de las cuotas: 3
+    c.interestReceived = 500_000;
+    return { ...env, c };
+  };
+
+  it('empresa de consumo: ganancia = 180 − 120 − 2 − 2 + 0,5 + (40 − 30) = 66,5; impuestos 0,18 × 66,5 al gobierno; rezagos y expectativas', () => {
+    const { s, L, c, gov, reservesOf } = consumptionCase();
+    const dep = firstAsset(L, c.id, 'deposit')!;
+    const [d0, g0, r0] = [dep.amount, gov.amount, reservesOf(dep.issuer).amount];
+    const expNominal = c.expectations[EXPECTATION.NOMINALSALES]!.expectation;
+    const cp = beginPeriod(L);
+    const r = taxesEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(r.relaxed).toBe(false);
+    const lag = (id: number) => c.lags[id]![1]!;
+    expect(lag(LAG.INVENTORIES)).toBe(50);
+    expect(lag(LAG.NOMINALINVENTORIES)).toBe(40); // costo × cantidad
+    expect(lag(LAG.REALSALES)).toBe(90); // 100 − 50 + 40
+    expect(lag(LAG.NOMINALSALES)).toBe(180);
+    expect(lag(LAG.CAPITALAMORTIZATION)).toBe(2);
+    expect(lag(LAG.PROFITPRETAX)).toBeCloseTo(66.5, 12);
+    expect(lag(LAG.TAXES)).toBeCloseTo(11.97, 12);
+    expect(lag(LAG.PROFITAFTERTAX)).toBeCloseTo(54.53, 12);
+    // Flujo de caja: 54,53 + 2 (amortización) − (40 − 30) − 3 (capital) = 43,53.
+    expect(lag(LAG.OPERATINGCASHFLOW)).toBeCloseTo(43.53, 12);
+    expect(c.expectations[EXPECTATION.NOMINALSALES]!.passed[0]).toEqual([180, expNominal]);
+    expect(c.expectations[EXPECTATION.REALSALES]!.passed[0]![0]).toBe(90);
+    expect(c.expectations[EXPECTATION.WAGES]!.passed[0]![0]).toBeCloseTo(2.4, 12);
+    // El pago: depósito − 11,97, reservas de su banco − 11,97, cuenta del gobierno + 11,97 (a < 1 µ del double, que es
+    // 11.969.999,999999998 µ: el redondeo controlado puede dar 11.969.999).
+    expect(Math.abs(d0 - dep.amount - lag(LAG.TAXES) * 1e6)).toBeLessThan(1);
+    expect(dep.amount - d0).toBe(reservesOf(dep.issuer).amount - r0);
+    expect(gov.amount - g0).toBe(d0 - dep.amount);
+    expect(L.flowLog.filter((f) => f.category === 'taxes')).toHaveLength(1);
+  });
+
+  it('empresa de consumo con impuestos mayores que el depósito: no paga (0), y la ganancia después de impuestos es la de antes', () => {
+    const { s, L, c, gov } = consumptionCase();
+    const dep = firstAsset(L, c.id, 'deposit')!;
+    const sink = firstAsset(L, s.consumptionFirms[1]!.id, 'deposit')!;
+    pay(L, dep.id, sink.id, dep.amount - 11_000_000, 'deposits'); // deja 11 < 11,97
+    const g0 = gov.amount;
+    taxesEvent(s);
+    expect(c.lags[LAG.TAXES]![1]).toBe(0);
+    expect(c.lags[LAG.PROFITAFTERTAX]![1]).toBe(c.lags[LAG.PROFITPRETAX]![1]);
+    expect(dep.amount).toBe(11_000_000);
+    expect(gov.amount).toBe(g0);
+  });
+
+  it('empresa que quebró en el tick: impuestos 0 (actualiza igual las ganancias)', () => {
+    const { s, c, gov } = consumptionCase();
+    c.defaulted = true;
+    const g0 = gov.amount;
+    taxesEvent(s);
+    expect(c.lags[LAG.TAXES]![1]).toBe(0);
+    expect(c.lags[LAG.PROFITPRETAX]![1]).toBeCloseTo(66.5, 12);
+    expect(gov.amount).toBe(g0);
+  });
+
+  it('empresa de capital: inventarios y producción pasan por (int); sin amortización', () => {
+    const { s, L, gov } = setup();
+    const k = s.capitalFirms[0]!;
+    s.populations.capitalFirms = [k.id];
+    setLag(k.lags, LAG.INVENTORIES, 0, 3.6); // (int) 3
+    setLag(k.lags, LAG.NOMINALINVENTORIES, 0, 3);
+    setLag(k.lags, LAG.PRODUCTION, 1, 12.7); // (int) 12
+    Object.assign(k.capitalGoods[0]!, { quantity: 7.9, price: 2.5, unitCost: 1 }); // (int) 7; nominal 7,9
+    for (const id of k.employees) hh(s, id).wage = 10 / k.employees.length;
+    k.debtInterests = 1_000_000;
+    k.debtBurden = 1_000_000;
+    k.interestReceived = 0;
+    const g0 = gov.amount;
+    taxesEvent(s);
+    const lag = (id: number) => k.lags[id]![1]!;
+    expect(lag(LAG.INVENTORIES)).toBe(7);
+    expect(lag(LAG.REALSALES)).toBe(8); // 12 − 7 + 3
+    expect(lag(LAG.NOMINALSALES)).toBe(20);
+    // 20 − 10 − 1 + 0 + 7,9 − 3 = 13,9; impuestos 2,502; flujo de caja 13,9 − 2,502 − 4,9 − 0 = 6,498.
+    expect(lag(LAG.PROFITPRETAX)).toBeCloseTo(13.9, 12);
+    expect(lag(LAG.TAXES)).toBeCloseTo(2.502, 12);
+    expect(lag(LAG.OPERATINGCASHFLOW)).toBeCloseTo(6.498, 12);
+    expect(k.lags[LAG.CAPITALAMORTIZATION]?.[1]).toBeUndefined();
+    expect(Math.abs(gov.amount - g0 - lag(LAG.TAXES) * 1e6)).toBeLessThan(1);
+  });
+
+  it('banco: ganancia = patrimonio − patrimonio anterior (10); impuestos 1,8 de sus reservas a la cuenta del gobierno; quebrado, 0', () => {
+    const { s, L, gov, reservesOf } = setup();
+    const b = s.banks[0]!;
+    s.populations.banks = [b.id];
+    const nw = toUnits(netFinancialWorth(L, b.id));
+    setLag(b.lags, LAG.NETWEALTH, 0, nw - 10);
+    const [r0, g0] = [reservesOf(b.id).amount, gov.amount];
+    const cp = beginPeriod(L);
+    taxesEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(b.lags[LAG.PROFITPRETAX]![1]).toBeCloseTo(10, 9);
+    expect(b.lags[LAG.TAXES]![1]).toBeCloseTo(1.8, 9);
+    expect(Math.abs(r0 - reservesOf(b.id).amount - b.lags[LAG.TAXES]![1]! * 1e6)).toBeLessThan(1);
+    expect(gov.amount - g0).toBe(r0 - reservesOf(b.id).amount);
+    // Quebrado: no paga.
+    const t2 = setup();
+    const b2 = t2.s.banks[0]!;
+    t2.s.populations.banks = [b2.id];
+    b2.defaulted = true;
+    const g2 = t2.gov.amount;
+    taxesEvent(t2.s);
+    expect(b2.lags[LAG.TAXES]![1]).toBe(0);
+    expect(t2.gov.amount).toBe(g2);
+  });
+
+  it('hogar: 0,18 × (salario + intereses + dividendos) = 0,99; con tope en el depósito; dividendos a 0 y patrimonio después del pago', () => {
+    const { s, L, gov } = setup();
+    const [h1, h2] = [s.households[0]!, s.households[1]!];
+    s.populations.households = [h1.id, h2.id];
+    for (const h of [h1, h2]) {
+      h.employer = h.employer ?? s.government.id;
+      h.wage = 5;
+      h.interestReceived = 100_000;
+      h.dividendsReceived = 400_000;
+    }
+    const [d1, d2] = [firstAsset(L, h1.id, 'deposit')!, firstAsset(L, h2.id, 'deposit')!];
+    // El segundo hogar se queda con 0,5 en el depósito: paga 0,5 (tope).
+    pay(L, d2.id, firstAsset(L, s.households[2]!.id, 'deposit')!.id, d2.amount - 500_000, 'deposits');
+    const [a1, g0] = [d1.amount, gov.amount];
+    const cp = beginPeriod(L);
+    taxesEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(h1.lags[LAG.TAXES]![1]).toBeCloseTo(0.99, 12);
+    expect(Math.abs(a1 - d1.amount - h1.lags[LAG.TAXES]![1]! * 1e6)).toBeLessThan(1);
+    expect(h2.lags[LAG.TAXES]![1]).toBe(0.5);
+    expect(d2.amount).toBe(0);
+    expect(gov.amount - g0).toBe(a1 - d1.amount + 500_000);
+    expect(h1.lags[LAG.NETWEALTH]![1]).toBe(toUnits(netFinancialWorth(L, h1.id)));
+    expect(h2.lags[LAG.NETWEALTH]![1]).toBe(0);
+    expect([h1.dividendsReceived, h2.dividendsReceived]).toEqual([0, 0]);
+  });
+
+  it('hogar con efectivo y depósito insuficiente: error explícito (rama no portada)', () => {
+    const { s, L } = setup();
+    const h = s.households[0]!;
+    s.populations.households = [h.id];
+    h.wage = 5;
+    h.employer = h.employer ?? s.government.id;
+    const d = firstAsset(L, h.id, 'deposit')!;
+    pay(L, d.id, firstAsset(L, s.households[1]!.id, 'deposit')!.id, d.amount - 100_000, 'deposits');
+    const cash = contractIds(L, h.id, 'assets', 'cash')[0];
+    if (cash === undefined) open(L, 'cash', h.id, s.centralBank.id, 5_000_000, {}, 'deposits');
+    else contractOf(L, cash).amount = 5_000_000; // solo para el caso
+    expect(() => taxesEvent(s)).toThrow(/rama no portada/);
+  });
+});
+
 /**
  * Tiempo máximo de cada test del V3: 5 minutos. Con la máquina cargada (otras corridas, el oráculo) un evento que
  * tarda segundos puede pasar de los 2 minutos y dar un falso vencimiento (pedido de Nico, 2026-11-13).
@@ -1707,6 +1900,13 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
       settled(23, r);
     },
   },
+  {
+    e: 24,
+    run: (s) => {
+      const r = taxesEvent(s);
+      settled(24, r);
+    },
+  },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
@@ -1779,7 +1979,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
             return t.rounded + e;
           }
         : undefined;
-    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, derived: derivedTol });
+    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, derived: derivedTol, derivedValue: carry?.valueCarry });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     report(label, r);
     const scaledRows = Object.entries(r.scaled)
@@ -1841,9 +2041,10 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     }
     const carry = new InputCarry(s);
     const derived = new DerivedRecorder();
-    withDecisions(single, e, () => withDerived(derived, () => ev(s, rng)));
+    const inputs = new InputRecorder();
+    withDecisions(single, e, () => withDerived(derived, () => withInputs(inputs, () => ev(s, rng))));
     expect(rng.remaining).toBe(0);
-    carry.fromLog(s.ledger.flowLog);
+    carry.fromLog(s.ledger.flowLog).fromInputs(inputs);
     const cs = carry.summary();
     if (cs.contracts > 0) console.log(`V3 tick ${tick}, evento ${e}: error de entrada descontado en ${cs.contracts} contratos, máx ${cs.max.toFixed(3)} µ`);
     check(s, after(e), `evento ${e}`, e, undefined, undefined, carry, derived, fragileJ(single.fragileAgents.get(e) ?? []));
@@ -1879,9 +2080,11 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
       return;
     }
     const snap = sc.snapshot();
-    withDecisions(chained, e, () => ev(s, rng));
+    const inputs = new InputRecorder();
+    withDecisions(chained, e, () => withInputs(inputs, () => ev(s, rng)));
     expect(rng.remaining).toBe(0);
     const created = sc.propagate(snap);
+    sc.propagateInputs(inputs);
     if (created > 0) console.log(`Escala propagada, tick ${tick}, evento ${e}: ${created} bienes de consumo nuevos`);
     // Después de cada evento, con la tolerancia de la cadena (k + 1 eventos corridos) y la escala de los flujos.
     try {

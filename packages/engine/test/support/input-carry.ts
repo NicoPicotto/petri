@@ -18,8 +18,8 @@
  * prestamista de la misma cuota, `paymentRecords`, tipo `repay`).
  */
 
-import type { CaianiState, FlowRecord } from '../../src/caiani';
-import { INPUT_VALUES } from './jmab-dump';
+import { paymentLegs, type CaianiState, type FlowRecord, type InputRecorder, type InputTerm } from '../../src/caiani';
+import { INPUT_FIELDS, INPUT_VALUES } from './jmab-dump';
 
 export class InputCarry {
   private readonly carried = new Map<number, number>();
@@ -57,6 +57,50 @@ export class InputCarry {
     });
     return this;
   }
+
+  /** Error de entrada (µ) de una entrada anotada: el redondeo del saldo inicial del contrato o del campo en µ. */
+  private termDelta(t: InputTerm): number {
+    if ('contract' in t) {
+      const input = INPUT_VALUES.get(this.s)!.get(t.contract);
+      const start = this.start.get(t.contract);
+      return input === undefined || start === undefined ? 0 : start - input;
+    }
+    const d = INPUT_FIELDS.get(this.s)?.get(`${t.agent}:${t.field}`);
+    if (d === undefined) throw new Error(`InputCarry: sin error de entrada para ${t.agent}:${t.field}`);
+    return d;
+  }
+
+  /** ε (µ) de una lista de términos: Σ coeficiente × δ. */
+  private epsilon(terms: readonly InputTerm[]): number {
+    let e = 0;
+    for (const t of terms) e += t.coef * this.termDelta(t);
+    return e;
+  }
+
+  /**
+   * Montos calculados (decisión de Nico, 2026-11-13): por cada pago anotado por el motor, ε = Σ coeficiente × δ de sus
+   * entradas, llevado con signo a cada pata del pago (las de `paymentLegs`: la cuenta que paga, la que cobra y la
+   * liquidación entre bancos). Llamar después de correr el evento.
+   */
+  fromInputs(rec: InputRecorder): this {
+    for (const p of rec.payments) {
+      const eps = this.epsilon(p.terms);
+      if (eps === 0) continue;
+      for (const [id, d] of paymentLegs(this.s.ledger, p.from, p.to, 1)) {
+        this.carried.set(id, (this.carried.get(id) ?? 0) + Math.sign(d) * eps);
+      }
+    }
+    this.values = rec;
+    return this;
+  }
+
+  private values: InputRecorder | undefined;
+
+  /** Error de entrada (en unidades) de un `double` de montos anotado (`derivedValue`), o `undefined`. */
+  readonly valueCarry = (agent: number, key: string): number | undefined => {
+    const terms = this.values?.values.get(`${agent}:${key}`);
+    return terms ? this.epsilon(terms) / 1e6 : undefined;
+  };
 
   /** Cuántos contratos llevan error de entrada y el máximo |δ| acumulado (para el informe del test). */
   summary(): { contracts: number; max: number } {

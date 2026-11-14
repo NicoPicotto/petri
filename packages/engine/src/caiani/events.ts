@@ -23,7 +23,7 @@ import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
 import { flooring, ge, gt, lt, record, rounding } from './decisions';
-import { derivedInput, derivedRounded } from './derived';
+import { derivedInput, derivedPayment, derivedRounded, derivedValue, inputsActive, scaleTerms, type InputTerm } from './derived';
 import {
   EXPECTATION,
   LAG,
@@ -31,6 +31,7 @@ import {
   getLag,
   setLag,
   updateExpectation,
+  addObservation,
   goodValue,
   type BankState,
   type CaianiState,
@@ -2301,5 +2302,245 @@ export function advanceInterestEvent(s: CaianiState): SettleReport {
     });
     b.advancesInterests = toMicro(interests);
   }
+  return batch.settle();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 24: impuestos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_FIRM_TAXES = 'ProfitsWealthTaxStrategy.computeTaxes';
+
+/** Suma de los valores de una lista de bienes de capital de edad ≥ 0: Σ cantidad × precio / amortización. */
+function capitalAmortization(f: FirmState): number {
+  let a = 0;
+  for (const g of f.capitalGoods) if (g.age >= 0) a += (g.quantity * g.price) / g.amortization;
+  return a;
+}
+
+/**
+ * `ConsumptionFirm.updatePreTaxProfits` (589–622) y `CapitalFirm.updatePreTaxProfits` (654–682): rezagos del período
+ * (inventario real y nominal, ventas reales y nominales, amortización del capital solo en consumo, ganancia antes de
+ * impuestos) y observaciones de las expectativas de ventas nominales, reales y del salario medio. La empresa de
+ * capital pasa el inventario (actual y del período anterior) y la producción por `(int)`, como JMAB. Devuelve la
+ * ganancia antes de impuestos.
+ * - ventas reales = producción − inventario + inventario anterior; ventas nominales = ventas reales × precio del inventario;
+ * - salario medio = masa salarial / empleados (en el orden de la lista), o la expectativa del salario sin empleados;
+ * - ganancia = ventas − masa salarial − intereses de la deuda (evento 20) [− amortización] + intereses cobrados
+ *   (evento 8) + inventario nominal − inventario nominal anterior.
+ */
+function firmPreTaxProfits(s: CaianiState, f: FirmState, isConsumption: boolean): number {
+  const t = s.round;
+  const lInvRaw = getLag(f.lags, LAG.INVENTORIES, t, 1);
+  const lNomInv = getLag(f.lags, LAG.NOMINALINVENTORIES, t, 1);
+  const stock = isConsumption ? f.consumptionGoods[0] : f.capitalGoods[0];
+  if (!stock) throw new Error(`empresa ${f.id} sin inventario (JMAB: NullPointerException)`);
+  const inv = isConsumption ? stock.quantity : javaInt(stock.quantity);
+  const lInv = isConsumption ? lInvRaw : javaInt(lInvRaw);
+  const nomInv = goodValue(stock, f.id);
+  setLag(f.lags, LAG.INVENTORIES, t, inv);
+  setLag(f.lags, LAG.NOMINALINVENTORIES, t, nomInv);
+  const productionRaw = getLag(f.lags, LAG.PRODUCTION, t, 0);
+  const production = isConsumption ? productionRaw : javaInt(productionRaw);
+  const realSales = production - inv + lInv;
+  const sales = realSales * stock.price; // getPrice(): el precio del inventario
+  addObservation(f.expectations[EXPECTATION.NOMINALSALES]!, sales);
+  addObservation(f.expectations[EXPECTATION.REALSALES]!, realSales);
+  setLag(f.lags, LAG.REALSALES, t, realSales);
+  setLag(f.lags, LAG.NOMINALSALES, t, sales);
+  const wages = wageBill(s, f);
+  const wagesExp = f.expectations[EXPECTATION.WAGES]!;
+  addObservation(wagesExp, f.employees.length > 0 ? wages / f.employees.length : wagesExp.expectation);
+  let profits: number;
+  if (isConsumption) {
+    const amortization = capitalAmortization(f);
+    setLag(f.lags, LAG.CAPITALAMORTIZATION, t, amortization);
+    profits = sales - wages - toUnits(f.debtInterests) - amortization + toUnits(f.interestReceived) + nomInv - lNomInv;
+  } else {
+    profits = sales - wages - toUnits(f.debtInterests) + toUnits(f.interestReceived) + nomInv - lNomInv;
+  }
+  setLag(f.lags, LAG.PROFITPRETAX, t, profits);
+  derivedValue(f.id, `lag:${LAG.PROFITPRETAX}:${t}`, firmProfitTerms(f));
+  return profits;
+}
+
+/** Entradas en µ de la ganancia antes de impuestos (`derived.ts`): − intereses de la deuda + intereses cobrados. */
+function firmProfitTerms(f: FirmState): InputTerm[] {
+  if (!inputsActive()) return [];
+  return [
+    { agent: f.id, field: 'debtInterests', coef: -1 },
+    { agent: f.id, field: 'interestReceived', coef: 1 },
+  ];
+}
+
+/**
+ * `ConsumptionFirm.updateAfterTaxProfits` (563–583) y `CapitalFirm.updateAfterTaxProfits` (637–650): ganancia después
+ * de impuestos = ganancia antes − impuestos; flujo de caja operativo = ganancia después [+ amortización del capital,
+ * solo consumo] − variación del inventario nominal − capital de las cuotas del tick. El capital de las cuotas es el
+ * de la matriz `debtPayments` de JMAB (la del evento 20); el port lo toma como `debtBurden − debtInterests`, que el
+ * evento 20 calcula con las mismas cuotas (`installments`).
+ */
+function firmAfterTaxProfits(s: CaianiState, f: FirmState, taxes: number, taxTerms: readonly InputTerm[], isConsumption: boolean): void {
+  const t = s.round;
+  const profitsAfterTaxes = getLag(f.lags, LAG.PROFITPRETAX, t, 0) - taxes;
+  setLag(f.lags, LAG.PROFITAFTERTAX, t, profitsAfterTaxes);
+  const varInv = getLag(f.lags, LAG.NOMINALINVENTORIES, t, 0) - getLag(f.lags, LAG.NOMINALINVENTORIES, t, 1);
+  const principal = toUnits(f.debtBurden - f.debtInterests);
+  const ocf = isConsumption ? profitsAfterTaxes + capitalAmortization(f) - varInv - principal : profitsAfterTaxes - varInv - principal;
+  setLag(f.lags, LAG.OPERATINGCASHFLOW, t, ocf);
+  if (inputsActive()) {
+    const pat = [...firmProfitTerms(f), ...scaleTerms(taxTerms, -1)];
+    derivedValue(f.id, `lag:${LAG.PROFITAFTERTAX}:${t}`, pat);
+    derivedValue(f.id, `lag:${LAG.OPERATINGCASHFLOW}:${t}`, [
+      ...pat,
+      { agent: f.id, field: 'debtBurden', coef: -1 },
+      { agent: f.id, field: 'debtInterests', coef: 1 },
+    ]);
+  }
+}
+
+/**
+ * `ConsumptionFirm.payTaxes` (523–556) y `CapitalFirm.payTaxes` (597–632), iguales salvo las ganancias:
+ * 1. `updatePreTaxProfits`;
+ * 2. impuestos (`ProfitsWealthTaxStrategy.computeTaxes`, XML 1872–1877 y 2170–2175): 0 si la empresa quebró en el
+ *    tick (`defaulted`); si no, T = alícuota del patrimonio × patrimonio + 0,18 × ganancia; **0 si T > el primer
+ *    depósito**; si no, max(T, 0). Con la alícuota del patrimonio en 0 (el XML), el patrimonio no entra;
+ * 3. `updateAfterTaxProfits`;
+ * 4. si impuestos > efectivo + depósito, quiebra: **no puede pasar** (los impuestos no superan el depósito y el
+ *    efectivo no es negativo), así que el port lo verifica en vez de portarlo;
+ * 5. `LAG_TAXES` = impuestos, y el depósito los paga a la cuenta del gobierno en el BC (las reservas de su banco
+ *    bajan lo mismo). La rama "depósito < impuestos" (pasa el efectivo al depósito) tampoco puede pasar, por 2.
+ * El pago va al lote (categoría `taxes`).
+ */
+function payFirmTaxes(s: CaianiState, f: FirmState, isConsumption: boolean, account: number, batch: PaymentBatch): void {
+  const L = s.ledger;
+  const profits = firmPreTaxProfits(s, f, isConsumption);
+  const deposit = contractIds(L, f.id, 'assets', 'deposit')[0];
+  if (deposit === undefined) throw new Error(`empresa ${f.id} sin depósito (JMAB: NullPointerException)`);
+  let taxes = 0;
+  let taxTerms: InputTerm[] = [];
+  if (!f.defaulted) {
+    if (s.rules.firmWealthTaxRate !== 0) throw new Error(`${SITE_FIRM_TAXES}: alícuota del patrimonio de las empresas ≠ 0: no portado`);
+    const due = s.rules.profitTaxRate * profits;
+    taxes = gt(`${SITE_FIRM_TAXES} impuestos > depósito`, due * MICRO_PER_UNIT, batch.balance(deposit), 'amount', undefined, f.id) ? 0 : Math.max(due, 0);
+    if (taxes > 0) taxTerms = scaleTerms(firmProfitTerms(f), s.rules.profitTaxRate);
+  }
+  firmAfterTaxProfits(s, f, taxes, taxTerms, isConsumption);
+  const cash = contractIds(L, f.id, 'assets', 'cash')[0];
+  const liquidity = (cash === undefined ? 0 : batch.balance(cash)) + batch.balance(deposit);
+  if (taxes * MICRO_PER_UNIT > liquidity || taxes * MICRO_PER_UNIT > batch.balance(deposit)) {
+    throw new Error(`empresa ${f.id}: impuestos mayores que el depósito (inalcanzable en JMAB)`);
+  }
+  setLag(f.lags, LAG.TAXES, s.round, taxes);
+  derivedValue(f.id, `lag:${LAG.TAXES}:${s.round}`, taxTerms);
+  if (taxes > 0) {
+    batch.pay(deposit, account, taxes * MICRO_PER_UNIT, 'taxes');
+    derivedPayment(deposit, account, taxTerms);
+  }
+}
+
+/**
+ * `Bank.payTaxes` (112–128): ganancia antes de impuestos = patrimonio (`getNetWealth`, con los pagos ya hechos en el
+ * evento) − `LAG_NETWEALTH` del período anterior → `LAG_PROFITPRETAX`; impuestos = 0 si quebró, si no
+ * max(alícuota del patrimonio × patrimonio + 0,18 × ganancia, 0) (`ProfitsWealthTaxStrategy`, XML 2591–2596; sin el
+ * tope del depósito de las empresas) → `LAG_TAXES`; las reservas pagan a la cuenta del gobierno (las dos en el BC),
+ * sin mirar el saldo. El patrimonio sigue las listas del banco (un depósito fuera de la lista no cuenta, como en JMAB)
+ * con los pagos pendientes del lote.
+ */
+function payBankTaxes(s: CaianiState, b: BankState, account: number, batch: PaymentBatch): void {
+  const L = s.ledger;
+  const a = agentOf(L, b.id);
+  let nw = 0;
+  // Entradas del patrimonio: cada contrato de sus listas (± 1). Los pagos anteriores del evento que tocan al banco
+  // (impuestos de sus depositantes) bajan a la vez reservas y depósitos y no lo cambian.
+  const nwTerms: InputTerm[] = [];
+  for (const list of a.assets)
+    for (const id of list) {
+      nw += batch.balance(id);
+      if (inputsActive()) nwTerms.push({ contract: id, coef: 1 });
+    }
+  for (const list of a.liabilities)
+    for (const id of list) {
+      nw -= batch.balance(id);
+      if (inputsActive()) nwTerms.push({ contract: id, coef: -1 });
+    }
+  nw /= MICRO_PER_UNIT;
+  const profits = nw - getLag(b.lags, LAG.NETWEALTH, s.round, 1);
+  setLag(b.lags, LAG.PROFITPRETAX, s.round, profits);
+  derivedValue(b.id, `lag:${LAG.PROFITPRETAX}:${s.round}`, nwTerms);
+  const taxes = b.defaulted ? 0 : Math.max(s.rules.bankWealthTaxRate * nw + s.rules.profitTaxRate * profits, 0);
+  const taxTerms = taxes > 0 ? scaleTerms(nwTerms, s.rules.bankWealthTaxRate + s.rules.profitTaxRate) : [];
+  setLag(b.lags, LAG.TAXES, s.round, taxes);
+  derivedValue(b.id, `lag:${LAG.TAXES}:${s.round}`, taxTerms);
+  const reserves = contractIds(L, b.id, 'assets', 'reserves')[0];
+  if (reserves === undefined) throw new Error(`banco ${b.id} sin reservas`);
+  if (taxes > 0) {
+    batch.pay(reserves, account, taxes * MICRO_PER_UNIT, 'taxes');
+    derivedPayment(reserves, account, taxTerms);
+  }
+}
+
+/**
+ * `Households.payTaxes` (309–331): impuestos = max(alícuota del patrimonio × patrimonio + 0,18 × ingreso bruto, 0)
+ * (`IncomeWealthTaxStrategy`, el mismo cálculo del evento 17), con tope en efectivo + depósito; `LAG_TAXES`; el depósito
+ * paga a la cuenta del gobierno (las reservas de su banco bajan lo mismo); `LAG_NETWEALTH` = patrimonio después del pago;
+ * `dividendsReceived` = 0. El monto con tope se lleva en µ (el tope es el saldo, entero).
+ * **Rama no portada:** si el depósito no alcanza (solo puede pasar con efectivo > 0), JMAB pasa efectivo al depósito y
+ * lo deja negativo (`deposit.setValue(depValue − taxes)` con el valor viejo; ledger-contratos.md, sec. 4, "Para P3").
+ * Nadie tiene efectivo en la corrida base: error explícito (propuesta pendiente de aprobación).
+ */
+function payHouseholdTaxes(s: CaianiState, h: HouseholdState, account: number, batch: PaymentBatch): void {
+  const L = s.ledger;
+  const taxes = householdTaxes(s, h);
+  const deposit = contractIds(L, h.id, 'assets', 'deposit')[0];
+  if (deposit === undefined) throw new Error(`hogar ${h.id} sin depósito (JMAB: NullPointerException)`);
+  const cash = contractIds(L, h.id, 'assets', 'cash')[0];
+  const depValue = batch.balance(deposit);
+  const liquidity = (cash === undefined ? 0 : batch.balance(cash)) + depValue;
+  const capped = taxes * MICRO_PER_UNIT > liquidity;
+  const paid = capped ? liquidity : taxes * MICRO_PER_UNIT; // µ
+  if (depValue < paid) throw new Error(`Households.payTaxes: hogar ${h.id} con efectivo y depósito insuficiente: rama no portada`);
+  setLag(h.lags, LAG.TAXES, s.round, capped ? liquidity / MICRO_PER_UNIT : taxes);
+  // Entradas en µ: con tope, el saldo (depósito y efectivo); si no, intereses y dividendos × alícuota del ingreso
+  // (la del patrimonio no está anotada: es 0 en el XML; con otra, error).
+  let terms: InputTerm[] = [];
+  if (inputsActive() && paid > 0) {
+    if (capped) {
+      terms = [{ contract: deposit, coef: 1 }];
+      if (cash !== undefined) terms.push({ contract: cash, coef: 1 });
+    } else {
+      if (s.rules.householdWealthTaxRate !== 0) throw new Error('Households.payTaxes: alícuota del patrimonio ≠ 0: entradas del V3 no anotadas');
+      const r = s.rules.householdIncomeTaxRate;
+      terms = [
+        { agent: h.id, field: 'interestReceived', coef: r },
+        { agent: h.id, field: 'dividendsReceived', coef: r },
+      ];
+    }
+  }
+  derivedValue(h.id, `lag:${LAG.TAXES}:${s.round}`, terms);
+  if (paid > 0) {
+    batch.pay(deposit, account, paid, 'taxes');
+    derivedPayment(deposit, account, terms);
+  }
+  setLag(h.lags, LAG.NETWEALTH, s.round, householdNetWealth(s, h, (c) => batch.balance(c)));
+  h.dividendsReceived = 0;
+}
+
+/**
+ * Evento 24, `taxesTic` (TIC_TAXES): solo el gobierno (`GovernmentAntiCyclical.onTicArrived` 78–80 →
+ * `Government.collectTaxes`, 242–254), que recorre las poblaciones `taxedPopulations` (XML 2874–2881: empresas de
+ * capital, de consumo, bancos y hogares) **en el orden de la lista de cada población** (no en el de creación) y le
+ * pide a cada agente vivo (`isDead`: siempre falso, población fija) que pague a su cuenta en el BC. Sin sorteos.
+ * Los pagos van a un lote con redondeo controlado al cerrar el evento.
+ */
+export function taxesEvent(s: CaianiState): SettleReport {
+  const L = s.ledger;
+  const account = contractIds(L, s.government.id, 'assets', 'reserves')[0];
+  if (account === undefined) throw new Error('gobierno sin cuenta en el BC');
+  const batch = new PaymentBatch(L);
+  for (const id of s.populations.capitalFirms) payFirmTaxes(s, capitalFirmById(s, id), false, account, batch);
+  for (const id of s.populations.consumptionFirms) payFirmTaxes(s, consumptionFirmById(s, id), true, account, batch);
+  for (const id of s.populations.banks) payBankTaxes(s, bankById(s, id), account, batch);
+  for (const id of s.populations.households) payHouseholdTaxes(s, householdById(s, id), account, batch);
   return batch.settle();
 }

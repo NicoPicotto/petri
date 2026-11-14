@@ -347,6 +347,20 @@ export function getLag(lags: Lags, id: number, round: number, lag: number): numb
   return v;
 }
 
+/**
+ * `SimpleAdaptiveExpectation.addObservation` (una variable): corre las filas como JMAB (la fila i toma los valores
+ * de la i + 1, para i < n − 1) y escribe en la fila 0 la observación y la expectativa vigente. Con una sola fila
+ * (todas las del XML) es solo lo segundo.
+ */
+export function addObservation(e: AdaptiveExpectation, observation: number): void {
+  const n = e.passed.length;
+  for (let i = 0; i < n - 1; i++) {
+    const next = e.passed[i + 1]!;
+    e.passed[i] = [next[0], next[1]];
+  }
+  e.passed[0] = [observation, e.expectation];
+}
+
 /** `SimpleAdaptiveExpectation.updateExpectation`. */
 export function updateExpectation(e: AdaptiveExpectation): void {
   const row = e.passed[0];

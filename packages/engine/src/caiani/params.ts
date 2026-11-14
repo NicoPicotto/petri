@@ -198,6 +198,13 @@ export interface RuleParams {
   /** `ProfitsWealthTaxStrategy.profitTaxRate` de las empresas (`profitTaxVal`, XML 1880): la usa el evento 9 para los impuestos esperados. */
   profitTaxRate: number; // 1880
   /**
+   * `ProfitsWealthTaxStrategy.wealthTaxRate` (evento 24): alícuota sobre el patrimonio de las empresas de capital
+   * (1875), de consumo (2173) y de los bancos (2594). Las tres son el literal 0 en el XML; la de las ganancias es
+   * `profitTaxRate` en los tres (el mismo bean `profitTaxVal`).
+   */
+  firmWealthTaxRate: number; // 1875, 2173
+  bankWealthTaxRate: number; // 2594
+  /**
    * `FixedShareOfProfitsToPopulationAsShareOfWealthDividends.profitShare` de las empresas de capital (1895) y de
    * consumo (2185): dividendos / ganancia después de impuestos. Lo usa el evento 9 para los dividendos esperados.
    */
@@ -311,6 +318,8 @@ export const RULES: Readonly<RuleParams> = {
   depositRateIncrease: false,
   depositRateSigma: 0.0094,
   profitTaxRate: 0.18,
+  firmWealthTaxRate: 0,
+  bankWealthTaxRate: 0,
   firmProfitShareCapital: 0.9,
   firmProfitShareConsumption: 0.9,
   shareOfExpIncomeAsDepositCapital: 1,
