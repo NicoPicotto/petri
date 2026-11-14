@@ -267,6 +267,16 @@ export interface RuleParams {
   minWageDiscount: number;
   /** `IncomeWealthTaxStrategy` de los hogares: alícuotas sobre el ingreso bruto y sobre el patrimonio (eventos 17 y 24). */
   householdIncomeTaxRate: number; // 2810
+  /** `Households.shareDeposits`: parte de los activos líquidos que el hogar quiere en depósitos (evento 26). */
+  householdShareDeposits: number; // 2700
+  /** `SelectionRandomRobinBuyerMixer.nbSellers` del mercado de depósitos: bancos que ve cada depositante (evento 27). */
+  depositMarketSellers: number; // 418
+  /**
+   * `SwitchingStrategySimple` del banco de los depósitos (`switchingStrategy2`, el de hogares y empresas):
+   * λ = −ln(0,5) / thresholdMean, con thresholdMean = 0,15 (1775) y `payOrReceive` = false (1777: es un cobro).
+   */
+  depositSwitchingLambda: number;
+  depositSwitchingPayOrReceive: boolean; // 1777
   householdWealthTaxRate: number; // 2811
   /**
    * `ConsumptionFixedPropensitiesOOIWWithPersistency` (evento 17): persistencia del consumo pasado y propensiones
@@ -350,6 +360,10 @@ export const RULES: Readonly<RuleParams> = {
   unemploymentBenefit: 0.4,
   minWageDiscount: 1,
   householdIncomeTaxRate: 0.18,
+  householdShareDeposits: 1,
+  depositMarketSellers: 3,
+  depositSwitchingLambda: LN2 / 0.15,
+  depositSwitchingPayOrReceive: false,
   householdWealthTaxRate: 0,
   consumptionPersistency: 0,
   propensityOutOfIncome: 0.385808,

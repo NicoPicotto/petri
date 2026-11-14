@@ -136,6 +136,13 @@ export interface HouseholdState extends AgentFlags {
    */
   demand: number;
   /**
+   * `Households.depositAmount` y `cashAmount` (µ): cuánto quiere tener en depósitos y en efectivo (evento 26,
+   * `computeLiquidAssetsAmounts`): `shareDeposits` × (efectivo + depósitos) y el resto. Los lee el mercado de
+   * depósitos (evento 27). JMAB no los pone en 0 entre ticks (0 en el constructor).
+   */
+  depositAmount: Micro;
+  cashAmount: Micro;
+  /**
    * SM_CONSGOOD del hogar: los bienes de consumo que compró en el tick (evento 18, uno por compra), en el orden
    * de JMAB. Su valor es lo que pagó, en unidades de Caiani (`double`, como JMAB; ledger-contratos.md, sec. 2.2).
    */

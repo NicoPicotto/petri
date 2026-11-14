@@ -196,7 +196,12 @@ export const INPUT_FIELDS = new WeakMap<CaianiState, Map<string, number>>();
 
 /** Campos en µ (nombre en el port → campo del volcado) de hogares, empresas (consumo / capital) y bancos. */
 const MICRO_FIELDS = {
-  household: { dividendsReceived: 'Households.dividendsReceived', interestReceived: 'Households.interestsReceived' },
+  household: {
+    dividendsReceived: 'Households.dividendsReceived',
+    interestReceived: 'Households.interestsReceived',
+    depositAmount: 'Households.depositAmount',
+    cashAmount: 'Households.cashAmount',
+  },
   firm: {
     interestReceived: ['ConsumptionFirm.interestReceived', 'CapitalFirm.interestReceived'],
     debtBurden: ['ConsumptionFirm.debtBurden', 'CapitalFirm.debtBurden'],
@@ -338,6 +343,8 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
       dividendsReceived: toMicro(j['Households.dividendsReceived']),
       interestReceived: toMicro(j['Households.interestsReceived']),
       demand: j['Households.demand'],
+      depositAmount: toMicro(j['Households.depositAmount']),
+      cashAmount: toMicro(j['Households.cashAmount']),
       consumptionGoods: goods(id, 2).map((it) => consumptionGoodOf(it, fromJ)),
       previousSeller: fromJ(ref(strat(j, 0)['previousGoodSupplier'])!),
       previousBank: fromJ(ref(strat(j, 11)['previousDepositSupplier'])!),
@@ -810,6 +817,9 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     amount(`${w} dividendos`, h.dividendsReceived, j['Households.dividendsReceived']);
     amount(`${w} intereses de depósitos`, h.interestReceived, j['Households.interestsReceived']);
     close(`${w} demanda de consumo`, h.demand, j['Households.demand'], true);
+    const dv = (k: string) => (opts.derivedValue?.(h.id, k) ?? 0) * MICRO_PER_UNIT;
+    amount(`${w} depósitos deseados`, h.depositAmount, j['Households.depositAmount'], undefined, undefined, dv('depositAmount'));
+    amount(`${w} efectivo deseado`, h.cashAmount, j['Households.cashAmount'], undefined, undefined, dv('cashAmount'));
     same(`${w} vendedor previo`, toJ(h.previousSeller), ref(strat(j, 0)['previousGoodSupplier']));
     same(`${w} banco previo`, toJ(h.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
     lagsCompare(w, h.lags, j['SimpleAbstractAgent.passedValues'], h.id);

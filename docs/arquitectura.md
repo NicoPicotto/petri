@@ -9,7 +9,8 @@ Requiere **Node ≥ 22.12** (Vite 7 no anda con Node 18). Ojo: si pnpm está ins
 | Comando (desde la raíz) | Qué hace |
 |---|---|
 | `pnpm install` | Instala el monorepo. |
-| `pnpm test` | Tests rápidos del motor (~25 s; casi todo es el criterio de salida con 20 semillas). |
+| `pnpm test` | Tests del día a día (~70 s): todos los archivos, con el V3 del port de Caiani en modo rápido (solo el evento suelto, ticks 50 y 108; `caiani-v3.test.ts`). Sin `reference/`, el V3 se saltea. |
+| `pnpm test:v3` | Suite completa para cerrar cada tanda de eventos del port: el V3 en todas las corridas de referencia, suelto y encadenado, de a un archivo por vez (`PETRI_V3=full`). Variables: `V3_EVENTS=26,27` (solo el suelto de esos eventos; el encadenado, hasta el último), `V3_TICKS=128` (solo esas corridas). Ver [reglas-caiani.md](reglas-caiani.md), sec. 1, "Suites". |
 | `pnpm test:slow` | Suite lenta: archivos `*.slow.test.ts` (volatilidad según el tamaño y calentamiento con 2.000 hogares, ~75 s). Se separa con `PETRI_SLOW=1` en `packages/engine/vitest.config.ts`. |
 | `pnpm typecheck` | `tsc` en engine (código y tests por separado) y en app. |
 | `pnpm dev` | App en http://localhost:5173. |

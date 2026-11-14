@@ -110,7 +110,11 @@ export class ChainScales implements ScaleSource {
     for (const a of [...this.s.households, ...this.s.consumptionFirms, ...this.s.capitalFirms, ...this.s.banks]) byId.set(a.id, a);
     const fieldValue = (agent: AgentId, field: string): number => (byId.get(agent) as unknown as Record<string, number> | undefined)?.[field] ?? 0;
     // Montos en µ anotados por nombre de campo (no son rezagos): etiqueta de `compareState`.
-    const AMOUNT_LABEL: Record<string, string> = { dividends: 'dividendos pagados' };
+    const AMOUNT_LABEL: Record<string, string> = {
+      dividends: 'dividendos pagados',
+      depositAmount: 'depósitos deseados',
+      cashAmount: 'efectivo deseado',
+    };
     const groups = new WeakMap<readonly InputTerm[], number>();
     const scaleOf = (agent: AgentId, w: string, terms: readonly InputTerm[]): number => {
       let S = 0; // µ

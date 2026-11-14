@@ -798,6 +798,14 @@ export function delistFromIssuer(ledger: Ledger, id: ContractId): void {
 }
 
 /**
+ * Cambia la tasa de un contrato (`setInterestRate` de JMAB; el mercado de depósitos la pone en la del banco elegido).
+ * No mueve saldos ni registra flujos.
+ */
+export function setContractRate(ledger: Ledger, id: ContractId, rate: number): void {
+  contractOf(ledger, id).rate = rate;
+}
+
+/**
  * Cierra un contrato con saldo 0: lo saca de las listas del tenedor y del emisor (el resto conserva el orden).
  * No registra flujos.
  */

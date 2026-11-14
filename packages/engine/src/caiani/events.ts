@@ -16,7 +16,7 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { agentOf, contractIds, delistFromIssuer, contractOf, credit, firstAsset, installments, netFinancialWorth, open, rawInstallments, writeDown, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { agentOf, closeContract, contractIds, delistFromIssuer, contractOf, credit, firstAsset, installments, netFinancialWorth, open, pay, rawInstallments, setContractRate, writeDown, type AgentId, type ContractKind, type Ledger } from './ledger';
 import { CarryRounder, MICRO_PER_UNIT, allocateLargestRemainder, toMicro, toUnits, type Micro } from './money';
 import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
@@ -2687,4 +2687,154 @@ export function dividendsEvent(s: CaianiState): SettleReport {
   for (const b of s.banks) payBankDividends(s, b, rc, batch);
   rc.households.forEach((h, i) => (h.dividendsReceived = toMicro(rc.received[i]!)));
   return batch.settle();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 26: demanda de depósitos
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 26, `depDemandTic` (TIC_DEPOSITDEMAND): empresas de consumo, de capital y hogares, en orden de creación
+ * (`CopyOfConsumptionFirm2WagesEnd.onTicArrived` 94–95, `CopyOfCapitalFirm2WagesEnd` 93–94, `Households` 192–193;
+ * los bancos y el gobierno no lo escuchan), todos con `computeLiquidAssetsAmounts`. Sin sorteos ni interacción.
+ * - Empresa (`ConsumptionFirm` 694–706, `CapitalFirm` 285–297, iguales): si el efectivo es > 0, lo pasa al primer
+ *   depósito (el efectivo del banco sube en espejo); activa en el mercado de depósitos. En el base las empresas no
+ *   tienen efectivo (inicializacion.md, sec. 5): el traspaso va al lote, como en los eventos 20 y 21.
+ * - Hogar (`Households` 245–258): activos líquidos = Σ efectivo + Σ depósitos (todos los de sus listas; las variables
+ *   de JMAB tienen los nombres cruzados, sin efecto); `depositAmount` = `shareDeposits` × líquidos (1, XML 2700) y
+ *   `cashAmount` = líquidos − `depositAmount`; activo en el mercado de depósitos. En µ: la suma de los saldos es exacta,
+ *   `depositAmount` se redondea una vez y `cashAmount` es el resto (la suma de los dos es exactamente los líquidos).
+ */
+export function depositDemandEvent(s: CaianiState): SettleReport {
+  const L = s.ledger;
+  const batch = new PaymentBatch(L);
+  for (const f of [...s.consumptionFirms, ...s.capitalFirms]) {
+    const cash = contractIds(L, f.id, 'assets', 'cash')[0];
+    if (cash === undefined) throw new Error(`empresa ${f.id} sin efectivo (JMAB: NullPointerException)`);
+    if (batch.balance(cash) > 0) {
+      const deposit = contractIds(L, f.id, 'assets', 'deposit')[0];
+      if (deposit === undefined) throw new Error(`empresa ${f.id} sin depósito (JMAB: NullPointerException)`);
+      batch.pay(cash, deposit, batch.balance(cash), 'deposits');
+    }
+    f.active[MKT.DEPOSIT] = true;
+  }
+  const share = s.rules.householdShareDeposits;
+  for (const h of s.households) {
+    const liquid = sumContracts(L, h.id, 'assets', 'cash') + sumContracts(L, h.id, 'assets', 'deposit');
+    h.depositAmount = Math.round(share * liquid);
+    h.cashAmount = liquid - h.depositAmount;
+    if (inputsActive()) {
+      const liquidTerms: InputTerm[] = [...contractIds(L, h.id, 'assets', 'cash'), ...contractIds(L, h.id, 'assets', 'deposit')].map((contract) => ({ contract, coef: 1 }));
+      derivedValue(h.id, 'depositAmount', scaleTerms(liquidTerms, share));
+      if (share !== 1) derivedValue(h.id, 'cashAmount', scaleTerms(liquidTerms, 1 - share));
+    }
+    h.active[MKT.DEPOSIT] = true;
+  }
+  return batch.settle();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 27: mercado de depósitos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_DEPOSIT_SUPPLIER = 'MostPayingDepositWithSwitching.selectDepositSupplier';
+export const SITE_DEPOSIT_MECHANISM = 'DepositMechanism.execute';
+
+/**
+ * `MostPayingDepositWithSwitching.selectDepositSupplier` (XML 1810–1813, 2104–2107 y 2794–2797, todos con
+ * `switchingStrategy2`): el banco de tasa de depósitos más alta entre los vistos (el primero si empatan; la tasa no
+ * depende del monto, `Bank.getDepositInterestRate` 156–159); si la del banco previo es menor, cambia con la
+ * probabilidad de `SwitchingStrategySimple` (cobro: `payOrReceive` = false). Devuelve el previo (actualizado), que
+ * puede no estar entre los vistos. `isDead()` del previo: la población de bancos es fija y nadie muere en el base.
+ */
+function selectDepositSupplier(s: CaianiState, depositor: HouseholdState | FirmState, banks: readonly BankState[], rng: CaianiRng): BankState {
+  let maxRate = -Infinity;
+  let maxBank = banks[0]!;
+  for (const b of banks) {
+    if (gt(`${SITE_DEPOSIT_SUPPLIER} más alta`, b.depositInterestRate, maxRate, 'pure')) {
+      maxRate = b.depositInterestRate;
+      maxBank = b;
+    }
+  }
+  const prev = bankById(s, depositor.previousBank);
+  // Si el previo es el de tasa más alta, las dos tasas son el mismo valor: no se registra.
+  const prevLower = prev === maxBank ? false : lt(`${SITE_DEPOSIT_SUPPLIER} previo < máximo`, prev.depositInterestRate, maxRate, 'pure', undefined, depositor.id);
+  if (prevLower && switches(prev.depositInterestRate, maxRate, s.rules.depositSwitchingLambda, s.rules.depositSwitchingPayOrReceive, rng)) {
+    depositor.previousBank = maxBank.id;
+  }
+  return bankById(s, depositor.previousBank);
+}
+
+/**
+ * `DepositMechanism.execute` (XML 421–425): el depositante pasa todo a un depósito en el banco elegido.
+ * - Busca el **primero** de sus depósitos cuyo emisor es ese banco (`getItemStockMatrix(true, SM_DEP, banco)`; incluye
+ *   un depósito que una quiebra sacó de la lista del banco, `delisted`: en JMAB la empresa lo vuelve a usar, sec. 19).
+ *   Si no tiene, abre uno en 0 con la tasa del banco (al final de las dos listas); si tiene, le pone la tasa del banco.
+ * - Cada uno de los otros depósitos (los de antes, en su orden): transfiere el saldo entero al elegido (`transfer`,
+ *   con reservas si el banco es otro) y lo saca de las listas del depositante y del banco (`closeContract`; si estaba
+ *   fuera de la lista del banco, como en JMAB, sacarlo de ahí no hace nada). Es como la empresa suelta el segundo
+ *   depósito de una quiebra.
+ * - Efectivo: si el primero no es el deseado (`cashAmount`; 0 en las empresas, `getCashAmount`), la diferencia pasa
+ *   del efectivo al depósito o al revés, con el efectivo del banco en espejo. En el base no pasa (todo en 0).
+ * - El depositante queda inactivo en el mercado de depósitos.
+ * Los traspasos son saldos enteros (exactos en µ): van directo al ledger, sin lote (no hay nada que redondear).
+ */
+function depositTransaction(s: CaianiState, depositor: HouseholdState | FirmState, bank: BankState, cashAmount: Micro): void {
+  const L = s.ledger;
+  const rate = bank.depositInterestRate;
+  const previous = contractIds(L, depositor.id, 'assets', 'deposit').slice();
+  let deposit = previous.find((id) => contractOf(L, id).issuer === bank.id);
+  if (deposit === undefined) deposit = open(L, 'deposit', depositor.id, bank.id, 0, { rate }, 'deposits');
+  else setContractRate(L, deposit, rate);
+  for (const dep of previous) {
+    if (dep === deposit) continue;
+    pay(L, dep, deposit, contractOf(L, dep).amount, 'deposits');
+    closeContract(L, dep);
+  }
+  const cash = contractIds(L, depositor.id, 'assets', 'cash')[0];
+  if (cash === undefined) throw new Error(`agente ${depositor.id} sin efectivo (JMAB: NullPointerException)`);
+  const held = contractOf(L, cash).amount;
+  // Comparación entre montos en µ que en el base son 0 exactos también en JMAB (nadie tiene efectivo y el deseado es
+  // líquidos − 1 × líquidos): no se registra, como el efectivo de las empresas en los eventos 20 y 21 (daba 8.120
+  // "frágiles" con distancia 0 por tick).
+  if (held !== cashAmount) {
+    const bias = held - cashAmount;
+    if (bias > 0) pay(L, cash, deposit, bias, 'deposits');
+    else pay(L, deposit, cash, -bias, 'deposits');
+  }
+  depositor.active[MKT.DEPOSIT] = false;
+}
+
+/**
+ * Evento 27, `depMarketTic` (TIC_DEPOSITMARKET): `SimpleMarketSimulation` de los depósitos (XML 386–425), con listas
+ * propias (`s.markets.deposit`: compradores = hogares, empresas de capital y de consumo; vendedores = bancos) y
+ * `nbRuns` = 1. Como el mercado de crédito (evento 10): si no hay ningún comprador activo con algún vendedor activo,
+ * está cerrado; si no, `SelectionRandomRobinBuyerMixer` mezcla los compradores (en el lugar) y, para cada uno activo
+ * en depósitos, mezcla los bancos (en el lugar) y toma los primeros 3 activos; si hay alguno, el depositante elige
+ * banco (`selectDepositSupplier`; `Households.onAgentArrival` 168–171, `ConsumptionFirm` 234–237, `CapitalFirm`
+ * 269–272) y se ejecuta `DepositMechanism` en el momento.
+ */
+export function depositMarketEvent(s: CaianiState, rng: CaianiRng): void {
+  const m = s.markets.deposit;
+  const firmOf = new Map<AgentId, FirmState>();
+  for (const f of [...s.consumptionFirms, ...s.capitalFirms]) firmOf.set(f.id, f);
+  const depositor = (id: AgentId): HouseholdState | FirmState => firmOf.get(id) ?? householdById(s, id);
+  const sellerActive = (id: AgentId) => bankById(s, id).active[MKT.DEPOSIT]!;
+  // AbstractMarketMixer.closed
+  const open_ = m.buyers.some((id) => depositor(id).active[MKT.DEPOSIT]) && m.sellers.some(sellerActive);
+  if (!open_) return;
+  rng.shuffle(SITE_CREDIT_MIXER, 'buyers', m.buyers, ownId);
+  for (const id of m.buyers) {
+    const d = depositor(id);
+    if (!d.active[MKT.DEPOSIT]) continue;
+    const selected = selectSellers(m.sellers, s.rules.depositMarketSellers, sellerActive, rng, SITE_CREDIT_MIXER);
+    if (selected.length === 0) continue;
+    const bank = selectDepositSupplier(
+      s,
+      d,
+      selected.map((b) => bankById(s, b)),
+      rng,
+    );
+    depositTransaction(s, d, bank, firmOf.has(id) ? 0 : (d as HouseholdState).cashAmount);
+  }
 }

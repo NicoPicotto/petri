@@ -179,6 +179,8 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       previousBank: bank,
       interestReceived: 0,
       demand: 0,
+      depositAmount: 0,
+      cashAmount: 0,
       consumptionGoods: [],
       lags: {},
       expectations: {},
