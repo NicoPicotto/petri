@@ -354,6 +354,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
       id,
       desiredOutput: j['AbstractFirm.desiredOutput'],
       bailoutCost: toMicro(j['AbstractFirm.bailoutCost']),
+      dividends: toMicro(j['AbstractFirm.dividends']),
       markUp: strat(j, 5)['markUp'],
       expectedVariableCosts: j[consumption ? 'ConsumptionFirm.expectedVariableCosts' : 'CapitalFirm.expectedVariableCosts'],
       employees: (j['AbstractFirm.employees'] as J[]).map((e) => fromJ(ref(e)!)),
@@ -394,6 +395,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
       bondInterestRate: j['bondInterestRate'],
       bondInterestReceived: toMicro(j['bondInterestReceived']),
       advancesInterests: toMicro(j['advancesInterests']),
+      dividends: toMicro(j['dividends']),
     };
   });
   const gov = firstOf('government');
@@ -517,7 +519,7 @@ export interface CompareOptions {
   /**
    * Evento suelto: error de entrada (en unidades; port − JMAB) de un `double` de montos que el motor anotó como
    * calculado (`derivedValue`; decisión de Nico, 2026-11-13, reglas-caiani.md, sec. 1): se descuenta antes de comparar.
-   * Clave: `lag:<id>:<período>`.
+   * Clave: `lag:<id>:<período>`, o el nombre del campo para un monto en µ (`dividends`, evento 25).
    */
   derivedValue?: (agent: AgentId, key: string) => number | undefined;
 }
@@ -612,10 +614,13 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
       note(`${what}: port ${port}, JMAB ${java} (rel ${r})`);
     }
   };
-  /** Montos: la misma tolerancia para todos (`amountTol`, arriba). */
-  const amount = (what: string, port: number, java: number, contract?: number, derivedTol?: number) => {
+  /**
+   * Montos: la misma tolerancia para todos (`amountTol`, arriba). `discount` (µ): error de entrada anotado de un monto
+   * calculado que no es un contrato (`derivedValue`, suelto).
+   */
+  const amount = (what: string, port: number, java: number, contract?: number, derivedTol?: number, discount = 0) => {
     const carried = contract !== undefined && opts.carry ? opts.carry(contract) : 0;
-    const dd = Math.abs(port - carried - (opts.carry ? java * MICRO_PER_UNIT : toMicro(java)));
+    const dd = Math.abs(port - carried - discount - (opts.carry ? java * MICRO_PER_UNIT : toMicro(java)));
     counts.maxAmountDiff = Math.max(counts.maxAmountDiff, dd);
     const k = fieldKind(what);
     const st = (amountFields[k] ??= { max: 0, n: 0, over: 0 });
@@ -817,6 +822,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     same(`${w} empleados`, f.employees.map(toJ).join(), (j['AbstractFirm.employees'] as J[]).map(ref).join());
     close(`${w} producción deseada`, f.desiredOutput, j['AbstractFirm.desiredOutput']);
     amount(`${w} costo de rescate`, f.bailoutCost, j['AbstractFirm.bailoutCost']);
+    amount(`${w} dividendos pagados`, f.dividends, j['AbstractFirm.dividends'], undefined, undefined, (opts.derivedValue?.(f.id, 'dividends') ?? 0) * MICRO_PER_UNIT);
     close(`${w} margen`, f.markUp, strat(j, 5)['markUp']);
     const evc = j['ConsumptionFirm.expectedVariableCosts'] ?? j['CapitalFirm.expectedVariableCosts'];
     close(`${w} costo variable esperado`, f.expectedVariableCosts, evc);
@@ -860,6 +866,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
     amount(`${w} intereses de bonos cobrados`, b.bondInterestReceived, j['bondInterestReceived']);
     amount(`${w} intereses de adelantos`, b.advancesInterests, j['advancesInterests']);
+    amount(`${w} dividendos pagados`, b.dividends, j['dividends'], undefined, undefined, (opts.derivedValue?.(b.id, 'dividends') ?? 0) * MICRO_PER_UNIT);
     lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues'], b.id);
     expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
   }

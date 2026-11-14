@@ -150,6 +150,11 @@ export interface FirmState extends AgentFlags {
   desiredOutput: number;
   /** `AbstractFirm.bailoutCost`: costo del rescate en el tick (lo pagan los hogares a los bancos). */
   bailoutCost: Micro;
+  /**
+   * `AbstractFirm.dividends` (µ): dividendos que pagó la última vez que pagó (evento 25; no se pone en 0 si no paga).
+   * Solo lo leen los reportes de JMAB.
+   */
+  dividends: Micro;
   /** Margen de `AdaptiveMarkUpOnAC` (estado de la estrategia de precios). */
   markUp: number;
   /** `expectedVariableCosts`: costo variable unitario esperado (el piso del precio). */
@@ -240,6 +245,11 @@ export interface BankState extends AgentFlags {
   bondInterestReceived: Micro;
   /** `Bank.advancesInterests` (µ): intereses de los adelantos del BC pagados en el tick (evento 23). */
   advancesInterests: Micro;
+  /**
+   * `Bank.dividends` (µ): dividendos que pagó la última vez que tuvo ganancia (evento 25; no se pone en 0 si no paga).
+   * Solo lo leen los reportes de JMAB.
+   */
+  dividends: Micro;
 }
 
 export interface GovernmentState extends AgentFlags {

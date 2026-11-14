@@ -206,10 +206,13 @@ export interface RuleParams {
   bankWealthTaxRate: number; // 2594
   /**
    * `FixedShareOfProfitsToPopulationAsShareOfWealthDividends.profitShare` de las empresas de capital (1895) y de
-   * consumo (2185): dividendos / ganancia después de impuestos. Lo usa el evento 9 para los dividendos esperados.
+   * consumo (2185): dividendos / ganancia después de impuestos. Lo usa el evento 9 para los dividendos esperados
+   * y el 25 para los pagados.
    */
   firmProfitShareCapital: number; // 1895
   firmProfitShareConsumption: number; // 2185
+  /** `profitShare` de la estrategia de dividendos de los bancos (`banksDividendsStrategy`, XML 2586): evento 25. */
+  bankProfitShare: number; // 2586
   /**
    * `shareOfExpIncomeAsDeposit` de las empresas de capital (1548) y de consumo (2013): colchón de liquidez
    * deseado, en masas salariales esperadas (evento 9).
@@ -322,6 +325,7 @@ export const RULES: Readonly<RuleParams> = {
   bankWealthTaxRate: 0,
   firmProfitShareCapital: 0.9,
   firmProfitShareConsumption: 0.9,
+  bankProfitShare: 0.6,
   shareOfExpIncomeAsDepositCapital: 1,
   shareOfExpIncomeAsDepositConsumption: 1,
   firmLoanLength: 20,

@@ -58,8 +58,19 @@ export class InputCarry {
     return this;
   }
 
+  /** ε de los grupos ya calculados (por identidad del arreglo; `InputTerm` de grupo, derived.ts). */
+  private readonly groups = new WeakMap<readonly InputTerm[], number>();
+
   /** Error de entrada (µ) de una entrada anotada: el redondeo del saldo inicial del contrato o del campo en µ. */
   private termDelta(t: InputTerm): number {
+    if ('group' in t) {
+      let e = this.groups.get(t.group);
+      if (e === undefined) {
+        e = this.epsilon(t.group);
+        this.groups.set(t.group, e);
+      }
+      return e;
+    }
     if ('contract' in t) {
       const input = INPUT_VALUES.get(this.s)!.get(t.contract);
       const start = this.start.get(t.contract);

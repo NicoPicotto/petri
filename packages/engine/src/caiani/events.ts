@@ -2449,22 +2449,9 @@ function payFirmTaxes(s: CaianiState, f: FirmState, isConsumption: boolean, acco
  */
 function payBankTaxes(s: CaianiState, b: BankState, account: number, batch: PaymentBatch): void {
   const L = s.ledger;
-  const a = agentOf(L, b.id);
-  let nw = 0;
-  // Entradas del patrimonio: cada contrato de sus listas (± 1). Los pagos anteriores del evento que tocan al banco
-  // (impuestos de sus depositantes) bajan a la vez reservas y depósitos y no lo cambian.
-  const nwTerms: InputTerm[] = [];
-  for (const list of a.assets)
-    for (const id of list) {
-      nw += batch.balance(id);
-      if (inputsActive()) nwTerms.push({ contract: id, coef: 1 });
-    }
-  for (const list of a.liabilities)
-    for (const id of list) {
-      nw -= batch.balance(id);
-      if (inputsActive()) nwTerms.push({ contract: id, coef: -1 });
-    }
-  nw /= MICRO_PER_UNIT;
+  // Los pagos anteriores del evento que tocan al banco (impuestos de sus depositantes) bajan a la vez reservas y
+  // depósitos y no cambian su patrimonio.
+  const { nw, terms: nwTerms } = bankNetWealth(s, b, batch);
   const profits = nw - getLag(b.lags, LAG.NETWEALTH, s.round, 1);
   setLag(b.lags, LAG.PROFITPRETAX, s.round, profits);
   derivedValue(b.id, `lag:${LAG.PROFITPRETAX}:${s.round}`, nwTerms);
@@ -2478,6 +2465,28 @@ function payBankTaxes(s: CaianiState, b: BankState, account: number, batch: Paym
     batch.pay(reserves, account, taxes * MICRO_PER_UNIT, 'taxes');
     derivedPayment(reserves, account, taxTerms);
   }
+}
+
+/**
+ * `getNetWealth` del banco (`SimpleAbstractAgent.getNumericBalanceSheet`): activos − pasivos de sus listas (un depósito
+ * fuera de la lista no cuenta, como en JMAB), con los pagos pendientes del lote; en unidades. `terms`: sus entradas
+ * para el V3 (cada contrato, ± 1; `derived.ts`), vacías sin registrador.
+ */
+function bankNetWealth(s: CaianiState, b: BankState, batch: PaymentBatch): { nw: number; terms: InputTerm[] } {
+  const a = agentOf(s.ledger, b.id);
+  let nw = 0;
+  const terms: InputTerm[] = [];
+  for (const list of a.assets)
+    for (const id of list) {
+      nw += batch.balance(id);
+      if (inputsActive()) terms.push({ contract: id, coef: 1 });
+    }
+  for (const list of a.liabilities)
+    for (const id of list) {
+      nw -= batch.balance(id);
+      if (inputsActive()) terms.push({ contract: id, coef: -1 });
+    }
+  return { nw: nw / MICRO_PER_UNIT, terms };
 }
 
 /**
@@ -2542,5 +2551,140 @@ export function taxesEvent(s: CaianiState): SettleReport {
   for (const id of s.populations.consumptionFirms) payFirmTaxes(s, consumptionFirmById(s, id), true, account, batch);
   for (const id of s.populations.banks) payBankTaxes(s, bankById(s, id), account, batch);
   for (const id of s.populations.households) payHouseholdTaxes(s, householdById(s, id), account, batch);
+  return batch.settle();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 25: dividendos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_DIVIDENDS = 'FixedShareOfProfitsToPopulationAsShareOfWealthDividends.payDividends';
+
+/** Los que cobran los dividendos: los hogares, en el orden de la lista de su población (`receivers.getAgents()`). */
+interface DividendReceivers {
+  households: HouseholdState[];
+  /** Primer depósito de cada uno (`getItemStockMatrix(true, SM_DEP)`). */
+  deposits: number[];
+  /** `dividendsReceived` en unidades (`double`, como JMAB): el inicial más lo cobrado en el evento. */
+  received: number[];
+  /** V3 (`derived.ts`): entradas del patrimonio de cada hogar (sus contratos, ± 1) y de todos juntos; null sin registrador. */
+  own: InputTerm[][] | null;
+  all: InputTerm[] | null;
+}
+
+function dividendReceivers(s: CaianiState): DividendReceivers {
+  const L = s.ledger;
+  const households = s.populations.households.map((id) => householdById(s, id));
+  const deposits = households.map((h) => {
+    const d = contractIds(L, h.id, 'assets', 'deposit')[0];
+    if (d === undefined) throw new Error(`hogar ${h.id} sin depósito (JMAB: NullPointerException)`);
+    return d;
+  });
+  let own: InputTerm[][] | null = null;
+  let all: InputTerm[] | null = null;
+  if (inputsActive()) {
+    own = households.map((h) => {
+      const a = agentOf(L, h.id);
+      const t: InputTerm[] = [];
+      for (const list of a.assets) for (const id of list) t.push({ contract: id, coef: 1 });
+      for (const list of a.liabilities) for (const id of list) t.push({ contract: id, coef: -1 });
+      return t;
+    });
+    all = own.flat();
+  }
+  return { households, deposits, received: households.map((h) => toUnits(h.dividendsReceived)), own, all };
+}
+
+/**
+ * Reparto de `FixedShareOfProfitsToPopulationAsShareOfWealthDividends.payDividends` (50–97): patrimonio total de los
+ * hogares (`getNetWealth`, con los pagos pendientes del lote: incluye lo que cobraron de los pagadores anteriores),
+ * y a cada uno, en el orden de la población, D × patrimonio / total desde la cuenta `from` (el primer depósito de una
+ * empresa, con `transfer`; las reservas de un banco, que bajan mientras suben el depósito del hogar y las reservas
+ * de su banco: es el mismo `pay` del ledger con la liquidación entre bancos). Categoría `dividends`, al lote.
+ * `dTerms`: entradas de D (V3). Cada pago anota además la dependencia del patrimonio del hogar (D / total) y del total
+ * (−pago / total), con grupos para no copiar listas largas (`derived.ts`).
+ */
+function payDividendsTo(s: CaianiState, rc: DividendReceivers, batch: PaymentBatch, from: number, D: number, dTerms: readonly InputTerm[]): void {
+  const n = rc.households.length;
+  const nw = new Float64Array(n);
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    nw[i] = householdNetWealth(s, rc.households[i]!, (c) => batch.balance(c));
+    total += nw[i]!;
+  }
+  for (let i = 0; i < n; i++) {
+    const toPay = (D * nw[i]!) / total; // JMAB: profits * profitShare * nw / totalNW
+    if (!(toPay >= 0)) throw new Error(`${SITE_DIVIDENDS}: pago ${toPay} al hogar ${rc.households[i]!.id} (patrimonio ${nw[i]}, total ${total}): no portado`);
+    batch.pay(from, rc.deposits[i]!, toPay * MICRO_PER_UNIT, 'dividends');
+    rc.received[i]! += toPay;
+    if (rc.own && rc.all && toPay > 0) {
+      const terms: InputTerm[] = [];
+      if (dTerms.length > 0) terms.push({ group: dTerms, coef: nw[i]! / total });
+      terms.push({ group: rc.own[i]!, coef: D / total }, { group: rc.all, coef: -toPay / total });
+      derivedPayment(from, rc.deposits[i]!, terms);
+    }
+  }
+}
+
+/**
+ * Empresa (`ConsumptionFirm.payDividends` 953–958, `CapitalFirm.payDividends` 779–784: nada si quebró en el tick) →
+ * `FixedShareOfProfitsToPopulationAsShareOfWealthDividends.payDividends` (XML 1892–1898 y 2182–2188, `profitShare` 0,9):
+ * ganancia = `LAG_PROFITAFTERTAX` del tick (evento 24); si es > 0 y el primer depósito es > ganancia × 0,9 (estricto),
+ * la ganancia se recorta al depósito si lo supera, `dividends` = ganancia × 0,9 y se reparte entre los hogares.
+ */
+function payFirmDividends(s: CaianiState, f: FirmState, share: number, rc: DividendReceivers, batch: PaymentBatch): void {
+  if (f.defaulted) return;
+  let profits = getLag(f.lags, LAG.PROFITAFTERTAX, s.round, 0);
+  if (!gt(`${SITE_DIVIDENDS} ganancia > 0`, profits * MICRO_PER_UNIT, 0, 'amount', undefined, f.id)) return;
+  const deposit = contractIds(s.ledger, f.id, 'assets', 'deposit')[0];
+  if (deposit === undefined) throw new Error(`empresa ${f.id} sin depósito (JMAB: NullPointerException)`);
+  const dep = batch.balance(deposit);
+  if (!gt(`${SITE_DIVIDENDS} depósito > dividendos`, dep, profits * share * MICRO_PER_UNIT, 'amount', undefined, f.id)) return;
+  let dTerms: InputTerm[] = [];
+  if (gt(`${SITE_DIVIDENDS} ganancia > depósito`, profits * MICRO_PER_UNIT, dep, 'amount', undefined, f.id)) {
+    profits = dep / MICRO_PER_UNIT;
+    if (inputsActive()) dTerms = [{ contract: deposit, coef: share }];
+  }
+  const D = profits * share;
+  f.dividends = toMicro(D);
+  derivedValue(f.id, 'dividends', dTerms);
+  payDividendsTo(s, rc, batch, deposit, D, dTerms);
+}
+
+/**
+ * Banco (`Bank.payDividends` 231–237): ganancia después de impuestos = patrimonio − `LAG_NETWEALTH` del período anterior
+ * → `LAG_PROFITAFTERTAX`; la estrategia (XML 2583–2590, `profitShare` 0,6): si la ganancia es > 0, `dividends` =
+ * ganancia × 0,6, repartida entre los hogares desde sus reservas, **sin mirar el saldo** (el tope está comentado en
+ * JMAB, 61–63: las reservas pueden quedar negativas) y aunque el banco haya quebrado (no hay chequeo de `defaulted`).
+ */
+function payBankDividends(s: CaianiState, b: BankState, rc: DividendReceivers, batch: PaymentBatch): void {
+  const { nw, terms } = bankNetWealth(s, b, batch);
+  const profits = nw - getLag(b.lags, LAG.NETWEALTH, s.round, 1);
+  setLag(b.lags, LAG.PROFITAFTERTAX, s.round, profits);
+  derivedValue(b.id, `lag:${LAG.PROFITAFTERTAX}:${s.round}`, terms);
+  if (!gt(`${SITE_DIVIDENDS} ganancia > 0 (banco)`, profits * MICRO_PER_UNIT, 0, 'amount', undefined, b.id)) return;
+  const reserves = contractIds(s.ledger, b.id, 'assets', 'reserves')[0];
+  if (reserves === undefined) throw new Error(`banco ${b.id} sin reservas`);
+  const share = s.rules.bankProfitShare;
+  const D = profits * share;
+  b.dividends = toMicro(D);
+  const dTerms = inputsActive() ? scaleTerms(terms, share) : [];
+  derivedValue(b.id, 'dividends', dTerms);
+  payDividendsTo(s, rc, batch, reserves, D, dTerms);
+}
+
+/**
+ * Evento 25, `dividendsTic` (TIC_DIVIDENDS): empresas de consumo, de capital y bancos, en orden de creación
+ * (`CopyOf…2WagesEnd.onTicArrived` 91–92 y 90–91, `Bank.onTicArrived` 215–216). Los hogares cobran en el orden de su
+ * población; `dividendsReceived` (puesto en 0 en el evento 24) acumula lo cobrado, en µ (`toMicro` de la suma en
+ * `double`, como las otras sumas de campos). Sin sorteos. Los pagos van a un lote con redondeo controlado.
+ */
+export function dividendsEvent(s: CaianiState): SettleReport {
+  const batch = new PaymentBatch(s.ledger);
+  const rc = dividendReceivers(s);
+  for (const c of s.consumptionFirms) payFirmDividends(s, c, s.rules.firmProfitShareConsumption, rc, batch);
+  for (const k of s.capitalFirms) payFirmDividends(s, k, s.rules.firmProfitShareCapital, rc, batch);
+  for (const b of s.banks) payBankDividends(s, b, rc, batch);
+  rc.households.forEach((h, i) => (h.dividendsReceived = toMicro(rc.received[i]!)));
   return batch.settle();
 }

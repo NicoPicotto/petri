@@ -68,7 +68,16 @@ export function derivedInput(agent: AgentId, field: string, contract: ContractId
  * arnés calcula ε = Σ coeficiente × δ, lo lleva con signo a cada pata del pago (o lo descuenta del `double`) y
  * compara el resto con la regla estricta de 2 µ. Solo observa, como lo de arriba.
  */
-export type InputTerm = { contract: ContractId; coef: number } | { agent: AgentId; field: string; coef: number };
+export type InputTerm =
+  | { contract: ContractId; coef: number }
+  | { agent: AgentId; field: string; coef: number }
+  /**
+   * Grupo: coeficiente × (Σ coeficiente × entrada del grupo). Es la misma dependencia lineal que expandir el grupo
+   * con los coeficientes multiplicados; sirve para no copiar una lista larga en cada pago que la usa (los dividendos
+   * de un banco dependen de los ~1.000 contratos de su patrimonio, y los paga a 8.000 hogares; evento 25). El arnés
+   * calcula el ε de cada grupo una vez (por identidad del arreglo).
+   */
+  | { group: readonly InputTerm[]; coef: number };
 
 export interface DerivedPayment {
   from: ContractId;

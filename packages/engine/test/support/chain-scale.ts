@@ -16,7 +16,7 @@
  *
  * No toca el motor: solo lee el estado y el `flowLog` del ledger.
  */
-import type { AgentId, CaianiState, FlowRecord, InputRecorder } from '../../src/caiani';
+import type { AgentId, CaianiState, FlowRecord, InputRecorder, InputTerm } from '../../src/caiani';
 import type { ScaleSource } from './jmab-dump';
 
 /** Antes de un evento: cuántos bienes de consumo tiene cada hogar (los nuevos son los que se crean en él). */
@@ -109,25 +109,46 @@ export class ChainScales implements ScaleSource {
     const byId = new Map<AgentId, { lags: Record<number, Record<number, number>> }>();
     for (const a of [...this.s.households, ...this.s.consumptionFirms, ...this.s.capitalFirms, ...this.s.banks]) byId.set(a.id, a);
     const fieldValue = (agent: AgentId, field: string): number => (byId.get(agent) as unknown as Record<string, number> | undefined)?.[field] ?? 0;
-    let n = 0;
-    for (const [key, terms] of rec.values) {
-      const m = /^(\d+):lag:(\d+):(\d+)$/.exec(key);
-      if (!m) throw new Error(`ChainScales: clave de valor anotado desconocida: ${key}`);
-      const agent = Number(m[1]);
-      const w = `${prefix.get(agent) ?? 'agente'} ${this.toJ(agent)}`;
-      let propagated = 0; // µ
+    // Montos en µ anotados por nombre de campo (no son rezagos): etiqueta de `compareState`.
+    const AMOUNT_LABEL: Record<string, string> = { dividends: 'dividendos pagados' };
+    const groups = new WeakMap<readonly InputTerm[], number>();
+    const scaleOf = (agent: AgentId, w: string, terms: readonly InputTerm[]): number => {
+      let S = 0; // µ
       for (const t of terms) {
-        if ('contract' in t) propagated += Math.abs(t.coef) * this.contract(t.contract);
+        if ('group' in t) {
+          let g = groups.get(t.group);
+          if (g === undefined) {
+            g = scaleOf(agent, w, t.group);
+            groups.set(t.group, g);
+          }
+          S += Math.abs(t.coef) * g;
+        } else if ('contract' in t) S += Math.abs(t.coef) * this.contract(t.contract);
         else {
           const label = FIELD_LABEL[t.field];
           if (!label) throw new Error(`ChainScales: campo sin etiqueta: ${t.field}`);
-          propagated += Math.abs(t.coef) * this.peek(`${w} ${label}`, fieldValue(agent, t.field));
+          S += Math.abs(t.coef) * this.peek(`${w} ${label}`, fieldValue(agent, t.field));
         }
       }
-      const label = `${w} rezago ${m[2]}[${m[3]}]`;
-      const lags = byId.get(agent)?.lags;
-      const v = lags?.[Number(m[2])]?.[Number(m[3])] ?? 0;
-      this.overrides.set(label, this.peek(label, v) + propagated / 1e6);
+      return S;
+    };
+    let n = 0;
+    for (const [key, terms] of rec.values) {
+      const lag = /^(\d+):lag:(\d+):(\d+)$/.exec(key);
+      const field = /^(\d+):([A-Za-z]+)$/.exec(key);
+      const agent = Number((lag ?? field)?.[1]);
+      if (!lag && !(field && AMOUNT_LABEL[field[2]!])) throw new Error(`ChainScales: clave de valor anotado desconocida: ${key}`);
+      const w = `${prefix.get(agent) ?? 'agente'} ${this.toJ(agent)}`;
+      const propagated = scaleOf(agent, w, terms); // µ
+      if (lag) {
+        const label = `${w} rezago ${lag[2]}[${lag[3]}]`;
+        const lags = byId.get(agent)?.lags;
+        const v = lags?.[Number(lag[2])]?.[Number(lag[3])] ?? 0;
+        this.overrides.set(label, this.peek(label, v) + propagated / 1e6);
+      } else {
+        // Monto en µ: la escala de su etiqueta está en µ.
+        const label = `${w} ${AMOUNT_LABEL[field![2]!]}`;
+        this.overrides.set(label, this.peek(label, fieldValue(agent, field![2]!)) + propagated);
+      }
       n++;
     }
     return n;

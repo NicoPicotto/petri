@@ -40,6 +40,7 @@ import {
   bondInterestEvent,
   advanceInterestEvent,
   taxesEvent,
+  dividendsEvent,
   installments,
   rawInstallments,
   closeContract,
@@ -89,6 +90,8 @@ import {
   withDerived,
   InputRecorder,
   withInputs,
+  scaleTerms,
+  type InputTerm,
   type CaianiRng,
   type CaianiState,
   type FirmState,
@@ -1795,6 +1798,139 @@ describe('evento 24 (impuestos): casos a mano', () => {
   });
 });
 
+describe('evento 25 (dividendos): casos a mano', () => {
+  /**
+   * Estado inicial en el tick 1 sin ganancias (todas las empresas con `LAG_PROFITAFTERTAX` = −1 y cada banco con el
+   * patrimonio anterior igual al actual) y dos hogares en la población, con depósitos 3 y 1 (el resto pasa a un
+   * tercero, fuera de la población). Los casos le dan ganancia a quien paga.
+   */
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    for (const f of [...s.consumptionFirms, ...s.capitalFirms]) setLag(f.lags, LAG.PROFITAFTERTAX, 1, -1);
+    for (const b of s.banks) setLag(b.lags, LAG.NETWEALTH, 0, toUnits(netFinancialWorth(L, b.id)));
+    const [h1, h2, h3] = [s.households[0]!, s.households[1]!, s.households[2]!];
+    s.populations.households = [h1.id, h2.id];
+    const sink = firstAsset(L, h3.id, 'deposit')!;
+    const d1 = firstAsset(L, h1.id, 'deposit')!;
+    const d2 = firstAsset(L, h2.id, 'deposit')!;
+    pay(L, d1.id, sink.id, d1.amount - 3_000_000, 'deposits');
+    pay(L, d2.id, sink.id, d2.amount - 1_000_000, 'deposits');
+    for (const h of [h1, h2]) h.dividendsReceived = 0;
+    const reservesOf = (bank: number) => contractOf(L, contractIds(L, bank, 'assets', 'reserves')[0]!);
+    return { s, L, h1, h2, d1, d2, reservesOf };
+  };
+
+  it('empresa de consumo con ganancia 10: 9 entre los hogares según su patrimonio (6,75 y 2,25); patas y registros', () => {
+    const { s, L, h1, h2, d1, d2, reservesOf } = setup();
+    const c = s.consumptionFirms[0]!;
+    setLag(c.lags, LAG.PROFITAFTERTAX, 1, 10);
+    const dep = firstAsset(L, c.id, 'deposit')!;
+    const banks = [dep.issuer, d1.issuer, d2.issuer];
+    const r0 = new Map(banks.map((b) => [b, reservesOf(b).amount]));
+    const f0 = dep.amount;
+    const cp = beginPeriod(L);
+    const r = dividendsEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(r.relaxed).toBe(false);
+    expect(r.payments).toBe(2);
+    expect(c.dividends).toBe(9_000_000);
+    expect(d1.amount).toBe(3_000_000 + 6_750_000);
+    expect(d2.amount).toBe(1_000_000 + 2_250_000);
+    expect(f0 - dep.amount).toBe(9_000_000);
+    expect([h1.dividendsReceived, h2.dividendsReceived]).toEqual([6_750_000, 2_250_000]);
+    // Reservas: el banco de la empresa paga lo que va a otros bancos; cada banco de un hogar cobra lo que no viene de él.
+    const dRes = new Map<number, number>();
+    const move = (b: number, x: number) => dRes.set(b, (dRes.get(b) ?? 0) + x);
+    for (const [d, x] of [
+      [d1, 6_750_000],
+      [d2, 2_250_000],
+    ] as const) {
+      if (d.issuer !== dep.issuer) {
+        move(dep.issuer, -x);
+        move(d.issuer, x);
+      }
+    }
+    for (const b of new Set(banks)) expect(reservesOf(b).amount - r0.get(b)!).toBe(dRes.get(b) ?? 0);
+    expect(L.flowLog.filter((f) => f.category === 'dividends')).toHaveLength(2);
+  });
+
+  it('dos empresas: la segunda reparte con el patrimonio que dejó la primera (4 → 3 y 1; 8 → 6 y 2)', () => {
+    const { s, h1, h2, d1, d2 } = setup();
+    // Ganancias con dividendos 4 y 8 (× 0,9).
+    setLag(s.consumptionFirms[0]!.lags, LAG.PROFITAFTERTAX, 1, 4 / 0.9);
+    setLag(s.capitalFirms[0]!.lags, LAG.PROFITAFTERTAX, 1, 8 / 0.9);
+    dividendsEvent(s);
+    // a < 1 µ del double: 4/0,9 × 0,9 no es exactamente 4.
+    expect(Math.abs(d1.amount - 3_000_000 - 9_000_000)).toBeLessThanOrEqual(1);
+    expect(Math.abs(d2.amount - 1_000_000 - 3_000_000)).toBeLessThanOrEqual(1);
+    expect(Math.abs(h1.dividendsReceived - 9_000_000)).toBeLessThanOrEqual(1);
+    expect(Math.abs(h2.dividendsReceived - 3_000_000)).toBeLessThanOrEqual(1);
+  });
+
+  it('empresa: depósito igual a los dividendos no paga (estricto); depósito entre los dividendos y la ganancia recorta la ganancia al depósito; quebrada no paga', () => {
+    const cases = [
+      { deposit: 9_000_000, dividends: 0 },
+      { deposit: 9_500_000, dividends: 8_550_000 }, // 0,9 × 9,5
+    ];
+    for (const { deposit, dividends } of cases) {
+      const { s, L, d1, d2 } = setup();
+      const c = s.consumptionFirms[0]!;
+      setLag(c.lags, LAG.PROFITAFTERTAX, 1, 10);
+      const dep = firstAsset(L, c.id, 'deposit')!;
+      pay(L, dep.id, firstAsset(L, s.consumptionFirms[1]!.id, 'deposit')!.id, dep.amount - deposit, 'deposits');
+      const r = dividendsEvent(s);
+      expect(c.dividends).toBe(dividends);
+      expect(dep.amount).toBe(deposit - dividends);
+      expect(r.payments).toBe(dividends > 0 ? 2 : 0);
+      expect(d1.amount + d2.amount).toBe(4_000_000 + dividends);
+    }
+    const { s, L } = setup();
+    const c = s.consumptionFirms[0]!;
+    setLag(c.lags, LAG.PROFITAFTERTAX, 1, 10);
+    c.defaulted = true;
+    const f0 = firstAsset(L, c.id, 'deposit')!.amount;
+    expect(dividendsEvent(s).payments).toBe(0);
+    expect(c.dividends).toBe(0);
+    expect(firstAsset(L, c.id, 'deposit')!.amount).toBe(f0);
+  });
+
+  it('banco con ganancia 10 (patrimonio − el anterior): 6 desde sus reservas a los hogares; `LAG_PROFITAFTERTAX`; con pérdida no paga', () => {
+    const { s, L, h1, h2, d1, d2, reservesOf } = setup();
+    const b = s.banks[0]!;
+    const nw = toUnits(netFinancialWorth(L, b.id));
+    setLag(b.lags, LAG.NETWEALTH, 0, nw - 10);
+    const banks = [...new Set([b.id, d1.issuer, d2.issuer])];
+    const r0 = new Map(banks.map((x) => [x, reservesOf(x).amount]));
+    const cp = beginPeriod(L);
+    const r = dividendsEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(r.payments).toBe(2);
+    expect(b.lags[LAG.PROFITAFTERTAX]![1]).toBeCloseTo(10, 9);
+    expect(Math.abs(b.dividends - 6_000_000)).toBeLessThanOrEqual(1);
+    expect(Math.abs(d1.amount - 3_000_000 - 4_500_000)).toBeLessThanOrEqual(1);
+    expect(Math.abs(d2.amount - 1_000_000 - 1_500_000)).toBeLessThanOrEqual(1);
+    expect(h1.dividendsReceived + h2.dividendsReceived).toBe(d1.amount + d2.amount - 4_000_000);
+    // Reservas: bajan las del banco por lo que va a depósitos de otros bancos; las de esos bancos suben lo mismo; lo que
+    // va a un depósito del mismo banco solo sube el depósito (el banco baja su patrimonio).
+    const paidOut = d1.amount + d2.amount - 4_000_000;
+    let sameBank = 0;
+    for (const d of [d1, d2]) if (d.issuer === b.id) sameBank += d.amount - (d === d1 ? 3_000_000 : 1_000_000);
+    expect(r0.get(b.id)! - reservesOf(b.id).amount).toBe(paidOut - sameBank);
+    expect(toUnits(netFinancialWorth(L, b.id))).toBeCloseTo(nw - paidOut / 1e6, 9);
+    // Con pérdida: el rezago se escribe igual y no paga.
+    const t2 = setup();
+    const b2 = t2.s.banks[0]!;
+    setLag(b2.lags, LAG.NETWEALTH, 0, toUnits(netFinancialWorth(t2.L, b2.id)) + 3);
+    expect(dividendsEvent(t2.s).payments).toBe(0);
+    expect(b2.lags[LAG.PROFITAFTERTAX]![1]).toBeCloseTo(-3, 9);
+    expect(b2.dividends).toBe(0);
+  });
+});
+
 /**
  * Tiempo máximo de cada test del V3: 5 minutos. Con la máquina cargada (otras corridas, el oráculo) un evento que
  * tarda segundos puede pasar de los 2 minutos y dar un falso vencimiento (pedido de Nico, 2026-11-13).
@@ -1905,6 +2041,13 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
     run: (s) => {
       const r = taxesEvent(s);
       settled(24, r);
+    },
+  },
+  {
+    e: 25,
+    run: (s) => {
+      const r = dividendsEvent(s);
+      settled(25, r);
     },
   },
 ];
@@ -2106,5 +2249,27 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     console.log(`Decisiones frágiles dadas vuelta respecto de JMAB, tick ${tick}: ${flippedVsJmab.length}`, JSON.stringify(flippedVsJmab.slice(0, 10)));
     // Con la cadena cortada, el encadenado no tiene los eventos siguientes: no se comparan.
     if (chainCut === undefined) expect(lengthMismatch).toEqual([]);
+  });
+});
+
+describe('arnés del V3: términos de grupo del error de entrada (derived.ts)', () => {
+  const dump = `${ORACLE}p3-t50/state/tick-50.jsonl`;
+  it.skipIf(!existsSync(dump))('un grupo da el mismo ε que expandirlo con los coeficientes multiplicados (también anidado)', () => {
+    const s = stateFromDump(readDump(dump));
+    const flat: InputTerm[] = Object.values(s.ledger.contracts)
+      .slice(0, 2000)
+      .map((c, k) => ({ contract: c.id, coef: (k % 7) - 3 }));
+    const rec = new InputRecorder();
+    rec.values.set('1:a', [
+      { group: flat, coef: 0.37 },
+      { group: flat, coef: -1.2 },
+      { group: [{ group: flat, coef: 2 }], coef: 0.5 },
+    ]);
+    rec.values.set('1:b', scaleTerms(flat, 0.37 - 1.2 + 1));
+    const carry = new InputCarry(s).fromInputs(rec);
+    const a = carry.valueCarry(1, 'a')!;
+    const b = carry.valueCarry(1, 'b')!;
+    expect(b).not.toBe(0);
+    expect(Math.abs(a - b)).toBeLessThan(1e-12 * Math.max(1, Math.abs(b)));
   });
 });
