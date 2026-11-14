@@ -10,7 +10,7 @@
  * ni el resultado (como `decisions.ts`). No forma parte del estado de la simulación ni afecta el determinismo.
  */
 
-import type { AgentId, ContractId } from './ledger';
+import type { AgentId, ContractId, PaymentKind } from './ledger';
 
 /** Términos anotados de un agregado: redondeos y contratos cuyo saldo de entrada entra en la suma. */
 export interface DerivedTerms {
@@ -69,7 +69,8 @@ export function derivedInput(agent: AgentId, field: string, contract: ContractId
  * compara el resto con la regla estricta de 2 µ. Solo observa, como lo de arriba.
  */
 export type InputTerm =
-  | { contract: ContractId; coef: number }
+  /** Un contrato: el error de entrada de su saldo, o con `field` el de ese campo (el monto inicial de un préstamo). */
+  | { contract: ContractId; coef: number; field?: 'initialAmount' }
   | { agent: AgentId; field: string; coef: number }
   /**
    * Grupo: coeficiente × (Σ coeficiente × entrada del grupo). Es la misma dependencia lineal que expandir el grupo
@@ -83,6 +84,8 @@ export interface DerivedPayment {
   from: ContractId;
   to: ContractId;
   terms: InputTerm[];
+  /** Tipo de pago del lote (`PaymentKind`; por defecto, de cuenta a cuenta): define sus patas. */
+  kind?: PaymentKind;
 }
 
 /** Registro de los montos calculados (lo crea el arnés; `withInputs`). */
@@ -115,9 +118,9 @@ export function scaleTerms(terms: readonly InputTerm[], k: number): InputTerm[] 
   return terms.map((t) => ({ ...t, coef: t.coef * k }));
 }
 
-/** Anota que el pago `from` → `to` (de cuenta a cuenta) depende de esas entradas. */
-export function derivedPayment(from: ContractId, to: ContractId, terms: readonly InputTerm[]): void {
-  if (inputs && terms.length > 0) inputs.payments.push({ from, to, terms: [...terms] });
+/** Anota que el pago `from` → `to` (de cuenta a cuenta, o del tipo `kind` del lote) depende de esas entradas. */
+export function derivedPayment(from: ContractId, to: ContractId, terms: readonly InputTerm[], kind?: PaymentKind): void {
+  if (inputs && terms.length > 0) inputs.payments.push(kind ? { from, to, terms: [...terms], kind } : { from, to, terms: [...terms] });
 }
 
 /** Anota que el valor `key` del agente (un `double` de montos, en unidades) depende de esas entradas. */

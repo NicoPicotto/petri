@@ -415,3 +415,57 @@ describe('PaymentBatch: pagos pendientes en double y cierre del evento', () => {
     assertFlows(w.L, w.cp);
   });
 });
+
+describe('PaymentBatch: cota del lote por mecanismo (bordes redondeados por contrato) y reparto exacto (paySplit)', () => {
+  it('k del lote: cuenta común = 1; reservas que solo liquidan = 2; reservas que además pagan como cuenta = 3', () => {
+    const w = world();
+    const batch = new PaymentBatch(w.L);
+    // Pagos entre bancos en los dos sentidos: los dos bancos están del lado que paga y del que cobra.
+    batch.pay(w.d1, w.d3, 10.4, 'consumption'); // banco 1 → banco 2
+    batch.pay(w.d3, w.d2, 5.3, 'consumption'); // banco 2 → banco 1
+    const r1 = batch.settle();
+    expect(r1.edges.get(w.d1)).toBe(1); // solo paga
+    expect(r1.edges.get(w.d2)).toBe(1); // solo cobra
+    expect(r1.edges.get(w.d3)).toBe(1); // cobra y paga: su variación es menos el borde del neto
+    expect(r1.edges.get(w.res1)).toBe(2);
+    expect(r1.edges.get(w.res2)).toBe(2);
+    // Las reservas del banco 1 además pagan como cuenta (como los dividendos de un banco): 3.
+    const w2 = world();
+    const b2 = new PaymentBatch(w2.L);
+    b2.pay(w2.d1, w2.d3, 10.4, 'consumption');
+    b2.pay(w2.d3, w2.d2, 5.3, 'consumption');
+    b2.pay(w2.res1, w2.d3, 7.7, 'dividends');
+    const r2 = b2.settle();
+    expect(r2.edges.get(w2.res1)).toBe(3);
+    expect(r2.edges.get(w2.res2)).toBe(2);
+    // Y cada contrato cumple su cota: |variación entera − variación en double| < k µ.
+    expect(Math.abs(amt(w2.L, w2.res1) - (1000 - 10.4 + 5.3 - 7.7))).toBeLessThan(3);
+    assertLedger(w2.L);
+    assertFlows(w2.L, w2.cp);
+  });
+
+  it('paySplit: 300 µ entre 7 partes iguales y entre pesos desparejos; el lote reparte exactamente el total y la cuenta queda en 0', () => {
+    for (const weights of [[1, 1, 1, 1, 1, 1, 1], [3, 0.5, 1e-3, 2.25, 7]]) {
+      const w = world();
+      const batch = new PaymentBatch(w.L);
+      const to = [w.d2, w.d3, w.fd];
+      const x = batch.paySplit(w.d1, 300, weights, (i, amount) => batch.pay(w.d1, to[i % 3]!, amount, 'wages'));
+      let W = 0;
+      for (const v of weights) W += v;
+      x.slice(0, -1).forEach((xi, i) => expect(xi).toBe((300 * weights[i]!) / W));
+      batch.settle();
+      expect(amt(w.L, w.d1)).toBe(0);
+      expect(amt(w.L, w.d2) + amt(w.L, w.d3) + amt(w.L, w.fd)).toBe(900);
+      assertLedger(w.L);
+      assertFlows(w.L, w.cp);
+    }
+  });
+
+  it('paySplit: error si la cuenta ya pagó en el lote o si el total no es un entero seguro', () => {
+    const w = world();
+    const batch = new PaymentBatch(w.L);
+    batch.pay(w.d1, w.d2, 1.5, 'wages');
+    expect(() => batch.paySplit(w.d1, 100, [1, 1], (_, a) => batch.pay(w.d1, w.d3, a, 'wages'))).toThrow(/ya pagó/);
+    expect(() => batch.paySplit(w.d2, 10.5, [1, 1], (_, a) => batch.pay(w.d2, w.d3, a, 'wages'))).toThrow(/total inválido/);
+  });
+});

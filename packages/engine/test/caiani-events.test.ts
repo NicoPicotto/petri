@@ -35,6 +35,9 @@ import {
   dividendsEvent,
   depositDemandEvent,
   depositMarketEvent,
+  bankBankruptcyEvent,
+  writeDown,
+  toMicro,
   delistFromIssuer,
   installments,
   rawInstallments,
@@ -1454,18 +1457,19 @@ describe('evento 21 (salarios y seguro de desempleo): casos a mano', () => {
     expect(c.defaulted).toBe(false);
   });
 
-  it('masa salarial mayor que el depósito: reparte el depósito por restos mayores (10 µ entre 50: 1 µ a los 10 de id más chico) y quiebra', () => {
+  it('masa salarial mayor que el depósito: reparte el depósito en partes iguales en double (10 µ entre 50: 0,2 µ cada uno, como JMAB) con el redondeo del lote, exacto, y quiebra', () => {
     const { s, L, c, dep } = setup(10);
+    const n = c.employees.length;
     const cp = beginPeriod(L);
     wagePaymentEvent(s, new PrngCaianiRng(Rng.fromSeed(2)));
     expect(assertFlows(L, cp)).toBeUndefined();
     expect(c.defaulted).toBe(true);
     expect(dep.amount).toBe(0);
+    // Camino (a) (decisión de Nico, 2026-11-14): el lote reparte exactamente los 10 µ; cada empleado a < 1 µ de 10/50.
     const wages = L.flowLog.filter((r) => r.category === 'wages' && r.payer === c.id);
-    const paidTo = wages.map((r) => [r.payee, r.amount]);
-    const smallest = [...c.employees].sort((a, b) => a - b).slice(0, 10);
-    expect(paidTo.map((x) => x[1])).toEqual(new Array(10).fill(1));
-    expect(paidTo.map((x) => x[0]).sort((a, b) => a! - b!)).toEqual(smallest);
+    expect(wages.reduce((a, r) => a + r.amount, 0)).toBe(10);
+    for (const r of wages) expect(Math.abs(r.amount - 10 / n)).toBeLessThan(1);
+    expect(new Set(wages.map((r) => r.payee)).size).toBe(wages.length); // a lo sumo un pago por empleado
     // La quiebra (liquidez 0) condona todos los préstamos.
     for (const id of contractIds(L, c.id, 'liabilities', 'loan')) expect(contractOf(L, id).amount).toBe(0);
   });
@@ -2088,5 +2092,87 @@ describe('evento 27 (mercado de depósitos): casos a mano', () => {
     expect(contractOf(L, cash!).amount).toBe(0);
     expect(first.amount - d0).toBe(2_000_000);
     expect(bankCash.amount - b0).toBe(2_000_000);
+  });
+});
+
+describe('evento 28 (quiebra de los bancos): casos a mano', () => {
+  /** `Rng` con el uniforme fijo (el único sorteo del evento). */
+  const fixedUniform = (u: number): CaianiRng => ({ uniform01: () => u }) as unknown as CaianiRng;
+  /**
+   * Estado inicial en el tick 1 con los ratios de capital de los bancos en 0,1 y el primer banco con patrimonio −1
+   * (una quita de sus préstamos: el banco pierde, las empresas ganan).
+   */
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    for (const b of s.banks) b.capitalRatio = 0.1;
+    const b = s.banks[0]!;
+    const nw0 = netFinancialWorth(L, b.id);
+    let toLose = nw0 + 1_000_000; // patrimonio final −1
+    for (const id of contractIds(L, b.id, 'assets', 'loan')) {
+      const x = Math.min(toLose, contractOf(L, id).amount);
+      writeDown(L, id, x);
+      toLose -= x;
+      if (toLose === 0) break;
+    }
+    if (toLose !== 0) throw new Error('los préstamos no alcanzan para el caso');
+    return { s, L, b };
+  };
+
+  it('sin bancos con patrimonio negativo no pasa nada (ni sortea)', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const before = JSON.stringify(Object.values(s.ledger.contracts).map((c) => c.amount));
+    bankBankruptcyEvent(s, { uniform01: () => { throw new Error('no tenía que sortear'); } } as unknown as CaianiRng);
+    expect(JSON.stringify(Object.values(s.ledger.contracts).map((c) => c.amount))).toBe(before);
+    for (const b of s.banks) expect(b.defaulted).toBe(false);
+  });
+
+  it('banco con patrimonio −1, ratios de los otros 0,1 y U = 0,5: objetivo 0,15 × préstamos; la quita sale de los depósitos de su lista, en proporción (restos mayores), y el banco queda exactamente en el objetivo', () => {
+    const { s, L, b } = setup();
+    const loans = contractIds(L, b.id, 'assets', 'loan').reduce((a, id) => a + contractOf(L, id).amount, 0);
+    const target = toMicro(0.15 * toUnits(loans)); // ratio = 0,1 + 0,5 × 0,1
+    const H = target + 1_000_000;
+    const deps = contractIds(L, b.id, 'liabilities', 'deposit');
+    const before = deps.map((id) => contractOf(L, id).amount);
+    const D = before.reduce((a, x) => a + x, 0);
+    const cp = beginPeriod(L);
+    bankBankruptcyEvent(s, fixedUniform(0.5));
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(b.defaulted).toBe(true);
+    expect(b.bailoutCost).toBe(H);
+    expect(netFinancialWorth(L, b.id)).toBe(target);
+    let cut = 0;
+    deps.forEach((id, i) => {
+      const share = before[i]! - contractOf(L, id).amount;
+      expect(Math.abs(share - (H * before[i]!) / D)).toBeLessThan(1);
+      cut += share;
+    });
+    expect(cut).toBe(H);
+    const exp = b.expectations[EXPECTATION.DEPOSITS]!;
+    for (const row of exp.passed) expect(row).toEqual([toUnits(D - H), toUnits(D - H)]);
+    expect(L.flowLog.filter((f) => f.category === 'writeOff').length).toBeGreaterThanOrEqual(deps.length);
+    for (const o of s.banks.slice(1)) expect(o.defaulted).toBe(false);
+  });
+
+  it('un depósito fuera de la lista del banco no paga la quita (rareza de JMAB)', () => {
+    const { s, L, b } = setup();
+    const f = s.consumptionFirms.find((c) => firstAsset(L, c.id, 'deposit')!.issuer !== b.id)!;
+    const orphan = open(L, 'deposit', f.id, b.id, 0, { rate: 0.003 }, 'deposits');
+    pay(L, firstAsset(L, f.id, 'deposit')!.id, orphan, 2_000_000, 'deposits');
+    delistFromIssuer(L, orphan);
+    bankBankruptcyEvent(s, fixedUniform(0.5));
+    expect(contractOf(L, orphan).amount).toBe(2_000_000);
+  });
+
+  it('errores explícitos: ratio de otro banco infinito (sin préstamos) y quita mayor que los depósitos', () => {
+    const t1 = setup();
+    t1.s.banks[1]!.capitalRatio = Infinity;
+    expect(() => bankBankruptcyEvent(t1.s, fixedUniform(0.5))).toThrow(/no portado/);
+    const t2 = setup();
+    for (const b of t2.s.banks) b.capitalRatio = 1e6; // objetivo enorme: la quita supera los depósitos
+    expect(() => bankBankruptcyEvent(t2.s, fixedUniform(0.5))).toThrow(/no portado/);
   });
 });

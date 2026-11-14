@@ -213,7 +213,8 @@ const MICRO_FIELDS = {
 
 export function stateFromDump(d: Dump): CaianiState {
   const inputValues = new Map<number, number>();
-  const s = buildStateFromDump(d, inputValues);
+  const initialAmounts = new Map<number, number>();
+  const s = buildStateFromDump(d, inputValues, initialAmounts);
   INPUT_VALUES.set(s, inputValues);
   const { toJ } = idMaps(d.meta);
   const fields = new Map<string, number>();
@@ -231,11 +232,13 @@ export function stateFromDump(d: Dump): CaianiState {
       for (const [k, jf] of Object.entries(MICRO_FIELDS.firm)) rec(f.id, k, (f as unknown as Record<string, number>)[k]!, j[jf[i]] as number);
     }
   }
+  // Monto inicial de los préstamos y adelantos (lo usa el capital de las cuotas, evento 20): clave `contrato:<id>:initialAmount`.
+  for (const [id, java] of initialAmounts) fields.set(`contrato:${id}:initialAmount`, (s.ledger.contracts[id]!.initialAmount as number) - java);
   INPUT_FIELDS.set(s, fields);
   return s;
 }
 
-function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiState {
+function buildStateFromDump(d: Dump, inputValues: Map<number, number>, initialAmounts: Map<number, number> = new Map()): CaianiState {
   const { meta, agents } = d;
   const { toJ, fromJ, jmabIds } = idMaps(meta);
   const agentOf = (id: AgentId): J => {
@@ -286,6 +289,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>): CaianiSt
           if (!am) throw new Error(`ítem ${oid}: amortización ${it['amortization']} no portada`);
           c.amortization = am;
           c.initialAmount = toMicro(it['initialAmount']);
+          initialAmounts.set(next, it['initialAmount'] * MICRO_PER_UNIT);
         }
         if (kind === 'bond') {
           c.quantity = it['AbstractItem.quantity'];
@@ -529,6 +533,12 @@ export interface CompareOptions {
    * Clave: `lag:<id>:<período>`, o el nombre del campo para un monto en µ (`dividends`, evento 25).
    */
   derivedValue?: (agent: AgentId, key: string) => number | undefined;
+  /**
+   * Evento suelto: cota del lote por mecanismo (decisión de Nico, 2026-11-14; reglas-caiani.md, sec. 1): cantidad de
+   * bordes redondeados del lote que determinan la variación del contrato (`SettleReport.edges`). La tolerancia del
+   * monto es max(`amountTol`, k µ).
+   */
+  edges?: (contract: number) => number | undefined;
 }
 
 /** Escalas S(v) del encadenado (las da `ChainScales`, test/support/chain-scale.ts). */
@@ -633,7 +643,9 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     const st = (amountFields[k] ??= { max: 0, n: 0, over: 0 });
     st.n++;
     st.max = Math.max(st.max, dd);
-    const tol = derivedTol !== undefined && !scale ? Math.max(amountTol, derivedTol) : amountTol;
+    let tol = derivedTol !== undefined && !scale ? Math.max(amountTol, derivedTol) : amountTol;
+    // Cota del lote por mecanismo: max(2 µ, k µ), con k de la estructura del lote (solo en el suelto).
+    if (!scale && contract !== undefined && opts.edges) tol = Math.max(tol, opts.edges(contract) ?? 0);
     const baseOk = dd <= tol;
     const S = scale ? (contract !== undefined ? scale.contract(contract) : scale.value(what, port)) : 0;
     if (!byScale(what, dd, S, baseOk) && !baseOk) {
@@ -867,7 +879,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     flags(w, b, j);
     close(`${w} ratio de liquidez`, b.liquidityRatio, j['liquidityRatio'], true);
     close(`${w} ratio de capital`, b.capitalRatio, j['capitalRatio'], true);
-    amount(`${w} costo de rescate`, b.bailoutCost, j['bailoutCost']);
+    amount(`${w} costo de rescate`, b.bailoutCost, j['bailoutCost'], undefined, undefined, (opts.derivedValue?.(b.id, 'bailoutCost') ?? 0) * MICRO_PER_UNIT);
     amount(`${w} morosidad del tick`, b.currentNonPerformingLoans, j['AbstractBank.currentNonPerformingLoans'], undefined, opts.derived?.(b.id, 'currentNonPerformingLoans'));
     close(`${w} tasa de préstamos`, b.bankInterestRate, j['bankInterestRate']);
     close(`${w} oferta de crédito`, b.totalLoanSupply, j['totalLoanSupply'], true);

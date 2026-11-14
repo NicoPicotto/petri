@@ -1804,7 +1804,7 @@ function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: Paym
   const needed = totalAmount * MICRO_PER_UNIT;
   // reallocateLiquidity(totalAmount, paying, target)
   let raised = batch.balance(target);
-  for (let i = 0; i < paying.length && lt(`${SITE_REALLOCATE} reunido < monto`, raised, needed, 'amount'); i++) {
+  for (let i = 0; i < paying.length && lt(`${SITE_REALLOCATE} reunido < monto`, raised, needed, 'amount', undefined, c.id); i++) {
     const id = paying[i]!;
     if (id === target) continue;
     const thisAmount = batch.balance(id);
@@ -1817,7 +1817,10 @@ function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: Paym
       batch.pay(id, target, transfer, 'deposits'); // payingSupplier.transfer(payingStock, targetStock, monto)
     }
   }
-  if (lt(`${SITE_AT_ONCE} capital: depósito < monto`, batch.balance(target), needed, 'amount')) {
+  // Las decisiones de la compra pasan la empresa: un vuelco por un residuo de JMAB (el depósito que `reallocateLiquidity`
+  // deja exactamente en el monto en µ y apenas por debajo en JMAB; tick 133, empresa 8140) es una decisión frágil dada
+  // vuelta respecto de JMAB (reglas-caiani.md, sec. 1).
+  if (lt(`${SITE_AT_ONCE} capital: depósito < monto`, batch.balance(target), needed, 'amount', undefined, c.id)) {
     c.active[MKT.CAPGOOD] = false;
     quantity = flooring(`${SITE_AT_ONCE} capital: cantidad con el depósito`, batch.balance(target) / MICRO_PER_UNIT / price, 'fromAmounts');
     totalAmount = quantity * price;
@@ -1953,12 +1956,32 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
   for (const d of debts) totalDebt += d;
   if (totalDebt === 0) return;
   const coversDebt = ge(`${SITE_BANKRUPTCY} liquidez ≥ deuda`, liquidity, totalDebt, 'amount');
-  const paid = coversDebt ? debts : allocateLargestRemainder(liquidity, debts, loans);
   /** Préstamos que recibieron aportes de los dueños (grupo del redondeo controlado: un redondeo). */
   const touched = loans.map(() => false);
-  loans.forEach((loan, i) => batch.payLoan('repay', deposit, loan, paid[i]!));
-  let surplus = liquidity;
-  for (const p of paid) surplus -= p;
+  let paid: number[];
+  if (coversDebt) {
+    paid = debts;
+    loans.forEach((loan, i) => batch.payLoan('repay', deposit, loan, paid[i]!));
+  } else if (liquidity === 0) {
+    paid = loans.map(() => 0);
+  } else {
+    // Camino (a) (decisión de Nico, 2026-11-14; reemplaza los restos mayores): cada préstamo, en el orden de la lista,
+    // liquidez × saldo / deuda en `double` como JMAB, y el último lo que queda; el lote reparte exactamente la liquidez
+    // (`paySplit`). Error de entrada (sec. 1): la parte i depende de la liquidez (las cuentas líquidas de la empresa) con
+    // coeficiente deudaᵢ / deuda y de cada saldo j con liquidez × (δᵢⱼ / deuda − deudaᵢ / deuda²).
+    const liquid = [...deposits, cash];
+    paid = batch.paySplit(deposit, liquidity, debts, (i, amount) => {
+      batch.payLoan('repay', deposit, loans[i]!, amount);
+      // Con un solo préstamo la parte es la liquidez entera (traspaso entero: ya la lleva el `InputCarry`).
+      if (inputsActive() && loans.length > 1) {
+        const terms: InputTerm[] = liquid.map((contract) => ({ contract, coef: debts[i]! / totalDebt }));
+        loans.forEach((contract, j) => terms.push({ contract, coef: liquidity * ((j === i ? 1 : 0) / totalDebt - debts[i]! / (totalDebt * totalDebt)) }));
+        derivedPayment(deposit, loans[i]!, terms, 'repay');
+      }
+    });
+  }
+  // Excedente: solo si la liquidez cubre la deuda (enteros). Sin cubrirla, el reparto es exacto (`paySplit`).
+  const surplus = coversDebt ? liquidity - totalDebt : 0;
   if (surplus > 0) after.push(() => writeDown(L, deposit, surplus));
   // Pérdidas de los bancos, en unidades de Caiani como en JMAB (banksLosses, totalBanksLoss).
   const losses = loans.map((_, i) => toUnits(debts[i]! - paid[i]!));
@@ -1983,6 +2006,43 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
     for (const id of s.populations.households) totalWealth += wealth(householdById(s, id));
     const initialLosses = losses.map((x) => x);
     const initialTotalLoss = totalLoss;
+    // Error de entrada de los aportes (regla de la sec. 1 de reglas-caiani.md, aplicada a los aportes de los dueños por
+    // decisión de Nico, 2026-11-14). Cada aporte es a = D × w / W × l_i / Λ: a primer orden, su error relativo es el
+    // del patrimonio del hogar (w: sus contratos), menos el del total (W: los de todos los hogares), más el de la
+    // pérdida del préstamo (l_i = deuda_i − parte de la liquidez, con la parte ≈ liquidez × deuda_i / deuda), menos el
+    // de la pérdida total (Λ = deuda − liquidez), y si D es toda la pérdida (D = Λ) se cancela con este último. Los
+    // coeficientes van por unidad de aporte (grupo con coeficiente a); se usan los valores al empezar el reparto.
+    let own: ((h: HouseholdState) => InputTerm[]) | null = null;
+    let allHouseholds: InputTerm[] = [];
+    let perLoan: InputTerm[][] = [];
+    if (inputsActive()) {
+      const contractsOf = (id: AgentId): InputTerm[] => {
+        const a = agentOf(L, id);
+        const t: InputTerm[] = [];
+        for (const list of a.assets) for (const c of list) t.push({ contract: c, coef: 1 });
+        for (const list of a.liabilities) for (const c of list) t.push({ contract: c, coef: -1 });
+        return t;
+      };
+      own = (h) => contractsOf(h.id);
+      allHouseholds = s.populations.households.flatMap((id) => contractsOf(id));
+      const liquidityContracts = [...deposits, cash];
+      const kappa = owners === totalLoss ? 0 : -1 / initialTotalLoss;
+      const liq = toUnits(liquidity);
+      const debt = toUnits(totalDebt);
+      perLoan = loans.map((_, i) => {
+        const li = initialLosses[i]!;
+        if (li === 0) return [];
+        const di = toUnits(debts[i]!);
+        const t: InputTerm[] = loans.map((loan, j) => ({
+          contract: loan,
+          coef: ((j === i ? 1 - liq / debt : 0) + (liq * di) / (debt * debt)) / li + kappa,
+        }));
+        // La liquidez entra solo si se reparte acá: en la quiebra por salarios ya se repartió entre los empleados (queda
+        // en 0) y su δ se fue con esas cuotas.
+        if (liquidity > 0) for (const c of liquidityContracts) t.push({ contract: c, coef: -di / debt / li - kappa });
+        return t;
+      });
+    }
     for (const id of s.populations.households) {
       const h = householdById(s, id);
       const target = firstAsset(L, h.id, 'deposit');
@@ -2023,6 +2083,19 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
         // aporte), así que un vuelco no cambia nada más allá de la diferencia que lo provoca.
         const part = micro <= room[i]! ? micro : room[i]!;
         batch.payLoan('bailout', target.id, loan, part);
+        if (own) {
+          const w = wealth(h);
+          derivedPayment(
+            target.id,
+            loan,
+            [
+              { group: own(h), coef: amount / w },
+              { group: allHouseholds, coef: -amount / totalWealth },
+              { group: perLoan[i]!, coef: amount },
+            ],
+            'bailout',
+          );
+        }
         touched[i] = true;
         room[i] = room[i]! - part;
         if (micro > part) excess[i]!.push(batch.payLoan('bailoutExcess', target.id, loan, micro - part));
@@ -2044,7 +2117,8 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
       // (restos mayores), de lo que bajó con los aportes (grupo del lote) y del sobrepago (otro grupo), y de los
       // saldos de entrada del préstamo y del depósito de la empresa.
       const npl = 'currentNonPerformingLoans';
-      derivedRounded(c.holder, npl, (coversDebt ? 0 : 1) + (touched[i] ? 1 : 0) + ((excess[i] ?? []).length > 0 ? 1 : 0));
+      // La parte de la liquidez y los aportes van al mismo grupo del lote (el préstamo): un redondeo.
+      derivedRounded(c.holder, npl, ((!coversDebt && liquidity > 0) || touched[i] ? 1 : 0) + ((excess[i] ?? []).length > 0 ? 1 : 0));
       derivedInput(c.holder, npl, loan);
       derivedInput(c.holder, npl, deposit);
     });
@@ -2087,8 +2161,17 @@ function payLoanInterests(s: CaianiState, f: FirmState, batch: PaymentBatch, aft
     const raw = rawInstallments(L, f.id, 'loan');
     contractIds(L, f.id, 'liabilities', 'loan').forEach((loan, i) => {
       const due = raw[i]!;
+      const c = contractOf(L, loan);
       batch.payLoan('interest', deposit, loan, due.interest);
-      batch.payLoan('repay', deposit, loan, Math.min(due.principal, contractOf(L, loan).amount));
+      const principal = Math.min(due.principal, c.amount);
+      batch.payLoan('repay', deposit, loan, principal);
+      // Error de entrada (regla de la sec. 1, aplicada al evento 20 por decisión de Nico, 2026-11-14): el interés es
+      // tasa × saldo (en µ); el capital, monto inicial (en µ) / plazo, salvo la última cuota o el tope en el saldo,
+      // que pagan el saldo entero (su δ ya lo lleva el `InputCarry` como traspaso entero).
+      if (due.interest > 0) derivedPayment(deposit, loan, [{ contract: loan, coef: c.rate }], 'interest');
+      if (principal > 0 && principal !== c.amount && c.amortization === 'fixedCapital' && c.length) {
+        derivedPayment(deposit, loan, [{ contract: loan, field: 'initialAmount', coef: 1 / c.length }], 'repay');
+      }
     });
   } else {
     firmBankruptcy(s, f, batch, after);
@@ -2151,8 +2234,22 @@ function payFirmWages(s: CaianiState, f: FirmState, site: string, batch: Payment
   if (gt(`${site} masa salarial > depósito`, wageBill * MICRO_PER_UNIT, batch.balance(deposit), 'amount')) {
     rng.shuffleEmployees(site, f.id, f.employees, ownId);
     const liquidity = integerBalance(batch, deposit, `el depósito de la empresa ${f.id}`);
-    const shares = liquidity === 0 ? f.employees.map(() => 0) : allocateLargestRemainder(liquidity, f.employees.map(() => 1), f.employees);
-    f.employees.forEach((worker, i) => batch.pay(deposit, payable(worker), shares[i]!, 'wages'));
+    // Camino (a) (decisión de Nico, 2026-11-14; reemplaza los restos mayores del 2026-11-13): a cada empleado, en el
+    // orden de la mezcla, depósito / n en `double` como JMAB, y al último lo que queda; el lote reparte exactamente el
+    // depósito en µ (`paySplit`, garantía en reglas-caiani.md, sec. 1). Error de entrada (sec. 1): cada cuota sale de
+    // las cuentas líquidas de la empresa (los dos depósitos y el efectivo, que pasaron enteras al primero) con
+    // coeficiente 1/n.
+    if (liquidity > 0) {
+      const n = f.employees.length;
+      // Con un solo empleado la cuota es el depósito entero: su δ ya lo lleva el `InputCarry` como traspaso entero (no
+      // se anota dos veces).
+      const liquid: InputTerm[] = inputsActive() && n > 1 ? [...deposits, cash].map((contract) => ({ contract, coef: 1 / n })) : [];
+      batch.paySplit(deposit, liquidity, f.employees.map(() => 1), (i, amount) => {
+        const to = payable(f.employees[i]!);
+        batch.pay(deposit, to, amount, 'wages');
+        derivedPayment(deposit, to, liquid);
+      });
+    }
     firmBankruptcy(s, f, batch, after);
   } else {
     rng.shuffleEmployees(site, f.id, f.employees, ownId);
@@ -2836,5 +2933,82 @@ export function depositMarketEvent(s: CaianiState, rng: CaianiRng): void {
       rng,
     );
     depositTransaction(s, d, bank, firmOf.has(id) ? 0 : (d as HouseholdState).cashAmount);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 28: quiebra de los bancos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BANK_BANKRUPTCY = 'BankBankruptcyBailoutCAR.bankrupt';
+
+/**
+ * `BankBankruptcyBailoutCAR.bankrupt` (XML 2600–2604; aprobado por Nico el 2026-11-14, reglas-caiani.md, sec. 27):
+ * rescate a cargo de los depositantes.
+ * - Ratio objetivo = promedio de `capitalRatio` (el del evento 0) de los otros bancos, en el orden de la lista de la
+ *   población (`banks.getAgents()`), + U(0; 0,1) (`Math.random()` en el `.jar`; `uniform01` acá).
+ * - Patrimonio objetivo = ratio × Σ préstamos. **Quita total H (µ) = round(objetivo) − patrimonio** (el patrimonio es
+ *   exacto en µ): el banco queda exactamente con el objetivo redondeado a µ. `bailoutCost` = H (JMAB: objetivo −
+ *   patrimonio, en `double`).
+ * - H se reparte entre los depósitos de la **lista del banco**, en proporción a su saldo, por restos mayores con
+ *   desempate por id (ledger-contratos.md, sec. 2.1: quitas), y cada parte es un `writeDown` (categoría `writeOff`:
+ *   pérdida del depositante, ganancia del banco). Un depósito fuera de la lista del banco no paga (rareza de JMAB,
+ *   caiani-referencia.md).
+ * - Expectativa de depósitos del banco: todas las filas de observaciones = [depósitos después, depósitos después]
+ *   (`setPassedValues`; el valor de la expectativa no cambia).
+ * Errores explícitos (ramas que JMAB no cubre): ratio u objetivo no finitos (un banco sin préstamos tiene ratio
+ * infinito), quita negativa, banco sin depósitos o quita mayor que los depósitos.
+ */
+function bankBankruptcy(s: CaianiState, b: BankState, nw: Micro, rng: CaianiRng): void {
+  const L = s.ledger;
+  let tot = 0;
+  for (const id of s.populations.banks) if (id !== b.id) tot += bankById(s, id).capitalRatio;
+  const car = tot / (s.populations.banks.length - 1) + rng.uniform01(SITE_BANK_BANKRUPTCY, 'bailoutCAR') * 0.1;
+  const loanIds = contractIds(L, b.id, 'assets', 'loan');
+  const loans = sumContracts(L, b.id, 'assets', 'loan');
+  const targetNW = car * toUnits(loans);
+  if (!Number.isFinite(car) || !Number.isFinite(targetNW)) {
+    throw new Error(`${SITE_BANK_BANKRUPTCY}: banco ${b.id} con ratio objetivo ${car} y patrimonio objetivo ${targetNW}: no portado`);
+  }
+  const H = toMicro(targetNW) - nw;
+  if (H < 0) throw new Error(`${SITE_BANK_BANKRUPTCY}: banco ${b.id} con quita negativa (${H} µ): no portado`);
+  b.bailoutCost = H;
+  if (inputsActive()) {
+    // H = car × Σ préstamos − patrimonio: los préstamos con coeficiente car y cada contrato del banco con ∓1.
+    const a = agentOf(L, b.id);
+    const terms: InputTerm[] = loanIds.map((contract) => ({ contract, coef: car }));
+    for (const list of a.assets) for (const contract of list) terms.push({ contract, coef: -1 });
+    for (const list of a.liabilities) for (const contract of list) terms.push({ contract, coef: 1 });
+    derivedValue(b.id, 'bailoutCost', terms);
+  }
+  const deposits = contractIds(L, b.id, 'liabilities', 'deposit').slice();
+  const balances = deposits.map((id) => contractOf(L, id).amount);
+  let D = 0;
+  for (const x of balances) D += x;
+  if (D === 0 || H > D) throw new Error(`${SITE_BANK_BANKRUPTCY}: banco ${b.id} con depósitos ${D} µ y quita ${H} µ: no portado`);
+  const shares = allocateLargestRemainder(H, balances, deposits);
+  deposits.forEach((id, i) => writeDown(L, id, shares[i]!));
+  const after = toUnits(D - H);
+  const exp = b.expectations[EXPECTATION.DEPOSITS];
+  if (!exp) throw new Error(`banco ${b.id} sin expectativa de depósitos`);
+  for (const row of exp.passed) {
+    row[0] = after;
+    row[1] = after;
+  }
+}
+
+/**
+ * Evento 28, `bankruptcyTic` (TIC_BANKRUPTCY): solo los bancos, en orden de creación (`Bank.onTicArrived` 209–211 →
+ * `determineBankruptcy` 241–250): si el patrimonio (por las listas, `getNetWealth`; exacto en µ) es < 0, el rescate
+ * (`bankBankruptcy`) y `defaulted` = true. El banco sigue en la población y conserva sus préstamos. La bandera solo
+ * la lee el reporte de quiebras (y la pone en false el evento 0).
+ */
+export function bankBankruptcyEvent(s: CaianiState, rng: CaianiRng): void {
+  for (const b of s.banks) {
+    const nw = netFinancialWorth(s.ledger, b.id);
+    if (lt(`${SITE_BANK_BANKRUPTCY} patrimonio < 0`, nw, 0, 'amount', undefined, b.id)) {
+      bankBankruptcy(s, b, nw, rng);
+      b.defaulted = true;
+    }
   }
 }

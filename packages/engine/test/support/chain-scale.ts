@@ -114,6 +114,7 @@ export class ChainScales implements ScaleSource {
       dividends: 'dividendos pagados',
       depositAmount: 'depósitos deseados',
       cashAmount: 'efectivo deseado',
+      bailoutCost: 'costo de rescate',
     };
     const groups = new WeakMap<readonly InputTerm[], number>();
     const scaleOf = (agent: AgentId, w: string, terms: readonly InputTerm[]): number => {
@@ -126,6 +127,9 @@ export class ChainScales implements ScaleSource {
             groups.set(t.group, g);
           }
           S += Math.abs(t.coef) * g;
+        } else if ('contract' in t && t.field) {
+          // Un campo del contrato (el monto inicial): su escala es su valor (no tiene flujos).
+          S += Math.abs(t.coef) * Math.abs((this.s.ledger.contracts[t.contract]?.initialAmount as number | undefined) ?? 0);
         } else if ('contract' in t) S += Math.abs(t.coef) * this.contract(t.contract);
         else {
           const label = FIELD_LABEL[t.field];

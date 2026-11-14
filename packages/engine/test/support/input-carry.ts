@@ -18,7 +18,7 @@
  * prestamista de la misma cuota, `paymentRecords`, tipo `repay`).
  */
 
-import { paymentLegs, type CaianiState, type FlowRecord, type InputRecorder, type InputTerm } from '../../src/caiani';
+import { paymentLegs, paymentRecords, type CaianiState, type FlowRecord, type InputRecorder, type InputTerm } from '../../src/caiani';
 import { INPUT_FIELDS, INPUT_VALUES } from './jmab-dump';
 
 export class InputCarry {
@@ -71,6 +71,11 @@ export class InputCarry {
       }
       return e;
     }
+    if ('contract' in t && t.field) {
+      const d = INPUT_FIELDS.get(this.s)?.get(`contrato:${t.contract}:${t.field}`);
+      if (d === undefined) throw new Error(`InputCarry: sin error de entrada para el ${t.field} del contrato ${t.contract}`);
+      return d;
+    }
     if ('contract' in t) {
       const input = INPUT_VALUES.get(this.s)!.get(t.contract);
       const start = this.start.get(t.contract);
@@ -97,7 +102,8 @@ export class InputCarry {
     for (const p of rec.payments) {
       const eps = this.epsilon(p.terms);
       if (eps === 0) continue;
-      for (const [id, d] of paymentLegs(this.s.ledger, p.from, p.to, 1)) {
+      const legs = !p.kind || p.kind === 'account' ? paymentLegs(this.s.ledger, p.from, p.to, 1) : paymentRecords(this.s.ledger, p.kind, p.from, p.to, 1, 'ownersBailout').flatMap((r) => r.legs);
+      for (const [id, d] of legs) {
         this.carried.set(id, (this.carried.get(id) ?? 0) + Math.sign(d) * eps);
       }
     }

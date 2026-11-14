@@ -27,8 +27,11 @@
  * pagos), sin azar ni `Map` iterados por claves no enteras. Solo las cuatro operaciones, `floor` y `ceil`.
  */
 
-import { applyPayments, contractOf, paymentRecords, type ContractId, type FlowCategory, type IntegerPayment, type Ledger, type PaymentKind } from './ledger';
+import { agentOf, applyPayments, contractIds, contractOf, paymentRecords, type ContractId, type FlowCategory, type IntegerPayment, type Ledger, type PaymentKind } from './ledger';
 import type { Micro } from './money';
+
+/** 2⁵² (literal: el motor no usa `**`; principio 4). Cota de los totales de `paySplit` (garantía en reglas-caiani.md, sec. 1). */
+const TWO_POW_52 = 4_503_599_627_370_496;
 
 export interface PendingPayment {
   from: ContractId;
@@ -48,6 +51,13 @@ export interface SettleReport {
   maxPaymentDiff: number;
   /** Máximo |Σmᵢ − Σxᵢ| sobre las cuatro familias (< 1 con las cotas estrictas). */
   maxGroupDiff: number;
+  /**
+   * Cota del lote por mecanismo (decisión de Nico, 2026-11-14; reglas-caiani.md, sec. 1): para cada contrato que el
+   * lote mueve, cuántos bordes redondeados de la red determinan su variación (cada uno a < 1 µ de su suma en
+   * `double`). Una cuenta del lote (que paga, cobra o las dos) cuenta 1; las reservas de un banco, 1 más por cada lado
+   * de la red donde aparece el banco (el que paga y el que cobra). Solo informa: no cambia el redondeo.
+   */
+  edges: ReadonlyMap<ContractId, number>;
 }
 
 /** Lote de pagos pendientes de un evento. Se crea al empezar el evento y se cierra con `settle`. */
@@ -55,6 +65,12 @@ export class PaymentBatch {
   readonly pending: PendingPayment[] = [];
   /** Variación pendiente de cada contrato tocado (en µ, `double`), incluidas las reservas de liquidación. */
   private readonly net = new Map<ContractId, number>();
+  /**
+   * Lo pagado hasta ahora por cada cuenta, sumado en `double` en el orden de los pagos: es exactamente la suma que hace
+   * `controlledRound` para el grupo de la cuenta que paga (empieza en 0 y suma cada monto en ese orden). La usa
+   * `paySplit`.
+   */
+  private readonly paidBy = new Map<ContractId, number>();
   private settled = false;
 
   constructor(readonly ledger: Ledger) {}
@@ -107,11 +123,49 @@ export class PaymentBatch {
     if (this.settled) throw new Error('PaymentBatch: el lote ya se cerró');
     if (!Number.isFinite(amount) || amount < 0) throw new Error(`PaymentBatch.pay: monto inválido ${amount}`);
     if (amount === 0) return -1;
+    this.paidBy.set(from, (this.paidBy.get(from) ?? 0) + amount);
     for (const r of paymentRecords(this.ledger, kind, from, to, amount, category)) {
       for (const [id, d] of r.legs) this.net.set(id, (this.net.get(id) ?? 0) + d);
     }
     this.pending.push({ from, to, amount, category, kind });
     return this.pending.length - 1;
+  }
+
+  /**
+   * Reparte un total entero (µ) que paga la cuenta `from` en `double`, en proporción a `weights` (decisión de Nico,
+   * 2026-11-14, "camino (a)"; reglas-caiani.md, sec. 1 y 27): la parte i, para i < n, es (total × wᵢ) / W, como en JMAB,
+   * y la última es total − S, con S la suma en `double` de las anteriores **acumulada como la acumula el lote** (desde 0
+   * y en el mismo orden). `payOne(i, monto)` anota cada pago en el lote, en orden y sin otros pagos de `from` en el
+   * medio. Garantía (escrita en la sec. 1): la suma que el lote hace para el grupo de `from` da exactamente `total`, así
+   * que el redondeo controlado reparte exactamente `total` en µ (piso = techo). Se verifica al terminar. Errores: `from`
+   * ya pagó algo en el lote, total no entero o ≥ 2⁵², pesos inválidos, o S > total.
+   */
+  paySplit(from: ContractId, total: Micro, weights: readonly number[], payOne: (i: number, amount: number) => void): number[] {
+    if ((this.paidBy.get(from) ?? 0) !== 0) throw new Error(`PaymentBatch.paySplit: la cuenta ${from} ya pagó en el lote`);
+    if (!Number.isSafeInteger(total) || total < 0 || total >= TWO_POW_52) throw new Error(`PaymentBatch.paySplit: total inválido ${total}`);
+    const n = weights.length;
+    if (n === 0) {
+      if (total === 0) return [];
+      throw new Error('PaymentBatch.paySplit: no hay a quién repartir');
+    }
+    let W = 0;
+    for (const w of weights) {
+      if (!Number.isFinite(w) || w < 0) throw new Error(`PaymentBatch.paySplit: peso inválido ${w}`);
+      W += w;
+    }
+    if (!(W > 0)) throw new Error('PaymentBatch.paySplit: pesos en 0');
+    const x: number[] = [];
+    let S = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const xi = (total * weights[i]!) / W;
+      x.push(xi);
+      S += xi;
+    }
+    if (!(S <= total)) throw new Error(`PaymentBatch.paySplit: las primeras partes suman ${S} > ${total}`);
+    x.push(total - S);
+    x.forEach((xi, i) => payOne(i, xi));
+    if ((this.paidBy.get(from) ?? 0) !== total) throw new Error(`PaymentBatch.paySplit: el lote suma ${this.paidBy.get(from)} para ${from}, no ${total}`);
+    return x;
   }
 
   /** Saldo del contrato en µ (`double`): el del ledger más los pagos pendientes del lote. */
@@ -126,7 +180,7 @@ export class PaymentBatch {
     const n = this.pending.length;
     if (n === 0) {
       this.rounded = [];
-      return { payments: 0, relaxed: false, maxPaymentDiff: 0, maxGroupDiff: 0 };
+      return { payments: 0, relaxed: false, maxPaymentDiff: 0, maxGroupDiff: 0, edges: new Map() };
     }
     const L = this.ledger;
     const x = this.pending.map((p) => p.amount);
@@ -167,7 +221,22 @@ export class PaymentBatch {
     }));
     applyPayments(L, payments);
     this.rounded = r.m;
-    return { payments: n, relaxed: r.relaxed, maxPaymentDiff: r.maxPaymentDiff, maxGroupDiff: r.maxGroupDiff };
+    // Bordes redondeados por contrato (cota del lote por mecanismo). Las claves negativas de `toAcc` (interés y
+    // sobrepago de un préstamo) no mueven el préstamo: no cuentan para él. La liquidación con efectivo (no pasa en el
+    // base) no se cuenta: el contrato de liquidación es el de reservas.
+    const edges = new Map<ContractId, number>();
+    const bump = (c: ContractId) => edges.set(c, (edges.get(c) ?? 0) + 1);
+    for (const a of new Set<number>([...fromAcc, ...toAcc.filter((k) => k >= 0)])) bump(a);
+    const settlement = (bank: number) => (agentOf(L, bank).sector === 'bank' ? contractIds(L, bank, 'assets', 'reserves')[0] : undefined);
+    for (const b of new Set(fromBank)) {
+      const c = settlement(b);
+      if (c !== undefined) bump(c);
+    }
+    for (const b of new Set(toBank)) {
+      const c = settlement(b);
+      if (c !== undefined) bump(c);
+    }
+    return { payments: n, relaxed: r.relaxed, maxPaymentDiff: r.maxPaymentDiff, maxGroupDiff: r.maxGroupDiff, edges };
   }
 }
 

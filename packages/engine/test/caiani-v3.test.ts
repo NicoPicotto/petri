@@ -46,6 +46,7 @@ import {
   dividendsEvent,
   depositDemandEvent,
   depositMarketEvent,
+  bankBankruptcyEvent,
   parseDraws,
   DecisionRecorder,
   compareOutcomes,
@@ -89,6 +90,15 @@ const ALL_RUNS = [
   // Primer episodio del depósito de una quiebra que la empresa sigue usando: 8164 quiebra con dos depósitos en el
   // evento 21 y en el 27 elige el banco del segundo, que quedó fuera de la lista del banco (reglas-caiani.md, sec. 19).
   { run: 'p3-t128', tick: 128 },
+  // Quiebra de un banco (evento 28): 8259, con préstamos (reglas-caiani.md, sec. 27).
+  { run: 'p3-t133', tick: 133 },
+  // Semilla 102, en la racha de 8258 (ticks 297–314): quiebra todos los trimestres sin préstamos y el rescate la deja en
+  // patrimonio 0 (reglas-caiani.md, sec. 27).
+  { run: 'p3-s102-t300', tick: 300 },
+  // Quiebra de un banco con el encadenado completo hasta el evento 28 (candidatas, 2026-11-14): 8255 en el 146 y 8253
+  // en el 161 (semilla 12345).
+  { run: 'p3-t146', tick: 146 },
+  { run: 'p3-t161', tick: 161 },
 ];
 
 /**
@@ -104,8 +114,12 @@ const pendingOf = (tick: number, event: number) => PENDING.find((p) => p.tick ==
  * grupo a < 1 µ de su suma en double (decisión de Nico, 2026-11-13: lo estricto de los agregados derivados queda en
  * los componentes; reglas-caiani.md, sec. 1).
  */
-function settled(event: number, r: { relaxed: boolean; maxPaymentDiff: number; maxGroupDiff: number }): void {
-  console.log(`evento ${event}, cierre del lote: ${JSON.stringify(r)}`);
+/** Bordes redondeados por contrato del último lote cerrado (cota del lote por mecanismo; la lee el suelto). */
+let lastEdges: ReadonlyMap<number, number> | undefined;
+function settled(event: number, r: { relaxed: boolean; maxPaymentDiff: number; maxGroupDiff: number; edges: ReadonlyMap<number, number> }): void {
+  lastEdges = r.edges;
+  const maxEdges = Math.max(0, ...r.edges.values());
+  console.log(`evento ${event}, cierre del lote: ${JSON.stringify({ payments: (r as { payments?: number }).payments, relaxed: r.relaxed, maxPaymentDiff: r.maxPaymentDiff, maxGroupDiff: r.maxGroupDiff, maxEdges })}`);
   expect(r.relaxed).toBe(false);
   expect(r.maxPaymentDiff).toBeLessThan(1);
   expect(r.maxGroupDiff).toBeLessThan(1);
@@ -194,6 +208,7 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
     },
   },
   { e: 27, run: depositMarketEvent },
+  { e: 28, run: bankBankruptcyEvent },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
@@ -252,16 +267,27 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     while (cache.size > DUMP_CACHE) cache.delete(cache.keys().next().value!);
     return d;
   };
-  afterAll(() => cache.clear());
+  afterAll(() => {
+    // Memoria: lo que la corrida ya no usa (volcados, sorteos, estado del encadenado, registros de decisiones).
+    cache.clear();
+    drawsCache = null;
+    chainedState = undefined;
+    scales = undefined;
+    single = new DecisionRecorder();
+    chained = new DecisionRecorder();
+  });
   const before = `tick-${tick}.jsonl`;
   const after = (e: number) => `tick-${tick}-ev-${e}.jsonl`;
   const available = existsSync(dir + after(LAST));
-  const draws = available ? parseDraws(readFileSync(`${ORACLE}${run}/draws.tsv`, 'utf8')) : [];
+  // Registro de sorteos: se lee al primer uso y se suelta al terminar la corrida (con 10 corridas, leerlos todos al
+  // recolectar los tests llenaba el heap de 4 GB; 2026-11-14).
+  let drawsCache: ReturnType<typeof parseDraws> | null = null;
+  const draws = () => (drawsCache ??= available ? parseDraws(readFileSync(`${ORACLE}${run}/draws.tsv`, 'utf8')) : []);
   let toJ: ((id: number) => number) | undefined;
   const drawsOf = (event: number) => {
     toJ ??= idMaps(dumpOf(before).meta).toJ;
     const rng = new OracleCaianiRng(
-      draws.filter((r) => r.tick === tick && r.event === event),
+      draws().filter((r) => r.tick === tick && r.event === event),
       { agentId: toJ },
     );
     rng.tick = tick;
@@ -301,7 +327,8 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
             return t.rounded + e;
           }
         : undefined;
-    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, derived: derivedTol, derivedValue: carry?.valueCarry });
+    const edges = !chained && lastEdges ? (c: number) => lastEdges!.get(c) : undefined;
+    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, derived: derivedTol, derivedValue: carry?.valueCarry, edges });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     report(label, r);
     const scaledRows = Object.entries(r.scaled)
@@ -336,8 +363,8 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     if (rows.length > 0) console.log(`Montos, tick ${tick}, ${label}:\n  ${rows.join('\n  ')}`);
   };
   /** Registro de decisiones de cada modalidad (lo llenan los dos tests de abajo; vitest los corre en orden). */
-  const single = new DecisionRecorder();
-  const chained = new DecisionRecorder();
+  let single = new DecisionRecorder();
+  let chained = new DecisionRecorder();
 
   it.skipIf(!available)('el estado reconstruido desde un volcado coincide con el volcado', () => {
     const d = dumpOf(before);
@@ -370,6 +397,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const carry = new InputCarry(s);
     const derived = new DerivedRecorder();
     const inputs = new InputRecorder();
+    lastEdges = undefined;
     withDecisions(single, e, () => withDerived(derived, () => withInputs(inputs, () => ev(s, rng))));
     expect(rng.remaining).toBe(0);
     carry.fromLog(s.ledger.flowLog).fromInputs(inputs);
@@ -419,7 +447,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     }
   };
   // Un test por paso, en orden (vitest los corre en orden dentro del describe): suelto y encadenado intercalados.
-  it.skipIf(!available).each(STEPS)('$name', ({ kind, k, e, run: ev }) => (kind === 'single' ? runSingle(e, ev) : runChained(k, e, ev)), V3_TIMEOUT);
+  it.skipIf(!available).each(STEPS.map((x) => [x.name, x] as const))('%s', (_name, { kind, k, e, run: ev }) => (kind === 'single' ? runSingle(e, ev) : runChained(k, e, ev)), V3_TIMEOUT);
 
   it.skipIf(!available)('decisiones: frágiles por evento y dadas vuelta entre el suelto y el encadenado', () => {
     console.log(`Decisiones, tick ${tick}, cada evento suelto:\n  ${summarizeDecisions(single.log).join('\n  ')}`);
