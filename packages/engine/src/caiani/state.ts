@@ -245,6 +245,12 @@ export interface BankState extends AgentFlags {
    * Es el piso de la tasa de los préstamos (`Bank.getInterestRate`, evento 10).
    */
   bondInterestRate: number;
+  /** `Bank.bondPrice`: precio de los bonos que vio en la primera etapa del mercado de bonos (evento 30; 0 al empezar). */
+  bondPrice: number;
+  /** `Bank.selectedBondSupplier`: el vendedor de bonos que le tocó en el evento 30 (el gobierno; `null` al empezar). */
+  selectedBondSupplier: AgentId | null;
+  /** `Bank.bondDemand`: bonos que pide (evento 31; entero; no se pone en 0 entre ticks). */
+  bondDemand: number;
   /**
    * `Bank.bondInterestReceived` (µ): interés del último bono que le pagó el gobierno en el evento 22
    * (`setBondInterestsReceived` asigna, no suma).
@@ -271,6 +277,25 @@ export interface GovernmentState extends AgentFlags {
   doleExpenditure: Micro;
   /** `Government.totInterestsBonds` (µ): intereses de los bonos pagados en el tick (evento 22). */
   totInterestsBonds: Micro;
+  /** `Government.bondInterestRate`: tasa de los bonos que emite (evento 29; constante en el base). */
+  bondInterestRate: number;
+  /** `GovernmentAntiCyclical.profitsFromCB` (µ): ganancias del BC recibidas en el último evento 29 (no se pone en 0). */
+  profitsFromCB: Micro;
+  /**
+   * Emisión sin vender: el bono que en JMAB el gobierno se tiene a sí mismo (`emitBonds`). No es un contrato
+   * (ledger-contratos.md, sec. 2.2): es lo que ofrece en el mercado de bonos. `null` si no hay.
+   */
+  bondOffer: BondOffer | null;
+}
+
+/** Emisión de bonos sin vender del gobierno (evento 29). */
+export interface BondOffer {
+  /** Cantidad de bonos (entera, como el `int` de JMAB). */
+  quantity: number;
+  price: number;
+  rate: number;
+  maturity: number;
+  age: number;
 }
 
 export interface CentralBankState extends AgentFlags {

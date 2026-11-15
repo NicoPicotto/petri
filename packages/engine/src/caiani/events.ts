@@ -22,7 +22,7 @@ import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
-import { flooring, ge, gt, lt, record, rounding } from './decisions';
+import { ceiling, flooring, ge, gt, lt, record, rounding } from './decisions';
 import { derivedInput, derivedPayment, derivedRounded, derivedValue, inputsActive, scaleTerms, type InputTerm } from './derived';
 import {
   EXPECTATION,
@@ -1804,6 +1804,8 @@ function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: Paym
   const needed = totalAmount * MICRO_PER_UNIT;
   // reallocateLiquidity(totalAmount, paying, target)
   let raised = batch.balance(target);
+  /** Cuentas que ya pasaron su saldo entero al destino (error de entrada de los traspasos parciales, abajo). */
+  const moved: number[] = [];
   for (let i = 0; i < paying.length && lt(`${SITE_REALLOCATE} reunido < monto`, raised, needed, 'amount', undefined, c.id); i++) {
     const id = paying[i]!;
     if (id === target) continue;
@@ -1815,6 +1817,11 @@ function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: Paym
       if (transfer !== 0) throw new Error(`empresa de consumo ${c.id}: reallocateLiquidity con efectivo (no portado; reglas-caiani.md, sec. 18)`);
     } else if (transfer !== 0) {
       batch.pay(id, target, transfer, 'deposits'); // payingSupplier.transfer(payingStock, targetStock, monto)
+      // Error de entrada (regla de la sec. 1, aplicada por decisión de Nico, 2026-11-14): un traspaso parcial es lo que
+      // falta, monto − (saldo del destino + lo traspasado antes), y depende de esos saldos con coeficiente −1; uno que
+      // pasa el saldo entero de la cuenta lo cubre la regla de traspasos enteros del `InputCarry`.
+      if (remAmount > 0) derivedPayment(id, target, [target, ...moved].map((contract) => ({ contract, coef: -1 })));
+      else moved.push(id);
     }
   }
   // Las decisiones de la compra pasan la empresa: un vuelco por un residuo de JMAB (el depósito que `reallocateLiquidity`
@@ -1972,8 +1979,9 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
     const liquid = [...deposits, cash];
     paid = batch.paySplit(deposit, liquidity, debts, (i, amount) => {
       batch.payLoan('repay', deposit, loans[i]!, amount);
-      // Con un solo préstamo la parte es la liquidez entera (traspaso entero: ya la lleva el `InputCarry`).
-      if (inputsActive() && loans.length > 1) {
+      // Con un solo préstamo la parte es la liquidez entera (traspaso entero: ya la lleva el `InputCarry`). Una parte de 0
+      // no entra al lote y no se anota.
+      if (inputsActive() && loans.length > 1 && amount > 0) {
         const terms: InputTerm[] = liquid.map((contract) => ({ contract, coef: debts[i]! / totalDebt }));
         loans.forEach((contract, j) => terms.push({ contract, coef: liquidity * ((j === i ? 1 : 0) / totalDebt - debts[i]! / (totalDebt * totalDebt)) }));
         derivedPayment(deposit, loans[i]!, terms, 'repay');
@@ -2085,16 +2093,15 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
         batch.payLoan('bailout', target.id, loan, part);
         if (own) {
           const w = wealth(h);
-          derivedPayment(
-            target.id,
-            loan,
-            [
-              { group: own(h), coef: amount / w },
-              { group: allHouseholds, coef: -amount / totalWealth },
-              { group: perLoan[i]!, coef: amount },
-            ],
-            'bailout',
-          );
+          const terms: InputTerm[] = [
+            { group: own(h), coef: amount / w },
+            { group: allHouseholds, coef: -amount / totalWealth },
+            { group: perLoan[i]!, coef: amount },
+          ];
+          // Se anota lo que entra al lote: la parte que baja el préstamo y el sobrepago, cada uno con su fracción del
+          // aporte (un pago de 0 no entra al lote y no se anota).
+          if (part > 0) derivedPayment(target.id, loan, [{ group: terms, coef: part / micro }], 'bailout');
+          if (micro > part) derivedPayment(target.id, loan, [{ group: terms, coef: (micro - part) / micro }], 'bailoutExcess');
         }
         touched[i] = true;
         room[i] = room[i]! - part;
@@ -2340,6 +2347,9 @@ export function bondInterestEvent(s: CaianiState): SettleReport {
   const g = s.government;
   const account = contractIds(L, g.id, 'assets', 'reserves')[0];
   if (account === undefined) throw new Error('gobierno sin cuenta en el BC');
+  // Emisión propia todavía en manos del gobierno (JMAB: `setQuantity(0)` del bono que se tiene a sí mismo). No pasa nunca:
+  // vigilancia del oráculo, 7 semillas × 400 trimestres (reglas-caiani.md, sec. 28). Error explícito.
+  if (g.bondOffer !== null) throw new Error('evento 22: emisión propia del gobierno sin vender (no pasa en 7 semillas × 400 trimestres; no portado)');
   const batch = new PaymentBatch(L);
   const redeemed: number[] = [];
   let total = 0;
@@ -2396,6 +2406,9 @@ export function advanceInterestEvent(s: CaianiState): SettleReport {
       interests += due.interest / MICRO_PER_UNIT; // JMAB: iRate × loan.getValue(), en double
       batch.payLoan('interest', reserves, id, due.interest);
       batch.payLoan('repay', reserves, id, Math.min(due.principal, a.amount));
+      // Error de entrada (regla de la sec. 1, aplicada por decisión de Nico, 2026-11-14): interés = tasa × saldo; el
+      // capital (solo intereses: el saldo entero al vencer) lo cubre la regla de traspasos enteros.
+      if (due.interest > 0) derivedPayment(reserves, id, [{ contract: id, coef: a.rate }], 'interest');
     });
     b.advancesInterests = toMicro(interests);
   }
@@ -3010,5 +3023,142 @@ export function bankBankruptcyEvent(s: CaianiState, rng: CaianiRng): void {
       bankBankruptcy(s, b, nw, rng);
       b.defaulted = true;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 29: emisión de bonos del gobierno
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BOND_SUPPLY = 'Government.emitBonds';
+
+/**
+ * Evento 29, `bondSupplyTic` (TIC_BONDSUPPLY): solo el gobierno (`GovernmentAntiCyclical.onTicArrived` 84–87; aprobado
+ * por Nico el 2026-11-14, reglas-caiani.md, sec. 28):
+ * 1. `receiveCBProfits` (102–107): la cuenta del gobierno en el BC sube en las ganancias del BC, `getCBProfits` =
+ *    `interestsOnAdvances` + `interestsOnBonds` (`CentralBank` 160–162): los valores del **evento 0** (adelantos × 0,005
+ *    y solo el primer bono × su tasa), no lo cobrado en los eventos 22 y 23 (rareza de JMAB, caiani-referencia.md). Es
+ *    un `credit` de la cuenta (el BC es la contraparte; categoría `centralBankProfits`); `profitsFromCB` = ese monto.
+ * 2. `determineBondsInterestRate` (`Government` 174–177): `BondInterestRateStrategy` (XML 2909–2912), constante 0,0025.
+ * 3. `emitBonds` (183–197): si el saldo de la cuenta es negativo (el déficit), cantidad = ⌈|déficit| / precio⌉ (precio 1;
+ *    decisión registrada: un déficit justo en un entero es frágil); se le suma la emisión propia que el gobierno todavía
+ *    tenga (error explícito: no pasa nunca en 7 semillas × 400 trimestres, vigilancia del oráculo); la nueva
+ *    emisión (vencimiento 1, la tasa de arriba, edad 0) es la oferta del gobierno (`bondOffer`: no es un contrato,
+ *    ledger-contratos.md, sec. 2.2). Sin déficit, se emiten 0 bonos, como en JMAB. Activo en el mercado de bonos.
+ */
+export function bondSupplyEvent(s: CaianiState): void {
+  const L = s.ledger;
+  const g = s.government;
+  const account = contractIds(L, g.id, 'assets', 'reserves')[0];
+  if (account === undefined) throw new Error('gobierno sin cuenta en el BC');
+  const profits = s.centralBank.interestsOnAdvances + s.centralBank.interestsOnBonds;
+  if (profits < 0) throw new Error(`evento 29: ganancias del BC negativas (${profits} µ): no portado`);
+  credit(L, account, profits, 'centralBankProfits');
+  g.profitsFromCB = profits;
+  g.bondInterestRate = s.rules.governmentBondInterestRate;
+  const price = s.rules.governmentBondPrice;
+  const deficit = contractOf(L, account).amount;
+  let quantity = 0;
+  if (lt(`${SITE_BOND_SUPPLY} déficit < 0`, deficit, 0, 'amount')) {
+    quantity = ceiling(`${SITE_BOND_SUPPLY} ⌈|déficit| / precio⌉`, -deficit / MICRO_PER_UNIT / price, 'amount', MICRO_PER_UNIT);
+  }
+  if (g.bondOffer !== null) {
+    throw new Error('evento 29: el gobierno todavía tiene una emisión propia sin vender (no pasa en 7 semillas × 400 trimestres; no portado)');
+  }
+  g.bondOffer = { quantity, price, rate: g.bondInterestRate, maturity: s.rules.governmentBondMaturity, age: 0 };
+  g.active[MKT.BONDS] = true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 30: primera etapa del mercado de bonos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BOND_FIRST = 'BrochureRandomRobinBuyerMixer.invokeFirstInteractions';
+
+/**
+ * Evento 30, `bondMarket1Tic` (TIC_BONDMARKET1): primera etapa del `BrochureMarket` de bonos (XML 429–447;
+ * `AbstractTwoStepMarketSimulation.eventOccurred` 255–265 → `BrochureMarket.firstStep` 39–41 →
+ * `BrochureRandomRobinBuyerMixer.invokeFirstInteractions` 45–52; aprobado por Nico el 2026-11-15, reglas-caiani.md,
+ * sec. 29):
+ * - los compradores son la lista de la **población** de bancos (`bondMarketPopulation`, `buyersList` = `banks`): se
+ *   mezcla en el lugar, sin mirar quién está activo y sin chequeo de mercado cerrado. El orden queda para el resto del
+ *   tick y para el siguiente (lo leen los eventos 6, 7, 24 y 28 del tick siguiente y el 34 de este);
+ * - cada banco, en ese orden, recibe la lista de vendedores (solo el gobierno) y guarda (`Bank.onAgentArrival` 340–345):
+ *   el vendedor (el primero), el precio de sus bonos (`getBondPrice`, 1) y su tasa (`getBondInterestRate`, la que fijó el
+ *   evento 29). La tasa es el piso de la de los préstamos que lee el evento 10 del tick siguiente.
+ * Sin pagos ni contratos.
+ */
+export function bondMarketFirstStepEvent(s: CaianiState, rng: CaianiRng): void {
+  const buyers = s.populations.banks;
+  rng.shuffle(SITE_BOND_FIRST, 'buyers', buyers, ownId);
+  const g = s.government;
+  for (const id of buyers) {
+    const b = bankById(s, id);
+    b.selectedBondSupplier = g.id;
+    b.bondPrice = s.rules.governmentBondPrice;
+    b.bondInterestRate = g.bondInterestRate;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 31: demanda de bonos de los bancos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BOND_DEMAND = 'BondDemandStrategyReserves.bondDemand';
+
+/**
+ * `Math.rint` de Java: el entero más cercano, y en un empate exacto el par (no como `Math.round`, que sube). `x − ⌊x⌋` es
+ * exacta para un `double`, así que el empate se detecta sin error.
+ */
+export function javaRint(x: number): number {
+  const f = Math.floor(x);
+  const d = x - f;
+  if (d > 0.5) return f + 1;
+  if (d < 0.5) return f;
+  return f % 2 === 0 ? f : f + 1;
+}
+
+/**
+ * Evento 31, `bondDemandTic` (TIC_BONDDEMAND): los bancos, en orden de creación (`Bank.onTicArrived` 212–213 →
+ * `determineBondDemand` 355–363), con `BondDemandStrategyReserves` (XML 2507–2510, `liquidityRatio` = 0,258026342;
+ * aprobado por Nico el 2026-11-15, reglas-caiani.md, sec. 30):
+ * - oferta S = cantidad de la emisión propia del gobierno (`getBondSupply`, `(int)`). Sin emisión, error explícito (JMAB:
+ *   `NullPointerException`; no pasa nunca: vigilancia del bono propio, 2.800 emisiones en 7 semillas × 400 trimestres,
+ *   sec. 28);
+ * - reservas empleables del sistema E = Σ, en el orden de la lista de la población (la mezcla del evento 30), de
+ *   max(0, reservas − 0,258 × depósitos), **con los depósitos del banco que calcula y no los de cada banco** (error de
+ *   JMAB, reproducido a propósito: `bank.getItemsStockMatrix` en vez de `tempB`; caiani-referencia.md);
+ * - empleables propias = max(0, reservas propias − 0,258 × depósitos propios) (los de su lista, como `getItemsStockMatrix`);
+ * - si E / precio ≥ S: demanda = rint(S × propias / E); si no, rint(propias / precio) (`Math.rint`: empate al par). La
+ *   rama y el redondeo son decisiones registradas, medidas en µ;
+ * - `bondDemand` (entero); activo en el mercado de bonos si es > 0 (nunca lo apaga).
+ */
+export function bondDemandEvent(s: CaianiState): void {
+  const L = s.ledger;
+  const offer = s.government.bondOffer;
+  if (offer === null) {
+    throw new Error(`${SITE_BOND_DEMAND}: el gobierno no tiene emisión (JMAB: NullPointerException; no pasa en 7 semillas × 400 trimestres)`);
+  }
+  const l = s.rules.bankBondLiquidityRatio;
+  const price = s.rules.governmentBondPrice; // `supplier.getBondPrice()`: el precio del gobierno
+  const S = offer.quantity;
+  const reservesOf = (id: AgentId) => {
+    const r = contractIds(L, id, 'assets', 'reserves')[0];
+    if (r === undefined) throw new Error(`banco ${id} sin reservas`);
+    return toUnits(contractOf(L, r).amount);
+  };
+  for (const b of s.banks) {
+    const D = toUnits(sumContracts(L, b.id, 'liabilities', 'deposit'));
+    let E = 0;
+    for (const id of s.populations.banks) E += Math.max(0, reservesOf(id) - l * D); // error de JMAB: D es la del banco que calcula
+    const own = Math.max(0, reservesOf(b.id) - l * D);
+    const x = ge(`${SITE_BOND_DEMAND} rama 1 (empleables ≥ oferta)`, (E / price) * MICRO_PER_UNIT, S * MICRO_PER_UNIT, 'amount', undefined, b.id)
+      ? (S * own) / E
+      : own / price;
+    b.bondDemand = javaRint(x);
+    // El redondeo se da vuelta solo si x está cerca de k + 0,5: distancia medida en µ.
+    const k = Math.floor(x);
+    record(`${SITE_BOND_DEMAND} rint`, b.bondDemand > k, x * MICRO_PER_UNIT, (k + 0.5) * MICRO_PER_UNIT, 'amount', undefined, b.id);
+    if (b.bondDemand > 0) b.active[MKT.BONDS] = true;
   }
 }

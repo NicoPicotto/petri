@@ -48,6 +48,7 @@ import {
   setLag,
   updateExpectation,
   type BankState,
+  type BondOffer,
   type CaianiState,
   type CapitalGoodStock,
   type ConsumptionGoodStock,
@@ -417,6 +418,9 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       depositInterestRate: R.initialDepositInterestRate, // propiedad del prototipo (XML 2299)
       totInterestsDeposits: 0,
       bondInterestRate: R.initialBankBondInterestRate, // propiedad del prototipo (XML 2298)
+      bondPrice: 0, // constructor de JMAB (init.jsonl: 0,0)
+      selectedBondSupplier: null,
+      bondDemand: 0,
       bondInterestReceived: 0,
       advancesInterests: 0,
       dividends: 0,
@@ -461,7 +465,8 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
   }
 
   // Gobierno
-  const government = { ...newFlags(), id: gov, employees: [] as AgentId[], laborDemand: 0, wageBill: 0, doleExpenditure: 0, totInterestsBonds: 0 };
+  // Tasa inicial de los bonos: `Government.bondInterestRate` (XML 2868), igual a la de la estrategia. Sin emisión propia al empezar.
+  const government = { ...newFlags(), id: gov, employees: [] as AgentId[], laborDemand: 0, wageBill: 0, doleExpenditure: 0, totInterestsBonds: 0, bondInterestRate: R.governmentBondInterestRate, profitsFromCB: 0, bondOffer: null as BondOffer | null };
   for (let i = 0; i < P.gEmpl; i++) hire(government);
   open(ledger, 'reserves', gov, cb, 0, { rate: 0 }, 'deposits');
 

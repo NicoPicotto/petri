@@ -47,6 +47,9 @@ import {
   depositDemandEvent,
   depositMarketEvent,
   bankBankruptcyEvent,
+  bondSupplyEvent,
+  bondMarketFirstStepEvent,
+  bondDemandEvent,
   parseDraws,
   DecisionRecorder,
   compareOutcomes,
@@ -209,6 +212,9 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   },
   { e: 27, run: depositMarketEvent },
   { e: 28, run: bankBankruptcyEvent },
+  { e: 29, run: (s) => bondSupplyEvent(s) },
+  { e: 30, run: bondMarketFirstStepEvent },
+  { e: 31, run: (s) => bondDemandEvent(s) },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 

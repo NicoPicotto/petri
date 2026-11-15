@@ -28,6 +28,7 @@ import {
   type AgentFlags,
   type AgentId,
   type BankState,
+  type BondOffer,
   type CaianiState,
   type CapitalGoodStock,
   type ConsumptionGoodStock,
@@ -122,6 +123,16 @@ const strat = (j: J, key: number): J => j['AbstractAgent.strategy'].strategies[S
 
 function flagsOf(j: J): AgentFlags {
   return { active: (j['SimpleAbstractAgent.activeAgent'] as boolean[]).slice(), defaulted: j['SimpleAbstractAgent.defaulted'] as boolean };
+}
+
+/** ¿Es el bono que el gobierno se tiene a sí mismo (tenedor = emisor)? */
+function isOwnBond(it: J, kind: ContractKind, jmabId: number): boolean {
+  return kind === 'bond' && ref(it['AbstractItem.assetHolder']) === jmabId && ref(it['AbstractItem.liabilityHolder']) === jmabId;
+}
+
+/** La emisión propia del gobierno como oferta (`BondOffer`). */
+function bondOfferOf(it: J): BondOffer {
+  return { quantity: it['AbstractItem.quantity'], price: it['price'], rate: it['interestRate'], maturity: it['maturity'], age: it['AbstractItem.age'] };
 }
 
 function lagsOf(j: J | null, where: string): Lags {
@@ -305,11 +316,18 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>, initialAm
     }
   }
   ledger.nextContractId = next;
+  /** Emisión propia del gobierno (el bono que JMAB se tiene a sí mismo): no es un contrato, es su oferta (evento 29). */
+  let ownBond: J | null = null;
   for (let id = 0; id < ledger.agents.length; id++) {
     const sm = agentOf(id)['SimpleAbstractAgent.stockMatrix'] as J[][][];
     for (const k of SM_CONTRACTS) {
       const kind = SM_KIND[k]!;
       for (const it of sm[1]![k]!) {
+        if (isOwnBond(it, kind, toJ(id))) {
+          if (ownBond !== null) throw new Error('dos emisiones propias del gobierno en el volcado: no portado');
+          ownBond = it;
+          continue;
+        }
         const cid = byOid.get(it['@oid'] as number);
         if (cid === undefined) throw new Error(`el pasivo ${it['@oid']} de ${toJ(id)} no es activo de nadie`);
         if (ledger.contracts[cid]!.issuer !== id) throw new Error(`el pasivo ${it['@oid']} de ${toJ(id)} tiene otro emisor`);
@@ -404,6 +422,9 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>, initialAm
       depositInterestRate: j['depositInterestRate'],
       totInterestsDeposits: toMicro(j['totInterestsDeposits']),
       bondInterestRate: j['bondInterestRate'],
+      bondPrice: j['bondPrice'],
+      bondDemand: j['bondDemand'],
+      selectedBondSupplier: ref(j['selectedBondSupplier']) === null ? null : fromJ(ref(j['selectedBondSupplier'])!),
       bondInterestReceived: toMicro(j['bondInterestReceived']),
       advancesInterests: toMicro(j['advancesInterests']),
       dividends: toMicro(j['dividends']),
@@ -451,6 +472,9 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>, initialAm
       wageBill: toMicro(jg['Government.wageBill']),
       doleExpenditure: toMicro(jg['doleExpenditure']),
       totInterestsBonds: toMicro(jg['Government.totInterestsBonds']),
+      bondInterestRate: jg['Government.bondInterestRate'],
+      profitsFromCB: toMicro(jg['profitsFromCB'] ?? 0),
+      bondOffer: ownBond === null ? null : bondOfferOf(ownBond),
     },
     centralBank: {
       ...flagsOf(jc),
@@ -726,7 +750,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     ] as const) {
       for (const k of SM_CONTRACTS) {
         const kind = SM_KIND[k]!;
-        const items = sm[side]![k]!;
+        // La emisión propia del gobierno no es un contrato del port: se compara aparte, con su oferta.
+        const items = sm[side]![k]!.filter((it) => !isOwnBond(it, kind, toJ(id)));
         const cids = contractIds(s.ledger, id, sideName, kind);
         if (cids.length !== items.length) {
           note(`${toJ(id)} ${sideName} ${kind}: port ${cids.length} contratos, JMAB ${items.length}`);
@@ -886,6 +911,9 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} tasa de depósitos`, b.depositInterestRate, j['depositInterestRate']);
     amount(`${w} intereses pagados a depósitos`, b.totInterestsDeposits, j['totInterestsDeposits']);
     close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
+    close(`${w} precio de los bonos`, b.bondPrice, j['bondPrice']);
+    same(`${w} demanda de bonos`, b.bondDemand, j['bondDemand']);
+    same(`${w} vendedor de bonos`, b.selectedBondSupplier === null ? null : toJ(b.selectedBondSupplier), ref(j['selectedBondSupplier']));
     amount(`${w} intereses de bonos cobrados`, b.bondInterestReceived, j['bondInterestReceived']);
     amount(`${w} intereses de adelantos`, b.advancesInterests, j['advancesInterests']);
     amount(`${w} dividendos pagados`, b.dividends, j['dividends'], undefined, undefined, (opts.derivedValue?.(b.id, 'dividends') ?? 0) * MICRO_PER_UNIT);
@@ -899,6 +927,23 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   amount('gobierno masa salarial', s.government.wageBill, jg['Government.wageBill']);
   amount('gobierno seguro de desempleo', s.government.doleExpenditure, jg['doleExpenditure']);
   amount('gobierno intereses de bonos', s.government.totInterestsBonds, jg['Government.totInterestsBonds']);
+  close('gobierno tasa de los bonos', s.government.bondInterestRate, jg['Government.bondInterestRate']);
+  amount('gobierno ganancias del BC', s.government.profitsFromCB, jg['profitsFromCB'] ?? 0);
+  {
+    const own = ((jg['SimpleAbstractAgent.stockMatrix'] as J[][][])[1]![5]! as J[]).filter((it) => isOwnBond(it, 'bond', toJ(s.government.id)));
+    const o = s.government.bondOffer;
+    same('gobierno emisión propia', o === null ? 0 : 1, own.length);
+    if (o && own[0]) {
+      const it = own[0];
+      same('gobierno emisión propia cantidad', o.quantity, it['AbstractItem.quantity']);
+      same('gobierno emisión propia precio', o.price, it['price']);
+      same('gobierno emisión propia tasa', o.rate, it['interestRate']);
+      same('gobierno emisión propia vencimiento', o.maturity, it['maturity']);
+      same('gobierno emisión propia edad', o.age, it['AbstractItem.age']);
+      // Bond.value = cantidad × precio (constructor de JMAB).
+      close('gobierno emisión propia valor', o.quantity * o.price, it['AbstractItem.value']);
+    }
+  }
   const jcb = agentJ(s.centralBank.id);
   flags('BC', s.centralBank, jcb);
   amount('BC intereses de adelantos', s.centralBank.interestsOnAdvances, jcb['interestsOnAdvances']);

@@ -36,6 +36,10 @@ import {
   depositDemandEvent,
   depositMarketEvent,
   bankBankruptcyEvent,
+  bondSupplyEvent,
+  bondMarketFirstStepEvent,
+  bondDemandEvent,
+  javaRint,
   writeDown,
   toMicro,
   delistFromIssuer,
@@ -2174,5 +2178,137 @@ describe('evento 28 (quiebra de los bancos): casos a mano', () => {
     const t2 = setup();
     for (const b of t2.s.banks) b.capitalRatio = 1e6; // objetivo enorme: la quita supera los depósitos
     expect(() => bankBankruptcyEvent(t2.s, fixedUniform(0.5))).toThrow(/no portado/);
+  });
+});
+
+describe('evento 29 (emisión de bonos): casos a mano', () => {
+  /** Estado inicial con la cuenta del gobierno en `saldo` µ y las ganancias del BC del evento 0 en `profits` µ. */
+  const setup = (saldo: number, profits: number) => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    const account = contractOf(L, contractIds(L, s.government.id, 'assets', 'reserves')[0]!);
+    account.amount = saldo; // solo para el caso (antes de beginPeriod)
+    s.centralBank.interestsOnAdvances = 0;
+    s.centralBank.interestsOnBonds = profits;
+    return { s, L, account };
+  };
+
+  it('déficit 100.760,906947 y ganancias del BC 94,2775 (tick 50): la cuenta sube a −100.666,629447 y se emiten ⌈100.666,629447⌉ = 100.667 bonos (oferta, no contrato)', () => {
+    const { s, L, account } = setup(-100_760_906_947, 94_277_500);
+    const bonds0 = contractIds(L, s.government.id, 'liabilities', 'bond').length;
+    const cp = beginPeriod(L);
+    bondSupplyEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(account.amount).toBe(-100_666_629_447);
+    expect(s.government.profitsFromCB).toBe(94_277_500);
+    expect(s.government.bondInterestRate).toBe(0.0025);
+    expect(s.government.bondOffer).toEqual({ quantity: 100_667, price: 1, rate: 0.0025, maturity: 1, age: 0 });
+    expect(s.government.active[MKT.BONDS]).toBe(true);
+    expect(contractIds(L, s.government.id, 'liabilities', 'bond')).toHaveLength(bonds0); // la emisión no es un contrato
+    expect(L.flowLog.filter((f) => f.category === 'centralBankProfits')).toHaveLength(1);
+  });
+
+  it('sin déficit se emiten 0 bonos; un déficit justo en un entero da ese entero', () => {
+    const a = setup(5_000_000, 0);
+    bondSupplyEvent(a.s);
+    expect(a.s.government.bondOffer?.quantity).toBe(0);
+    const b = setup(-7_000_000, 0);
+    bondSupplyEvent(b.s);
+    expect(b.s.government.bondOffer?.quantity).toBe(7);
+  });
+
+  it('una emisión propia todavía sin vender: error explícito (no pasa en 7 semillas × 400 trimestres), en los eventos 29 y 22', () => {
+    const { s } = setup(-1_000_000, 0);
+    s.government.bondOffer = { quantity: 3, price: 1, rate: 0.0025, maturity: 1, age: 1 };
+    expect(() => bondSupplyEvent(s)).toThrow(/no pasa en 7 semillas/);
+    const t = setup(-1_000_000, 0);
+    t.s.government.bondOffer = { quantity: 3, price: 1, rate: 0.0025, maturity: 1, age: 1 };
+    expect(() => bondInterestEvent(t.s)).toThrow(/no pasa en 7 semillas/);
+  });
+});
+
+describe('evento 30 (primera etapa del mercado de bonos): caso a mano', () => {
+  it('mezcla en el lugar la población de bancos y cada banco guarda al gobierno como vendedor, el precio (1) y la tasa que fijó el evento 29 (0,003 en el caso); sin pagos', () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    s.government.bondInterestRate = 0.003;
+    const before = s.populations.banks.slice();
+    const list = s.populations.banks; // la mezcla es en el lugar: el mismo arreglo
+    const amounts = JSON.stringify(Object.values(L.contracts).map((c) => c.amount));
+    bondMarketFirstStepEvent(s, new PrngCaianiRng(Rng.fromSeed(7)));
+    expect(s.populations.banks).toBe(list);
+    expect([...s.populations.banks].sort((a, b) => a - b)).toEqual([...before].sort((a, b) => a - b));
+    expect(s.populations.banks).not.toEqual(before);
+    for (const b of s.banks) {
+      expect(b.selectedBondSupplier).toBe(s.government.id);
+      expect(b.bondPrice).toBe(1);
+      expect(b.bondInterestRate).toBe(0.003);
+    }
+    expect(JSON.stringify(Object.values(L.contracts).map((c) => c.amount))).toBe(amounts);
+  });
+});
+
+describe('evento 31 (demanda de bonos): casos a mano', () => {
+  it('Math.rint de Java: empate al par (2,5 → 2; 3,5 → 4; 0,5 → 0; 1,5 → 2) y al más cercano fuera del empate', () => {
+    expect([2.5, 3.5, 0.5, 1.5, 2.4999999, 2.5000001, 7].map(javaRint)).toEqual([2, 4, 0, 2, 2, 3, 7]);
+  });
+
+  /** Estado inicial con la simetría rota: 5 de depósitos de un hogar pasan del banco 0 al 1 (con sus reservas). */
+  const setup = (supply: number) => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    const L = s.ledger;
+    const [b0, b1] = [s.banks[0]!, s.banks[1]!];
+    const from = s.households.map((h) => firstAsset(L, h.id, 'deposit')!).find((d) => d.issuer === b0.id && d.amount >= 5_000_000)!;
+    const to = s.households.map((h) => firstAsset(L, h.id, 'deposit')!).find((d) => d.issuer === b1.id)!;
+    pay(L, from.id, to.id, 5_000_000, 'deposits');
+    s.government.bondOffer = { quantity: supply, price: 1, rate: 0.0025, maturity: 1, age: 0 };
+    const units = (x: number) => x / 1e6;
+    const R = (id: number) => units(contractOf(L, contractIds(L, id, 'assets', 'reserves')[0]!).amount);
+    const D = (id: number) => units(contractIds(L, id, 'liabilities', 'deposit').reduce((a, c) => a + contractOf(L, c).amount, 0));
+    return { s, R, D };
+  };
+  const l = 0.258026342;
+
+  it('oferta grande (empleables < oferta): cada banco pide rint(max(0, reservas − 0,258 × depósitos)) y queda activo si es > 0', () => {
+    const { s, R, D } = setup(1_000_000_000);
+    bondDemandEvent(s);
+    for (const b of s.banks) {
+      const own = Math.max(0, R(b.id) - l * D(b.id));
+      expect(b.bondDemand).toBe(javaRint(own));
+      expect(b.active[MKT.BONDS]).toBe(b.bondDemand > 0);
+    }
+  });
+
+  it('oferta chica (empleables ≥ oferta): rint(oferta × propias / E), con E calculada con los depósitos del banco que calcula (error de JMAB, reproducido)', () => {
+    const { s, R, D } = setup(1);
+    bondDemandEvent(s);
+    const ids = s.populations.banks;
+    let differs = false;
+    let branch1 = 0;
+    for (const b of s.banks) {
+      const own = Math.max(0, R(b.id) - l * D(b.id));
+      let eBug = 0;
+      let eOk = 0;
+      for (const id of ids) {
+        eBug += Math.max(0, R(id) - l * D(b.id));
+        eOk += Math.max(0, R(id) - l * D(id));
+      }
+      const first = eBug >= 1;
+      if (first) branch1++;
+      expect(b.bondDemand).toBe(first ? javaRint((1 * own) / eBug) : javaRint(own));
+      if (eBug !== eOk) differs = true;
+    }
+    expect(branch1).toBeGreaterThan(0);
+    expect(differs).toBe(true); // con la simetría rota, el error cambia E
+  });
+
+  it('sin emisión del gobierno: error explícito (JMAB: NullPointerException)', () => {
+    const { s } = setup(10);
+    s.government.bondOffer = null;
+    expect(() => bondDemandEvent(s)).toThrow(/no tiene emisión/);
   });
 });

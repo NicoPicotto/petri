@@ -164,6 +164,20 @@ export function flooring(site: string, x: number, tolerance: Tolerance): number 
   return r;
 }
 
+/**
+ * Decisión de un techo (`Math.ceil`): el umbral es el entero más cercano (como `flooring`). Con `unit` la distancia se mide
+ * en esa escala (el evento 29 pasa µ por unidad: el techo de un monto en unidades se da vuelta solo si el monto está a
+ * pocos µ de un entero, y se compara con la tolerancia de los montos).
+ */
+export function ceiling(site: string, x: number, tolerance: Tolerance, unit = 1): number {
+  const r = Math.ceil(x);
+  if (active) {
+    const k = Math.round(x);
+    active.record(site, r, x * unit, k * unit, decisionDistance(x * unit, k * unit, tolerance), tolerance);
+  }
+  return r;
+}
+
 export interface DecisionFlip {
   event: number;
   site: string;

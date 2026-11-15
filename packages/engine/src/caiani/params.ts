@@ -269,6 +269,15 @@ export interface RuleParams {
   householdIncomeTaxRate: number; // 2810
   /** `Households.shareDeposits`: parte de los activos líquidos que el hogar quiere en depósitos (evento 26). */
   householdShareDeposits: number; // 2700
+  /**
+   * Bonos del gobierno (evento 29): tasa (`BondInterestRateStrategy`, constante: XML 2909–2912; la inicial del gobierno,
+   * 2868, es la misma), vencimiento (2867) y precio (2869).
+   */
+  governmentBondInterestRate: number; // 2911
+  governmentBondMaturity: number; // 2867
+  governmentBondPrice: number; // 2869
+  /** `BondDemandStrategyReserves.liquidityRatio` de los bancos (evento 31): reservas que guardan por cada peso de depósitos. */
+  bankBondLiquidityRatio: number; // 2509
   /** `SelectionRandomRobinBuyerMixer.nbSellers` del mercado de depósitos: bancos que ve cada depositante (evento 27). */
   depositMarketSellers: number; // 418
   /**
@@ -361,6 +370,10 @@ export const RULES: Readonly<RuleParams> = {
   minWageDiscount: 1,
   householdIncomeTaxRate: 0.18,
   householdShareDeposits: 1,
+  governmentBondInterestRate: 0.0025,
+  governmentBondMaturity: 1,
+  governmentBondPrice: 1,
+  bankBondLiquidityRatio: 0.258026342,
   depositMarketSellers: 3,
   depositSwitchingLambda: LN2 / 0.15,
   depositSwitchingPayOrReceive: false,
