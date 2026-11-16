@@ -222,6 +222,13 @@ const MICRO_FIELDS = {
   },
   bank: {
     advancesDemand: 'advancesDemand',
+    /** Morosidad del tick: la copia el rezago `LAG_NONPERFORMINGLOANS` del evento 75 (2026-11-16). */
+    currentNonPerformingLoans: 'AbstractBank.currentNonPerformingLoans',
+  },
+  /** Ganancias del BC del evento 0, que el evento 29 copia (2026-11-16). */
+  centralBank: {
+    interestsOnAdvances: 'interestsOnAdvances',
+    interestsOnBonds: 'interestsOnBonds',
   },
 } as const;
 
@@ -249,6 +256,11 @@ export function stateFromDump(d: Dump): CaianiState {
   for (const b of s.banks) {
     const j = d.agents.get(toJ(b.id))!;
     for (const [f, jf] of Object.entries(MICRO_FIELDS.bank)) rec(b.id, f, (b as unknown as Record<string, number>)[f]!, j[jf] as number);
+  }
+  {
+    const cb = s.centralBank;
+    const j = d.agents.get(toJ(cb.id))!;
+    for (const [f, jf] of Object.entries(MICRO_FIELDS.centralBank)) rec(cb.id, f, (cb as unknown as Record<string, number>)[f]!, j[jf] as number);
   }
   // Monto inicial de los préstamos y adelantos (lo usa el capital de las cuotas, evento 20): clave `contrato:<id>:initialAmount`.
   for (const [id, java] of initialAmounts) fields.set(`contrato:${id}:initialAmount`, (s.ledger.contracts[id]!.initialAmount as number) - java);
@@ -555,6 +567,11 @@ export interface CompareOptions {
    */
   carry?: (contract: number) => number;
   /**
+   * Evento suelto: error de entrada (µ) del monto inicial de un contrato abierto en el evento con un monto anotado
+   * (`derivedContract`, decisión de Nico, 2026-11-16; `InputCarry.initialCarry`): se descuenta antes de comparar.
+   */
+  initialCarry?: (contract: number) => number;
+  /**
    * Evento suelto: tolerancia de un agregado derivado (regla de Nico, 2026-11-13; reglas-caiani.md, sec. 1): k µ +
    * el error de entrada de sus contratos, con k y los contratos anotados por el motor (`DerivedRecorder`). La
    * tolerancia del campo es el máximo entre esta y la general.
@@ -589,7 +606,8 @@ export interface ScaleSource {
  * patrimonio, evento 17); ganancias antes y después de impuestos, flujo de caja operativo e impuestos (evento 24:
  * salen de intereses cobrados y pagados en µ y, en los bancos, del patrimonio); inventario real y nominal y ventas
  * reales y nominales (evento 24: salen del inventario, que en el encadenado sale de la demanda de los hogares, como las
- * cantidades de los bienes, que ya se comparan así).
+ * cantidades de los bienes, que ya se comparan así); morosidad del banco (evento 75, 2026-11-16: copia el monto en µ
+ * `currentNonPerformingLoans`).
  */
 const LAGS_FROM_AMOUNTS: readonly number[] = [
   LAG.NETWEALTH,
@@ -603,9 +621,15 @@ const LAGS_FROM_AMOUNTS: readonly number[] = [
   LAG.NOMINALINVENTORIES,
   LAG.REALSALES,
   LAG.NOMINALSALES,
+  LAG.NONPERFORMINGLOANS,
 ];
-/** Expectativas que salen de montos: depósitos (bancos) y ventas nominales y reales (por lo mismo que los rezagos). */
-const EXPECTATIONS_FROM_AMOUNTS: readonly number[] = [EXPECTATION.DEPOSITS, EXPECTATION.NOMINALSALES, EXPECTATION.REALSALES];
+/**
+ * Expectativas que salen de montos: depósitos (bancos) y ventas nominales y reales (por lo mismo que los rezagos); y el
+ * precio de consumo de los hogares (evento 75, 2026-11-16): su observación es Σ precio × cantidad / cantidad de los bienes
+ * del tick, y esas cantidades salen en el evento 18 de la demanda y del depósito del hogar, como las ventas reales. En el
+ * suelto (entradas del volcado) es bit a bit.
+ */
+const EXPECTATIONS_FROM_AMOUNTS: readonly number[] = [EXPECTATION.DEPOSITS, EXPECTATION.NOMINALSALES, EXPECTATION.REALSALES, EXPECTATION.CONSPRICE];
 
 const PURE_TOL = 1e-9;
 const AMOUNTS_TOL = 1e-6;
@@ -779,7 +803,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
           if (kind === 'loan' || kind === 'advance') {
             same(`${w} plazo`, c.length, it['length']);
             same(`${w} amortización`, c.amortization, AMORT[it['amortization'] as number]);
-            amount(`${w} initialAmount`, c.initialAmount as number, it['initialAmount']);
+            amount(`${w} initialAmount`, c.initialAmount as number, it['initialAmount'], undefined, undefined, opts.initialCarry?.(c.id) ?? 0);
           }
           if (kind === 'bond') {
             same(`${w} cantidad`, c.quantity, it['AbstractItem.quantity']);
@@ -834,7 +858,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     });
   }
 
-  const expCompare = (w: string, port: Expectations, je: J | null) => {
+  const expCompare = (w: string, port: Expectations, je: J | null, agent?: AgentId) => {
     const jex = je ?? {};
     same(`${w} expectativas`, Object.keys(port).sort().join(), Object.keys(jex).sort().join());
     for (const [eid, e] of Object.entries(jex)) {
@@ -846,7 +870,9 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
       (e.passedValues as number[][]).forEach((row, r) => {
         const pr = pe.passed[r];
         if (!pr) return;
-        close(`${w} expectativa ${eid}[${r}][0]`, pr[0], row[0]!, fromAmounts);
+        // Observación anotada como calculada (`derivedValue`, clave `exp:<id>:<fila>:0`; evento 75, 2026-11-16).
+        const disc = agent !== undefined ? (opts.derivedValue?.(agent, `exp:${eid}:${r}:0`) ?? 0) : 0;
+        close(`${w} expectativa ${eid}[${r}][0]`, pr[0], row[0]!, fromAmounts, disc);
         close(`${w} expectativa ${eid}[${r}][1]`, pr[1], row[1]!, fromAmounts);
       });
       close(`${w} expectativa ${eid}`, pe.expectation, e.expectation, fromAmounts);
@@ -861,15 +887,15 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     same(`${w} empleador`, h.employer === null ? null : toJ(h.employer), ref(j['AbstractHousehold.employer']));
     close(`${w} salario`, h.wage, j['AbstractHousehold.wage']);
     amount(`${w} dividendos`, h.dividendsReceived, j['Households.dividendsReceived']);
-    amount(`${w} intereses de depósitos`, h.interestReceived, j['Households.interestsReceived']);
-    close(`${w} demanda de consumo`, h.demand, j['Households.demand'], true);
     const dv = (k: string) => (opts.derivedValue?.(h.id, k) ?? 0) * MICRO_PER_UNIT;
+    amount(`${w} intereses de depósitos`, h.interestReceived, j['Households.interestsReceived'], undefined, undefined, dv('interestReceived'));
+    close(`${w} demanda de consumo`, h.demand, j['Households.demand'], true);
     amount(`${w} depósitos deseados`, h.depositAmount, j['Households.depositAmount'], undefined, undefined, dv('depositAmount'));
     amount(`${w} efectivo deseado`, h.cashAmount, j['Households.cashAmount'], undefined, undefined, dv('cashAmount'));
     same(`${w} vendedor previo`, toJ(h.previousSeller), ref(strat(j, 0)['previousGoodSupplier']));
     same(`${w} banco previo`, toJ(h.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
     lagsCompare(w, h.lags, j['SimpleAbstractAgent.passedValues'], h.id);
-    expCompare(w, h.expectations, j['SimpleAbstractAgent.expectations']);
+    expCompare(w, h.expectations, j['SimpleAbstractAgent.expectations'], h.id);
   }
   for (const f of [...s.consumptionFirms, ...s.capitalFirms]) {
     const j = agentJ(f.id);
@@ -892,11 +918,12 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     if (j['CapitalFirm.capitalProductivity'] !== undefined) {
       close(`${w} productividad del capital`, f.capitalProductivity, j['CapitalFirm.capitalProductivity']);
     }
-    amount(`${w} intereses de depósitos`, f.interestReceived, j['ConsumptionFirm.interestReceived'] ?? j['CapitalFirm.interestReceived']);
+    const fdv = (k: string) => (opts.derivedValue?.(f.id, k) ?? 0) * MICRO_PER_UNIT;
+    amount(`${w} intereses de depósitos`, f.interestReceived, j['ConsumptionFirm.interestReceived'] ?? j['CapitalFirm.interestReceived'], undefined, undefined, fdv('interestReceived'));
     const jf = (k: string) => j[`ConsumptionFirm.${k}`] ?? j[`CapitalFirm.${k}`];
     amount(`${w} servicio de la deuda`, f.debtBurden, jf('debtBurden'));
     amount(`${w} intereses de la deuda`, f.debtInterests, jf('debtInterests'));
-    amount(`${w} crédito pedido`, f.creditDemanded, jf('creditDemanded'));
+    amount(`${w} crédito pedido`, f.creditDemanded, jf('creditDemanded'), undefined, undefined, fdv('creditDemanded'));
     same(`${w} demanda de trabajo`, f.laborDemand, j['AbstractFirm.laborDemand']);
     const sel = (l: AgentId[] | null) => (l === null ? 'null' : l.map(toJ).join());
     const jsel = j['ConsumptionFirm.selectedCapitalGoodSuppliers'] as J[] | null | undefined;
@@ -905,7 +932,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
       same(`${w} proveedor de capital previo`, toJ(f.previousCapitalSupplier), ref(strat(j, 0)['previousSupplier']));
     }
     lagsCompare(w, f.lags, j['SimpleAbstractAgent.passedValues'], f.id);
-    expCompare(w, f.expectations, j['SimpleAbstractAgent.expectations']);
+    expCompare(w, f.expectations, j['SimpleAbstractAgent.expectations'], f.id);
   }
   for (const b of s.banks) {
     const j = agentJ(b.id);
@@ -918,7 +945,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} tasa de préstamos`, b.bankInterestRate, j['bankInterestRate']);
     close(`${w} oferta de crédito`, b.totalLoanSupply, j['totalLoanSupply'], true);
     close(`${w} tasa de depósitos`, b.depositInterestRate, j['depositInterestRate']);
-    amount(`${w} intereses pagados a depósitos`, b.totInterestsDeposits, j['totInterestsDeposits']);
+    amount(`${w} intereses pagados a depósitos`, b.totInterestsDeposits, j['totInterestsDeposits'], undefined, undefined, (opts.derivedValue?.(b.id, 'totInterestsDeposits') ?? 0) * MICRO_PER_UNIT);
     close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
     close(`${w} precio de los bonos`, b.bondPrice, j['bondPrice']);
     same(`${w} demanda de bonos`, b.bondDemand, j['bondDemand']);
@@ -928,7 +955,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     amount(`${w} intereses de adelantos`, b.advancesInterests, j['advancesInterests']);
     amount(`${w} dividendos pagados`, b.dividends, j['dividends'], undefined, undefined, (opts.derivedValue?.(b.id, 'dividends') ?? 0) * MICRO_PER_UNIT);
     lagsCompare(w, b.lags, j['SimpleAbstractAgent.passedValues'], b.id);
-    expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations']);
+    expCompare(w, b.expectations, j['SimpleAbstractAgent.expectations'], b.id);
   }
   const jg = agentJ(s.government.id);
   flags('gobierno', s.government, jg);
@@ -938,7 +965,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   amount('gobierno seguro de desempleo', s.government.doleExpenditure, jg['doleExpenditure']);
   amount('gobierno intereses de bonos', s.government.totInterestsBonds, jg['Government.totInterestsBonds']);
   close('gobierno tasa de los bonos', s.government.bondInterestRate, jg['Government.bondInterestRate']);
-  amount('gobierno ganancias del BC', s.government.profitsFromCB, jg['profitsFromCB'] ?? 0);
+  amount('gobierno ganancias del BC', s.government.profitsFromCB, jg['profitsFromCB'] ?? 0, undefined, undefined, (opts.derivedValue?.(s.government.id, 'profitsFromCB') ?? 0) * MICRO_PER_UNIT);
   {
     const own = ((jg['SimpleAbstractAgent.stockMatrix'] as J[][][])[1]![5]! as J[]).filter((it) => isOwnBond(it, 'bond', toJ(s.government.id)));
     const o = s.government.bondOffer;

@@ -741,10 +741,12 @@ const AGING: readonly ContractKind[] = ['loan', 'bond', 'advance'];
  * adelante; suma 1 a la edad de préstamos, bonos y adelantos, y cierra:
  * - préstamos y adelantos con saldo 0 o edad > length (`Loan.remove`);
  * - bonos con maturity < edad (`Bond.remove`).
- * Un préstamo que cierra con saldo se condona antes de cerrarlo con un `writeOff` explícito y se
- * cuenta en `writtenOffAtExpiry`; JMAB lo borra sin registrar el flujo. En la corrida base no debería
- * pasar (los préstamos iniciales cierran en cero; P2). Un bono que cierra con saldo es
- * un error del port (se rescata al vencer).
+ * **Un préstamo o adelanto que vence con saldo es un error explícito** (decisión de Nico, 2026-11-16; cambia la
+ * decisión de P1, que lo condonaba con un `writeOff` y lo contaba en `writtenOffAtExpiry`: ledger-contratos.md, sec. 4).
+ * JMAB lo borra sin registrar el flujo, pero en el base no pasa: la vigilancia de `cleanSM` (7 semillas × 400
+ * trimestres, reglas-caiani.md, sec. 39) solo ve residuos de punto flotante (≤ 1,8·10⁻¹², que en el port son 0: la última
+ * cuota paga el saldo). Se revisa si la Fase 2 trae default o reestructuración. Un bono que cierra con saldo también es
+ * error (se rescata al vencer).
  */
 export function cleanup(ledger: Ledger, agent: AgentId): void {
   const a = agentOf(ledger, agent);
@@ -760,8 +762,9 @@ export function cleanup(ledger: Ledger, agent: AgentId): void {
       if (!remove) continue;
       if (c.amount !== 0) {
         if (kind === 'bond') throw new Error(`cleanup: el bono ${id} vence con saldo ${c.amount} µ sin rescatar`);
-        ledger.stats.writtenOffAtExpiry += 1;
-        writeDown(ledger, id, c.amount);
+        throw new Error(
+          `cleanup: el ${kind === 'advance' ? 'adelanto' : 'préstamo'} ${id} vence con saldo ${c.amount} µ (no pasa en el base: vigilancia de cleanSM, reglas-caiani.md, sec. 39)`,
+        );
       }
       list.splice(k, 1);
       const liab = agentOf(ledger, c.issuer).liabilities[KIND_INDEX[kind]] as ContractId[];

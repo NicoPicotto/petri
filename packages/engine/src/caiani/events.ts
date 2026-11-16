@@ -16,14 +16,14 @@
  * Registro regla por regla (ecuación, línea de JMAB, verificación): docs/reglas-caiani.md.
  */
 
-import { agentOf, closeContract, contractIds, delistFromIssuer, contractOf, credit, firstAsset, installments, netFinancialWorth, open, pay, rawInstallments, setContractRate, writeDown, type AgentId, type ContractKind, type Ledger } from './ledger';
+import { agentOf, cleanup, closeContract, contractIds, delistFromIssuer, contractOf, credit, firstAsset, installments, netFinancialWorth, open, pay, rawInstallments, setContractRate, writeDown, type AgentId, type ContractKind, type Ledger } from './ledger';
 import { CarryRounder, MICRO_PER_UNIT, allocateLargestRemainder, toMicro, toUnits, type Micro } from './money';
 import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
 import { ceiling, flooring, ge, gt, lt, record, rounding } from './decisions';
-import { derivedInput, derivedPayment, derivedRounded, derivedValue, inputsActive, scaleTerms, type InputTerm } from './derived';
+import { derivedContract, derivedInput, derivedPayment, derivedRounded, derivedValue, inputsActive, scaleTerms, type InputTerm } from './derived';
 import {
   EXPECTATION,
   LAG,
@@ -41,6 +41,7 @@ import {
   type FirmState,
   type GovernmentState,
   type HouseholdState,
+  type Lags,
 } from './state';
 
 /** Índices de los eventos de comportamiento (orden de modelFile.xml, líneas 43–80). */
@@ -705,7 +706,9 @@ export function depositSupplyEvent(s: CaianiState, rng: CaianiRng): void {
  * En µ: los intereses del banco se redondean **con arrastre** sobre su lista de depósitos (`CarryRounder`,
  * decisión de Nico del 2026-11-13): cada uno queda a < 1 µ de saldo × tasa y el total, a ≤ 1 µ de la suma
  * de JMAB. El saldo nuevo es saldo + interés, y `interestReceived` y `totInterestsDeposits` son lo
- * acreditado.
+ * acreditado. Error de entrada (2026-11-16, regla de los montos calculados): cada interés es tasa × saldo del contrato
+ * (`derivedContract` del depósito y `derivedValue` de `interestReceived`), y el total del banco, la suma (con su valor antes
+ * del redondeo con arrastre, para el control).
  */
 export function depositInterestEvent(s: CaianiState): void {
   const L = s.ledger;
@@ -716,16 +719,28 @@ export function depositInterestEvent(s: CaianiState): void {
   for (const b of s.banks) {
     let tot = 0;
     const rounder = new CarryRounder();
+    const annotate = inputsActive();
+    const totTerms: InputTerm[] = [];
+    let totExact = 0;
     for (const id of contractIds(L, b.id, 'liabilities', 'deposit')) {
       const c = contractOf(L, id);
-      const interest = rounder.add(c.amount * c.rate);
+      const x = c.amount * c.rate;
+      const interest = rounder.add(x);
       const depositor = holderOf.get(c.holder);
       if (!depositor) throw new Error(`depósito ${id} del banco ${b.id}: el tenedor ${c.holder} no es hogar ni empresa`);
       depositor.interestReceived = interest;
       tot += interest;
       credit(L, id, interest, 'depositInterest');
+      if (annotate) {
+        const t: InputTerm[] = [{ contract: id, coef: c.rate }];
+        derivedContract(id, t, undefined, x);
+        derivedValue(c.holder, 'interestReceived', t, x);
+        totTerms.push(...t);
+        totExact += x;
+      }
     }
     b.totInterestsDeposits = tot;
+    if (annotate) derivedValue(b.id, 'totInterestsDeposits', totTerms, totExact);
   }
 }
 
@@ -1033,7 +1048,7 @@ function creditTransaction(s: CaianiState, firm: FirmState, bank: BankState, isC
   // Math.min(required, Math.min(offered, totalLoanSupply)), en µ. La oferta es pedido·(1 − i/100): nunca lo supera.
   const amountUnits = Math.min(toUnits(required), Math.min(offered, bank.totalLoanSupply));
   const amount = Math.min(required, toMicro(amountUnits));
-  open(L, 'loan', bank.id, firm.id, amount, { rate: loanInterestRate(bank), age: 0, length: s.rules.firmLoanLength, amortization: 'fixedCapital' }, 'loans');
+  const loan = open(L, 'loan', bank.id, firm.id, amount, { rate: loanInterestRate(bank), age: 0, length: s.rules.firmLoanLength, amortization: 'fixedCapital' }, 'loans');
   let deposit: number | undefined;
   for (const id of contractIds(L, firm.id, 'assets', 'deposit')) {
     if (contractOf(L, id).issuer === bank.id) {
@@ -1041,9 +1056,23 @@ function creditTransaction(s: CaianiState, firm: FirmState, bank: BankState, isC
       break;
     }
   }
-  if (deposit === undefined) open(L, 'deposit', firm.id, bank.id, amount, { rate: bank.depositInterestRate }, 'loans');
+  if (deposit === undefined) deposit = open(L, 'deposit', firm.id, bank.id, amount, { rate: bank.depositInterestRate }, 'loans');
   else credit(L, deposit, amount, 'loans');
   firm.creditDemanded = required - amount;
+  // Error de entrada (2026-11-16, regla de los montos calculados): el monto es el pedido (campo en µ `creditDemanded`,
+  // coeficiente 1) o la oferta del banco, pedido × (1 − i/100) (coeficiente oferta / pedido); la oferta total del banco
+  // (+∞ en el base) no sale de montos en µ. Una sola transacción por empresa en el evento (`nbRuns` = 1).
+  if (inputsActive()) {
+    const req = toUnits(required);
+    const fromRequired = amount === required;
+    const coef = fromRequired ? 1 : offered <= bank.totalLoanSupply && req > 0 ? offered / req : 0;
+    const exact = fromRequired ? required : amountUnits * MICRO_PER_UNIT;
+    const t: InputTerm[] = [{ agent: firm.id, field: 'creditDemanded', coef }];
+    derivedContract(loan, t, undefined, exact);
+    derivedContract(loan, t, 'initialAmount', exact);
+    derivedContract(deposit, t, undefined, exact);
+    derivedValue(firm.id, 'creditDemanded', [{ agent: firm.id, field: 'creditDemanded', coef: 1 - coef }], required - exact);
+  }
   // "Se le dio todo": en µ. Un pedido que en JMAB es un residuo de punto flotante (6,6·10⁻¹⁴ en el tick 293 de la
   // semilla 102) es 0 en µ y la empresa sale del mercado; en JMAB sigue activa. Es una decisión frágil (decisión de
   // Nico, 2026-11-13: "0 en µ es 0"; reglas-caiani.md, sec. 22).
@@ -1333,6 +1362,11 @@ function wageBill(s: CaianiState, f: FirmState): number {
  */
 function setCapitalGoodQuantity(g: CapitalGoodStock, quantity: number): void {
   g.quantity = quantity;
+  updateCapitalGoodValue(g);
+}
+
+/** `CapitalGood.updateValue` (189–193): precio × cantidad × (1 − edad / amortización); lo llaman `setQuantity` y `update`. */
+function updateCapitalGoodValue(g: CapitalGoodStock): void {
   g.value = g.price * g.quantity * (1 - g.age / g.amortization);
 }
 
@@ -2986,13 +3020,15 @@ function bankBankruptcy(s: CaianiState, b: BankState, nw: Micro, rng: CaianiRng)
   const H = toMicro(targetNW) - nw;
   if (H < 0) throw new Error(`${SITE_BANK_BANKRUPTCY}: banco ${b.id} con quita negativa (${H} µ): no portado`);
   b.bailoutCost = H;
-  if (inputsActive()) {
+  const annotate = inputsActive();
+  const hTerms: InputTerm[] = [];
+  if (annotate) {
     // H = car × Σ préstamos − patrimonio: los préstamos con coeficiente car y cada contrato del banco con ∓1.
     const a = agentOf(L, b.id);
-    const terms: InputTerm[] = loanIds.map((contract) => ({ contract, coef: car }));
-    for (const list of a.assets) for (const contract of list) terms.push({ contract, coef: -1 });
-    for (const list of a.liabilities) for (const contract of list) terms.push({ contract, coef: 1 });
-    derivedValue(b.id, 'bailoutCost', terms);
+    for (const contract of loanIds) hTerms.push({ contract, coef: car });
+    for (const list of a.assets) for (const contract of list) hTerms.push({ contract, coef: -1 });
+    for (const list of a.liabilities) for (const contract of list) hTerms.push({ contract, coef: 1 });
+    derivedValue(b.id, 'bailoutCost', hTerms);
   }
   const deposits = contractIds(L, b.id, 'liabilities', 'deposit').slice();
   const balances = deposits.map((id) => contractOf(L, id).amount);
@@ -3001,6 +3037,21 @@ function bankBankruptcy(s: CaianiState, b: BankState, nw: Micro, rng: CaianiRng)
   if (D === 0 || H > D) throw new Error(`${SITE_BANK_BANKRUPTCY}: banco ${b.id} con depósitos ${D} µ y quita ${H} µ: no portado`);
   const shares = allocateLargestRemainder(H, balances, deposits);
   deposits.forEach((id, i) => writeDown(L, id, shares[i]!));
+  // Error de entrada de cada parte (2026-11-16, regla de los montos calculados): xᵢ = H × bᵢ / D, así que
+  // εᵢ = (bᵢ / D)·ε_H + (H / D)·δbᵢ − (H·bᵢ / D²)·Σ δb; el depósito baja xᵢ (coeficientes con el signo cambiado). `exact`:
+  // la cuota antes de los restos mayores, para el control.
+  if (annotate) {
+    const depTerms: InputTerm[] = deposits.map((contract) => ({ contract, coef: 1 }));
+    deposits.forEach((id, i) => {
+      const bi = balances[i]!;
+      const terms: InputTerm[] = [
+        { group: hTerms, coef: -bi / D },
+        { contract: id, coef: -H / D },
+        { group: depTerms, coef: (H * bi) / (D * D) },
+      ];
+      derivedContract(id, terms, undefined, -(H * bi) / D);
+    });
+  }
   const after = toUnits(D - H);
   const exp = b.expectations[EXPECTATION.DEPOSITS];
   if (!exp) throw new Error(`banco ${b.id} sin expectativa de depósitos`);
@@ -3055,6 +3106,15 @@ export function bondSupplyEvent(s: CaianiState): void {
   if (profits < 0) throw new Error(`evento 29: ganancias del BC negativas (${profits} µ): no portado`);
   credit(L, account, profits, 'centralBankProfits');
   g.profitsFromCB = profits;
+  // Error de entrada (2026-11-16, regla de los montos calculados): copia de los dos campos en µ del BC.
+  if (inputsActive()) {
+    const t: InputTerm[] = [
+      { agent: s.centralBank.id, field: 'interestsOnAdvances', coef: 1 },
+      { agent: s.centralBank.id, field: 'interestsOnBonds', coef: 1 },
+    ];
+    derivedContract(account, t);
+    derivedValue(g.id, 'profitsFromCB', t);
+  }
   g.bondInterestRate = s.rules.governmentBondInterestRate;
   const price = s.rules.governmentBondPrice;
   const deficit = contractOf(L, account).amount;
@@ -3380,8 +3440,8 @@ export const SITE_RESERVES_MECHANISM = 'ReservesMechanism.execute';
  *   las reservas: `credit`); el banco queda inactivo, siempre (86);
  * - errores explícitos (criterio de la sec. 1): pedido ≤ 0 con el banco activo (el 36 activa solo con pedido > 0 y el 37
  *   corre enseguida) y banco sin cuenta de reservas en el BC (JMAB la crea, 79–82; no pasa por construcción, sec. 36).
- * El monto es una copia del campo en µ `advancesDemand` (evento 36): en el suelto hereda su redondeo de entrada (≤ 0,5 µ),
- * como un traspaso de saldo entero; no se anota (punto abierto para Nico, reglas-caiani.md, sec. 36).
+ * El monto es una copia del campo en µ `advancesDemand` (evento 36): en el suelto hereda su redondeo de entrada (≤ 0,5 µ);
+ * se anota con coeficiente 1 (`derivedContract`, decisión de Nico, 2026-11-16; reglas-caiani.md, sec. 36).
  */
 export function reservesMarketEvent(s: CaianiState, rng: CaianiRng, market: 'reservesBonds' | 'reservesBasel'): void {
   const L = s.ledger;
@@ -3407,8 +3467,16 @@ export function reservesMarketEvent(s: CaianiState, rng: CaianiRng, market: 'res
     if (reserves === undefined) {
       throw new Error(`${SITE_RESERVES_MECHANISM}: el banco ${id} no tiene cuenta de reservas en el BC (JMAB la crea; no pasa por construcción, reglas-caiani.md, sec. 36)`);
     }
-    open(L, 'advance', cb.id, id, amount, { rate: s.rules.centralBankAdvancesRate, age: 0, length: s.structure.advancesLength, amortization: 'onlyInterest', initialAmount: amount }, 'advances');
+    const advance = open(L, 'advance', cb.id, id, amount, { rate: s.rules.centralBankAdvancesRate, age: 0, length: s.structure.advancesLength, amortization: 'onlyInterest', initialAmount: amount }, 'advances');
     credit(L, reserves, amount, 'advances');
+    // Error de entrada (decisión de Nico, 2026-11-16): el monto es el campo en µ `advancesDemand`, coeficiente 1; lo
+    // heredan el saldo y el monto inicial del adelanto y las reservas del banco.
+    if (inputsActive()) {
+      const terms: InputTerm[] = [{ agent: id, field: 'advancesDemand', coef: 1 }];
+      derivedContract(advance, terms);
+      derivedContract(advance, terms, 'initialAmount');
+      derivedContract(reserves, terms);
+    }
     b.active[MKT.ADVANCES] = false;
   }
 }
@@ -3416,4 +3484,207 @@ export function reservesMarketEvent(s: CaianiState, rng: CaianiRng, market: 'res
 /** Evento 37, `reservesMarketBaselTic` (TIC_RESERVEMARKETBASEL): `reservesMarketEvent` sobre `reservesMarketBasel`. */
 export function reservesMarketBaselEvent(s: CaianiState, rng: CaianiRng): void {
   reservesMarketEvent(s, rng, 'reservesBasel');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Eventos 38–73: reportes (no tocan el estado; no se portan). Evento 74: manejador de la población
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 74, `populationHandlerTic` (TIC_POPULATIONHANDLER): solo lo escucha `NoEntryPopulationHandler` (XML 196–203;
+ * `onTicArrived` 59–64 → `removeDeadAgents` 77–88), que saca de cada población los agentes con `dead` = true. En el base
+ * **no hace nada** (aprobado por Nico como evento vacío, 2026-11-16; reglas-caiani.md, sec. 38): `dead` solo lo pone en
+ * true `SimpleAbstractAgent.dies()`, que nadie llama (fuente y bytecode del `.jar`; las asignaciones comentadas de
+ * `Bank`, `ConsumptionFirm` y `CapitalFirm`), y la deserialización no se usa. Verificado contra el oráculo: en las once
+ * corridas de referencia el volcado después del 74 es idéntico byte a byte al de después del 37, sin sorteos.
+ */
+export function populationHandlerEvent(_s: CaianiState): void {
+  // Sin efecto, como en JMAB en el base.
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 75: actualización de expectativas y limpieza
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_UPDATE_EXPECTATIONS = 'updateExpectationsTic';
+
+/** Contratos del agente con coeficiente +1 (activos) y −1 (pasivos): el error de entrada de su patrimonio. */
+function netWorthTerms(L: Ledger, agent: AgentId): InputTerm[] {
+  const a = agentOf(L, agent);
+  const terms: InputTerm[] = [];
+  for (const list of a.assets) for (const contract of list) terms.push({ contract, coef: 1 });
+  for (const list of a.liabilities) for (const contract of list) terms.push({ contract, coef: -1 });
+  return terms;
+}
+
+/**
+ * `getNetWealth` de una empresa (`SimpleAbstractAgent.getNumericBalanceSheet` 329–352): activos − pasivos. Los
+ * financieros salen del ledger (µ, exactos) y los bienes, de `goodValue` (el inventario propio a costo unitario × cantidad,
+ * las añadas de capital a su valor contable), en `double`. Es un `double` de montos (no bit a bit con JMAB, que suma por
+ * tipo de ítem en `double`).
+ */
+export function firmNetWealth(s: CaianiState, f: FirmState): number {
+  let goods = 0;
+  for (const g of f.consumptionGoods) goods += goodValue(g, f.id);
+  for (const g of f.capitalGoods) goods += goodValue(g, f.id);
+  return toUnits(netFinancialWorth(s.ledger, f.id)) + goods;
+}
+
+/** `LAG_NETWEALTH` del período, con su error de entrada (los contratos del agente). */
+function setNetWealthLag(s: CaianiState, agent: { id: AgentId; lags: Lags }, nw: number): void {
+  setLag(agent.lags, LAG.NETWEALTH, s.round, nw);
+  if (inputsActive()) derivedValue(agent.id, `lag:${LAG.NETWEALTH}:${s.round}`, netWorthTerms(s.ledger, agent.id));
+}
+
+/**
+ * `cleanSM` de las añadas de capital del agente (`SimpleAbstractAgent.cleanSM` 607–622 sobre SM_CAPGOOD; `CapitalGood.update`
+ * 178–181 y `remove` 170–172): de atrás para adelante, edad + 1, **valor recalculado** (`updateValue`: precio × cantidad ×
+ * (1 − edad / amortización); con duración = amortización, la que sale vale 0) y sale la que llega a su duración. Errores explícitos
+ * (criterio de la sec. 1; vigilancia de cleanSM, 7 semillas × 400 trimestres: 0 casos): una añada obsoleta (sin I+D no
+ * pasa) y una que sale con valor ≠ 0.
+ */
+function cleanCapitalGoods(owner: AgentId, goods: CapitalGoodStock[]): void {
+  for (let k = goods.length - 1; k >= 0; k--) {
+    const g = goods[k]!;
+    g.age += 1;
+    updateCapitalGoodValue(g);
+    if (g.obsolete) throw new Error(`${SITE_UPDATE_EXPECTATIONS}: añada de capital obsoleta del agente ${owner} (no pasa en el base: I+D apagada)`);
+    if (g.age !== g.duration) continue;
+    const v = goodValue(g, owner);
+    if (v !== 0) throw new Error(`${SITE_UPDATE_EXPECTATIONS}: añada de capital del agente ${owner} que sale con valor ${v} (no pasa en el base)`);
+    goods.splice(k, 1);
+  }
+}
+
+/**
+ * `cleanSM` de los bienes de consumo del agente (`ConsumptionGood.remove` 85–87): edad + 1 y sale el que pasa su duración
+ * (los de los hogares, duración 0: se consumen en el tick). El inventario de una empresa (edad −2 → −1) no sale.
+ */
+function cleanConsumptionGoods(goods: ConsumptionGoodStock[]): void {
+  for (let k = goods.length - 1; k >= 0; k--) {
+    const g = goods[k]!;
+    g.age += 1;
+    if (g.age > g.duration) goods.splice(k, 1);
+  }
+}
+
+/**
+ * Bloque 1 del evento 75: empresas de consumo, en orden de creación (`ConsumptionFirm.updateExpectations` 199–205):
+ * `LAG_NETWEALTH` = patrimonio; el inventario (primer bien de consumo) a edad −2; `cleanSM` (el ledger: la empresa no
+ * tiene préstamos ni bonos como activos; el inventario queda en −1; las añadas de capital envejecen y sale la que llega a
+ * su duración).
+ */
+export function updateExpectationsConsumptionFirms(s: CaianiState): void {
+  for (const f of s.consumptionFirms) {
+    setNetWealthLag(s, f, firmNetWealth(s, f));
+    const inventory = f.consumptionGoods[0];
+    if (!inventory) throw new Error(`empresa de consumo ${f.id} sin inventario (JMAB: NullPointerException)`);
+    inventory.age = -2;
+    cleanup(s.ledger, f.id);
+    cleanConsumptionGoods(f.consumptionGoods);
+    cleanCapitalGoods(f.id, f.capitalGoods);
+  }
+}
+
+/**
+ * Bloque 2: empresas de capital (`CapitalFirm.updateExpectations` 251–257): `LAG_NETWEALTH`; el inventario (primer bien de
+ * capital) a edad −1; `cleanSM` (queda en 0).
+ */
+export function updateExpectationsCapitalFirms(s: CaianiState): void {
+  for (const k of s.capitalFirms) {
+    setNetWealthLag(s, k, firmNetWealth(s, k));
+    const inventory = k.capitalGoods[0];
+    if (!inventory) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
+    inventory.age = -1;
+    cleanup(s.ledger, k.id);
+    cleanConsumptionGoods(k.consumptionGoods);
+    cleanCapitalGoods(k.id, k.capitalGoods);
+  }
+}
+
+/**
+ * Bloque 3: bancos (`Bank.updateExpectations` 256–268): rezagos `LAG_NETWEALTH`, `LAG_REMAININGCREDIT` (`totalLoanSupply`),
+ * `LAG_NONPERFORMINGLOANS` (morosidad del tick, campo en µ: anotada), `LAG_DEPOSITINTEREST`, `LAG_LOANINTEREST`; observación
+ * de la expectativa de depósitos = Σ depósitos del pasivo (anotada); `cleanSM` (préstamos y bonos que cierran: `cleanup`).
+ */
+export function updateExpectationsBanks(s: CaianiState): void {
+  const L = s.ledger;
+  for (const b of s.banks) {
+    setNetWealthLag(s, b, toUnits(netFinancialWorth(L, b.id)));
+    setLag(b.lags, LAG.REMAININGCREDIT, s.round, b.totalLoanSupply);
+    setLag(b.lags, LAG.NONPERFORMINGLOANS, s.round, toUnits(b.currentNonPerformingLoans));
+    setLag(b.lags, LAG.DEPOSITINTEREST, s.round, b.depositInterestRate);
+    setLag(b.lags, LAG.LOANINTEREST, s.round, b.bankInterestRate);
+    const exp = b.expectations[EXPECTATION.DEPOSITS];
+    if (!exp) throw new Error(`banco ${b.id} sin expectativa de depósitos`);
+    addObservation(exp, toUnits(sumContracts(L, b.id, 'liabilities', 'deposit')));
+    if (inputsActive()) {
+      derivedValue(b.id, `lag:${LAG.NONPERFORMINGLOANS}:${s.round}`, [{ agent: b.id, field: 'currentNonPerformingLoans', coef: 1 }]);
+      derivedValue(b.id, `exp:${EXPECTATION.DEPOSITS}:0:0`, contractIds(L, b.id, 'liabilities', 'deposit').map((contract) => ({ contract, coef: 1 })));
+    }
+    cleanup(L, b.id);
+  }
+}
+
+/**
+ * Bloque 4: gobierno (`Government.updateAggregateVariables` 151–156): rezago agregado `LAG_AGGUNEMPLOYMENT` = 1 − ocupados /
+ * hogares (`UnemploymentRateComputer.computeVariable` 51–65, en `double`); `cleanSM` (sus activos son su cuenta en el BC).
+ */
+export function updateExpectationsGovernment(s: CaianiState): void {
+  let employed = 0;
+  for (const h of s.households) if (h.employer !== null) employed++;
+  setLag(s.aggregateLags, LAG.AGGUNEMPLOYMENT, s.round, 1 - employed / s.households.length);
+  cleanup(s.ledger, s.government.id);
+}
+
+/**
+ * Bloque 5: hogares (`Households.updateExpectations` 215–240): observación del precio de consumo = Σ precio × cantidad / q,
+ * con q un `int` que JMAB trunca en cada suma (`qty += c.getQuantity()`, asignación compuesta de Java); `LAG_NETWEALTH`
+ * (con los bienes del tick a su valor); `LAG_EMPLOYED`; `cleanSM` (salen los bienes del tick). Las entradas de la
+ * observación son `double` de los bienes (precio y cantidad), no montos en µ: nada que anotar.
+ * **Con q = 0** (sin bienes, o con bienes que suman menos de 1 en cada paso de la truncación), la observación es la
+ * expectativa vigente (`getExpectation()`). Era error explícito provisorio (decisión de Nico, 2026-11-16, "a confirmar con el
+ * oráculo"), pero la vigilancia dio **144 casos** en 7 semillas × 400 trimestres (71 sin bienes, 73 con bienes truncados a 0):
+ * corre en el base, así que se porta, con V3 en el tick 103 de la semilla 104 (reglas-caiani.md, sec. 39).
+ */
+export function updateExpectationsHouseholds(s: CaianiState): void {
+  for (const h of s.households) {
+    let price = 0;
+    let qty = 0;
+    for (const g of h.consumptionGoods) {
+      price += g.price * g.quantity;
+      qty = Math.trunc(qty + g.quantity); // (int)(qty + cantidad)
+    }
+    const exp = h.expectations[EXPECTATION.CONSPRICE];
+    if (!exp) throw new Error(`hogar ${h.id} sin expectativa de precio`);
+    // `if (qty != 0)`: entero exacto, no es una decisión que registrar.
+    addObservation(exp, qty !== 0 ? price / qty : exp.expectation);
+    setNetWealthLag(s, h, householdNetWealth(s, h));
+    setLag(h.lags, LAG.EMPLOYED, s.round, h.employer === null ? 0 : 1);
+    cleanup(s.ledger, h.id);
+    cleanConsumptionGoods(h.consumptionGoods);
+  }
+}
+
+/** Bloque 6: BC (`CentralBank.onTicArrived` 154–155): solo `cleanSM` (bonos rescatados y adelantos que cierran). */
+export function updateExpectationsCentralBank(s: CaianiState): void {
+  cleanup(s.ledger, s.centralBank.id);
+}
+
+/** Los seis bloques del evento 75, en el orden de despacho de JMAB (el de creación; reglas-caiani.md, sec. 38–39). */
+export const UPDATE_EXPECTATIONS_BLOCKS = [
+  updateExpectationsConsumptionFirms,
+  updateExpectationsCapitalFirms,
+  updateExpectationsBanks,
+  updateExpectationsGovernment,
+  updateExpectationsHouseholds,
+  updateExpectationsCentralBank,
+] as const;
+
+/**
+ * Evento 75, `updateExpectationsTic` (TIC_UPDATEEXPECTATIONS; aprobado por Nico el 2026-11-16, reglas-caiani.md, sec. 39):
+ * los seis bloques en orden. Sin sorteos.
+ */
+export function updateExpectationsEvent(s: CaianiState): void {
+  for (const block of UPDATE_EXPECTATIONS_BLOCKS) block(s);
 }

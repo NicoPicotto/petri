@@ -46,6 +46,11 @@ import {
   bondMarketSecondStepEvent,
   reservesDemandBaselEvent,
   reservesMarketBaselEvent,
+  updateExpectationsConsumptionFirms,
+  updateExpectationsBanks,
+  updateExpectationsGovernment,
+  updateExpectationsHouseholds,
+  firmNetWealth,
   reservesMarketEvent,
   javaRint,
   writeDown,
@@ -2654,3 +2659,91 @@ describe('evento 37 (mercado de reservas de Basilea; función compartida con el 
     expect(() => reservesMarketBaselEvent(c.s, c.rng)).toThrow(/no tiene cuenta de reservas/);
   });
 });
+
+describe('evento 75 (actualización de expectativas y limpieza): casos a mano', () => {
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 50;
+    return s;
+  };
+  const good = (price: number, quantity: number, producer: number) => ({ quantity, value: price * quantity, price, unitCost: 1, age: 0, producer, duration: 0 });
+
+  it('empresa de consumo: patrimonio al rezago, inventario a −2 → −1, añadas: edad + 1, valor recalculado y sale la de edad = duración (con valor 0)', () => {
+    const s = setup();
+    const f = s.consumptionFirms[0]!;
+    // Dos añadas a mano (duración y amortización 20): edad 19 → 20 sale con valor 3 × 16 × (1 − 20/20) = 0;
+    // edad 10 → 11 queda con valor 3 × 10 × (1 − 11/20) = 13,5.
+    const base = f.capitalGoods[0]!;
+    f.capitalGoods = [
+      { ...base, age: 19, price: 3, quantity: 16, value: 99, duration: 20, amortization: 20, obsolete: false },
+      { ...base, age: 10, price: 3, quantity: 10, value: 99, duration: 20, amortization: 20, obsolete: false },
+    ];
+    const inv = f.consumptionGoods[0]!;
+    const nw = firmNetWealth(s, f);
+    updateExpectationsConsumptionFirms(s);
+    expect(f.lags[LAG.NETWEALTH]![50]).toBe(nw);
+    expect(inv.age).toBe(-1);
+    expect(f.capitalGoods).toHaveLength(1);
+    expect(f.capitalGoods[0]!.age).toBe(11);
+    expect(f.capitalGoods[0]!.value).toBe(3 * 10 * (1 - 11 / 20));
+  });
+
+  it('una añada obsoleta es un error explícito (sin I+D no pasa)', () => {
+    const s = setup();
+    s.consumptionFirms[0]!.capitalGoods[0]!.obsolete = true;
+    expect(() => updateExpectationsConsumptionFirms(s)).toThrow(/obsoleta/);
+  });
+
+  it('bancos: rezagos (patrimonio, oferta, morosidad, tasas) y observación de depósitos = Σ depósitos', () => {
+    const s = setup();
+    const b = s.banks[0]!;
+    b.currentNonPerformingLoans = 1_500_000;
+    // El estado inicial tiene préstamos de edad 20 que en el tick pagarían su última cuota (evento 20, que el caso no
+    // corre): solo para el caso, edad 0 (si no, vencerían con saldo: error explícito de `cleanup`).
+    // Ídem los bonos (se rescatan en el evento 22).
+    for (const bk of s.banks) for (const kind of ['loan', 'bond'] as const) for (const c of contractIds(s.ledger, bk.id, 'assets', kind)) contractOf(s.ledger, c).age = 0;
+    const deposits = contractIds(s.ledger, b.id, 'liabilities', 'deposit').reduce((a, c) => a + contractOf(s.ledger, c).amount, 0);
+    updateExpectationsBanks(s);
+    expect(b.lags[LAG.NONPERFORMINGLOANS]![50]).toBe(1.5);
+    expect(b.lags[LAG.REMAININGCREDIT]![50]).toBe(b.totalLoanSupply);
+    expect(b.lags[LAG.DEPOSITINTEREST]![50]).toBe(b.depositInterestRate);
+    expect(b.lags[LAG.LOANINTEREST]![50]).toBe(b.bankInterestRate);
+    expect(b.expectations[EXPECTATION.DEPOSITS]!.passed[0]![0]).toBe(deposits / 1e6);
+  });
+
+  it('gobierno: desempleo agregado = 1 − ocupados / hogares', () => {
+    const s = setup();
+    const employed = s.households.filter((h) => h.employer !== null).length;
+    updateExpectationsGovernment(s);
+    expect(s.aggregateLags[LAG.AGGUNEMPLOYMENT]![50]).toBe(1 - employed / s.households.length);
+  });
+
+  it('hogares: observación del precio con la cantidad entera truncada en cada suma, como JMAB; los bienes del tick salen', () => {
+    const s = setup();
+    const p0 = s.consumptionFirms[0]!.id;
+    for (const h of s.households) h.consumptionGoods = [good(1.2, 1.5, p0), good(1.4, 2.7, p0)];
+    const h = s.households[0]!;
+    updateExpectationsHouseholds(s);
+    // q = (int)(0 + 1,5) = 1; q = (int)(1 + 2,7) = 3: observación = (1,2 × 1,5 + 1,4 × 2,7) / 3 (no / 4,2).
+    expect(h.expectations[EXPECTATION.CONSPRICE]!.passed[0]![0]).toBe((1.2 * 1.5 + 1.4 * 2.7) / 3);
+    expect(h.lags[LAG.EMPLOYED]![50]).toBe(h.employer === null ? 0 : 1);
+    expect(h.consumptionGoods).toHaveLength(0);
+  });
+
+  it('hogar con cantidad entera 0 (sin bienes, o 0,8 + 0,8 + 0,8: la truncación deja 0 en cada paso): observación = expectativa vigente', () => {
+    const s = setup();
+    const p0 = s.consumptionFirms[0]!.id;
+    for (const h of s.households) h.consumptionGoods = [good(1.2, 1, p0)];
+    const a = s.households[3]!;
+    const b = s.households[4]!;
+    a.consumptionGoods = [good(1.2, 0.8, p0), good(1.3, 0.8, p0), good(1.25, 0.8, p0)];
+    b.consumptionGoods = [];
+    const ea = a.expectations[EXPECTATION.CONSPRICE]!.expectation;
+    const eb = b.expectations[EXPECTATION.CONSPRICE]!.expectation;
+    updateExpectationsHouseholds(s);
+    expect(a.expectations[EXPECTATION.CONSPRICE]!.passed[0]).toEqual([ea, ea]);
+    expect(b.expectations[EXPECTATION.CONSPRICE]!.passed[0]).toEqual([eb, eb]);
+    expect(a.consumptionGoods).toHaveLength(0);
+  });
+});
+

@@ -56,7 +56,11 @@ import {
   bondMarketSecondStepEvent,
   reservesDemandBaselEvent,
   reservesMarketBaselEvent,
+  populationHandlerEvent,
+  UPDATE_EXPECTATIONS_BLOCKS,
   parseDraws,
+  contractIds,
+  MKT,
   DecisionRecorder,
   compareOutcomes,
   summarizeDecisions,
@@ -72,7 +76,7 @@ import {
 } from '../src/caiani';
 import { ChainScales } from './support/chain-scale';
 import { InputCarry } from './support/input-carry';
-import { V3_CHAIN_RHO, chainedAmountTol, compareState, idMaps, readDump, stateFromDump, type CompareResult, type Dump, type ScaleSource } from './support/jmab-dump';
+import { INPUT_FIELDS, INPUT_VALUES, V3_CHAIN_RHO, chainedAmountTol, compareState, idMaps, readDump, stateFromDump, type CompareResult, type Dump, type ScaleSource } from './support/jmab-dump';
 
 /**
  * Tiempo máximo de cada test del V3: 5 minutos. Con la máquina cargada (otras corridas, el oráculo) un evento que
@@ -83,7 +87,7 @@ const V3_TIMEOUT = 300_000;
 const ORACLE = fileURLToPath(new URL('../../../reference/p0/runs/oracle/', import.meta.url));
 
 /** Corridas de referencia: volcados al principio del tick y después de los eventos 0–37 (semilla 12345 salvo la 293). */
-const ALL_RUNS = [
+const ALL_RUNS: { run: string; tick: number; only?: readonly number[] }[] = [
   { run: 'p3-t1', tick: 1 },
   { run: 'p3-t50', tick: 50 },
   // Una quiebra por deuda en el evento 20 (empresa 8168) y cuatro por salarios en el 21.
@@ -113,6 +117,13 @@ const ALL_RUNS = [
   // principio del tick 293 (para la V3 que cruza ticks). El encadenado se corta en el evento 10 (8204 pide un crédito
   // residual, como en los ticks 293 y 300): el 36 y el 37 con el mercado abierto quedan verificados solo en el suelto.
   { run: 'p3-s102-t292', tick: 292 },
+  // Semilla 104, tick 103 (2026-11-16): hogares con cantidad entera 0 en el evento 75 (uno con bienes truncados a 0 y tres
+  // sin bienes; vigilancia `p3-hh0-s*`, reglas-caiani.md, sec. 39).
+  // **Solo los bloques del 75, sueltos** (`only`): en el evento 19 de este tick hay una decisión frágil dada vuelta respecto
+  // de JMAB (8202: "depósito < monto" a distancia 0, como en el tick 133) que arrastra a otros agentes del mismo evento (el
+  // proveedor 8242, el comprador 8198, el banco 8255); la regla de la sec. 1 excusa solo al agente de la decisión. Pendiente
+  // de decisión de Nico (reglas-caiani.md, sec. 39; pendientes.md).
+  { run: 'p3-s104-t103', tick: 103, only: [75.1, 75.2, 75.3, 75.4, 75.5, 75.6] },
 ];
 
 /**
@@ -232,8 +243,24 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   { e: 35, run: bondMarketSecondStepEvent },
   { e: 36, run: (s) => reservesDemandBaselEvent(s) },
   { e: 37, run: reservesMarketBaselEvent },
+  // 38–73: reportes, no tocan el estado (no se portan); el suelto del 74 arranca del volcado del 37.
+  { e: 74, run: (s) => populationHandlerEvent(s) },
+  // Evento 75 por bloques (despacho de JMAB: consumo, capital, bancos, gobierno, hogares, BC), contra los volcados de adentro
+  // del 75 (`tick-T-ev-75-in-K-Clase.jsonl`, DUMP_INSIDE) y el del 75 (reglas-caiani.md, sec. 38–39). 75.k = bloque k.
+  ...UPDATE_EXPECTATIONS_BLOCKS.map((run, k) => ({ e: 75 + (k + 1) / 10, run: (s: CaianiState) => run(s) })),
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
+/** Volcados de los bloques del 75: el que hay **después** de cada bloque (el de antes del bloque siguiente, y el del 75). */
+const END_DUMPS: Record<number, string> = {
+  75.1: '75-in-1-CopyOfCapitalFirm2WagesEnd',
+  75.2: '75-in-2-Bank',
+  75.3: '75-in-3-GovernmentAntiCyclical',
+  75.4: '75-in-4-HouseholdsWithDole',
+  75.5: '75-in-5-CentralBank',
+  75.6: '75',
+};
+/** Evento anterior en la lista (el 74 sigue al 37: los reportes 38–73 no se portan). */
+const prevEvent = (e: number): number => EVENTS[EVENTS.findIndex((x) => x.e === e) - 1]!.e;
 
 /** Modo de la suite (encabezado del archivo): rápido (por defecto) o completo (`PETRI_V3=full`). */
 const FULL = process.env.PETRI_V3 === 'full';
@@ -278,7 +305,9 @@ const DUMP_CACHE = 2;
  */
 const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [];
 
-describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick }) => {
+describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick, only }) => {
+  // Una corrida con `only`: solo el suelto de esos eventos.
+  const steps = only ? STEPS.filter((x) => x.kind === 'single' && only.includes(x.e)) : STEPS;
   const dir = `${ORACLE}${run}/state/`;
   // Caché de los últimos volcados leídos (`stateFromDump` y `compareState` no los modifican: copian lo que toman).
   const cache = new Map<string, Dump>();
@@ -300,7 +329,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     chained = new DecisionRecorder();
   });
   const before = `tick-${tick}.jsonl`;
-  const after = (e: number) => `tick-${tick}-ev-${e}.jsonl`;
+  const after = (e: number) => `tick-${tick}-ev-${END_DUMPS[e] ?? e}.jsonl`;
   const available = existsSync(dir + after(LAST));
   // Registro de sorteos: se lee al primer uso y se suelta al terminar la corrida (con 10 corridas, leerlos todos al
   // recolectar los tests llenaba el heap de 4 GB; 2026-11-14).
@@ -351,7 +380,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
           }
         : undefined;
     const edges = !chained && lastEdges ? (c: number) => lastEdges!.get(c) : undefined;
-    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, derived: derivedTol, derivedValue: carry?.valueCarry, edges });
+    const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, initialCarry: carry?.initialCarry, derived: derivedTol, derivedValue: carry?.valueCarry, edges });
     console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
     report(label, r);
     const scaledRows = Object.entries(r.scaled)
@@ -409,7 +438,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
   let chainCut: number | undefined;
   /** Suelto (`single`) del evento e. */
   const runSingle = (e: number, ev: Step['run']) => {
-    const s = stateFromDump(dumpOf(e === 0 ? before : after(e - 1)));
+    const s = stateFromDump(dumpOf(e === 0 ? before : after(prevEvent(e))));
     const rng = drawsOf(e);
     const pending = pendingOf(tick, e);
     if (pending) {
@@ -470,7 +499,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     }
   };
   // Un test por paso, en orden (vitest los corre en orden dentro del describe): suelto y encadenado intercalados.
-  it.skipIf(!available).each(STEPS.map((x) => [x.name, x] as const))('%s', (_name, { kind, k, e, run: ev }) => (kind === 'single' ? runSingle(e, ev) : runChained(k, e, ev)), V3_TIMEOUT);
+  it.skipIf(!available).each(steps.map((x) => [x.name, x] as const))('%s', (_name, { kind, k, e, run: ev }) => (kind === 'single' ? runSingle(e, ev) : runChained(k, e, ev)), V3_TIMEOUT);
 
   it.skipIf(!available)('decisiones: frágiles por evento y dadas vuelta entre el suelto y el encadenado', () => {
     console.log(`Decisiones, tick ${tick}, cada evento suelto:\n  ${summarizeDecisions(single.log).join('\n  ')}`);
@@ -480,7 +509,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     console.log(`Decisiones dadas vuelta, tick ${tick}: ${flips.length}`, JSON.stringify(flips.slice(0, 10)), lengthMismatch);
     console.log(`Decisiones frágiles dadas vuelta respecto de JMAB, tick ${tick}: ${flippedVsJmab.length}`, JSON.stringify(flippedVsJmab.slice(0, 10)));
     // Con la cadena cortada, el encadenado no tiene los eventos siguientes: no se comparan.
-    if (FULL && !ONLY_EVENTS && chainCut === undefined) expect(lengthMismatch).toEqual([]);
+    if (FULL && !ONLY_EVENTS && !only && chainCut === undefined) expect(lengthMismatch).toEqual([]);
   });
 });
 
@@ -503,5 +532,80 @@ describe('arnés del V3: términos de grupo del error de entrada (derived.ts)', 
     const b = carry.valueCarry(1, 'b')!;
     expect(b).not.toBe(0);
     expect(Math.abs(a - b)).toBeLessThan(1e-12 * Math.max(1, Math.abs(b)));
+  });
+});
+
+describe('arnés del V3: error de entrada de una operación fuera de un lote (derivedContract, evento 37)', () => {
+  const run = `${ORACLE}p3-s102-t292/`;
+  const dump = `${run}state/tick-292-ev-36.jsonl`;
+  it.skipIf(!existsSync(dump))('el adelanto del banco 8256 (tick 292, semilla 102) lleva el δ de advancesDemand a su saldo, su monto inicial y las reservas', () => {
+    const d = readDump(dump);
+    const { toJ } = idMaps(d.meta);
+    const s = stateFromDump(d);
+    const bank = s.banks.find((b) => toJ(b.id) === 8256)!;
+    // δ = advancesDemand en µ (port) − el de JMAB en µ: 994,90… unidades, redondeado a µ en el volcado.
+    const delta = INPUT_FIELDS.get(s)!.get(`${bank.id}:advancesDemand`)!;
+    expect(Math.abs(delta)).toBeGreaterThan(0);
+    expect(Math.abs(delta)).toBeLessThanOrEqual(0.5);
+    const reserves = contractIds(s.ledger, bank.id, 'assets', 'reserves')[0]!;
+    const ownReserves = s.ledger.contracts[reserves]!.amount - INPUT_VALUES.get(s)!.get(reserves)!;
+    const draws = parseDraws(readFileSync(`${run}draws.tsv`, 'utf8')).filter((x) => x.tick === 292 && x.event === 37);
+    const rng = new OracleCaianiRng(draws, { agentId: toJ });
+    rng.tick = 292;
+    const carry = new InputCarry(s);
+    const rec = new InputRecorder();
+    withInputs(rec, () => reservesMarketBaselEvent(s, rng));
+    carry.fromLog(s.ledger.flowLog).fromInputs(rec);
+    const advances = contractIds(s.ledger, bank.id, 'liabilities', 'advance');
+    const advance = advances[advances.length - 1]!;
+    expect(s.ledger.contracts[advance]!.amount).toBe(bank.advancesDemand);
+    expect(rec.contracts.map((f) => [f.contract, f.field ?? 'saldo'])).toEqual([
+      [advance, 'saldo'],
+      [advance, 'initialAmount'],
+      [reserves, 'saldo'],
+    ]);
+    // Adelanto nuevo: sin saldo de entrada, su error es solo el del pedido.
+    expect(carry.carry(advance)).toBe(delta);
+    expect(carry.initialCarry(advance)).toBe(delta);
+    // Reservas: el redondeo de su saldo inicial más el del pedido.
+    expect(carry.carry(reserves)).toBeCloseTo(ownReserves + delta, 12);
+  });
+});
+
+describe('pedido residual de crédito redondeado a 1 µ: qué préstamo recibe la zombi (reglas-caiani.md, sec. 37)', () => {
+  const run = `${ORACLE}p3-s102-t300/`;
+  const dump = `${run}state/tick-300-ev-9.jsonl`;
+  it.skipIf(!existsSync(dump))('tick 300, semilla 102: 8204 y 8227 activadas con 1 µ reciben un préstamo de 0 y el evento 10 coincide con JMAB', () => {
+    const d = readDump(dump);
+    const { toJ } = idMaps(d.meta);
+    const s = stateFromDump(d);
+    // En JMAB las dos piden un residuo (~10⁻¹⁴ y ~10⁻¹³) y quedan activas; el port las tiene en 0 e inactivas. Con un pedido
+    // de JMAB entre 0,5 y 1 µ (14 casos en 7 semillas), el port tendría 1 µ y las activaría: se fuerza eso.
+    const zombies = s.consumptionFirms.filter((f) => [8204, 8227].includes(toJ(f.id)));
+    expect(zombies).toHaveLength(2);
+    for (const f of zombies) {
+      expect(f.creditDemanded).toBe(0);
+      // Sin préstamos ni capital: recupero esperado = 0 / 0 = NaN, rendimiento NaN para todo monto, oferta 0.
+      expect(contractIds(s.ledger, f.id, 'liabilities', 'loan')).toHaveLength(0);
+      expect(f.capitalGoods).toHaveLength(0);
+      f.creditDemanded = 1;
+      f.active[MKT.CREDIT] = true;
+    }
+    const draws = parseDraws(readFileSync(`${run}draws.tsv`, 'utf8')).filter((x) => x.tick === 300 && x.event === 10);
+    const rng = new OracleCaianiRng(draws, { agentId: toJ });
+    rng.tick = 300;
+    creditMarketEvent(s, rng);
+    // Con las dos activas, el port consume exactamente los sorteos de JMAB.
+    expect(rng.remaining).toBe(0);
+    for (const f of zombies) {
+      const loans = contractIds(s.ledger, f.id, 'liabilities', 'loan');
+      expect(loans.map((c) => s.ledger.contracts[c]!.amount)).toEqual([0]); // préstamo de 0, como JMAB
+      expect(f.creditDemanded).toBe(1); // le queda el pedido: sigue activa, como JMAB
+      expect(f.active[MKT.CREDIT]).toBe(true);
+    }
+    // El resto del estado, igual que JMAB después del evento 10; las únicas diferencias son el pedido de las dos (1 µ contra
+    // ~10⁻¹⁴, dentro de la tolerancia de 2 µ).
+    const r = compareState(s, readDump(`${run}state/tick-300-ev-10.jsonl`));
+    expect(r.diffs).toEqual([]);
   });
 });

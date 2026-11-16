@@ -239,10 +239,10 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     expect(JSON.stringify(w.L)).toBe(before);
   });
 
-  it('un préstamo que vence con saldo se condona explícitamente al cerrarse', () => {
+  it('un préstamo que vence con saldo es un error explícito (decisión de Nico, 2026-11-16)', () => {
     // Préstamo con edad 19, saldo 1.000 µ e initialAmount = 1.000 (A/L = 50 por cuota): paga 50 en las
-    // edades 19 y 20 y la limpieza lo cierra con 900 µ pendientes. En la corrida base no pasa (los
-    // préstamos iniciales de JMAB cierran en cero, verificado en P2); es la salvaguarda de `cleanup`.
+    // edades 19 y 20 y llega a la limpieza con 900 µ pendientes. Antes se condonaba (`writeOff`, `writtenOffAtExpiry`);
+    // en el base no pasa (vigilancia de cleanSM, reglas-caiani.md, sec. 39).
     const w = world();
     const loan = open(w.L, 'loan', w.b1, w.f, 1000, { rate: 0, length: 20, amortization: 'fixedCapital', age: 19 }, 'loans');
     credit(w.L, w.fDep1, 1000, 'loans');
@@ -251,15 +251,9 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
     cleanup(w.L, w.b1); // edad 20
     expect(serviceLoan(w.L, loan, w.fDep1, installmentOf(w.L, loan)).principal).toBe(50);
     expect(amt(w.L, loan)).toBe(900);
-    const fBefore = netFinancialWorth(w.L, w.f);
-    cleanup(w.L, w.b1); // edad 21 > 20: se cierra
-    expect(w.L.contracts[loan]).toBeUndefined();
-    expect(contractIds(w.L, w.f, 'liabilities', 'loan')).toEqual([]);
-    expect(w.L.stats.writtenOffAtExpiry).toBe(1);
-    expect(netFinancialWorth(w.L, w.f) - fBefore).toBe(900); // la condonación es ganancia del deudor
-    const last = w.L.flowLog.at(-1)!;
-    expect(last).toMatchObject({ category: 'writeOff', payer: w.b1, payee: w.f, amount: 900 });
-    expectConsistent(w.L, cp);
+    expect(() => cleanup(w.L, w.b1)).toThrow(/vence con saldo 900 µ/); // edad 21 > 20
+    expect(w.L.stats.writtenOffAtExpiry).toBe(0);
+    void cp;
   });
 
   it('adelanto del BC: solo interés, se paga entero al vencer desde las reservas', () => {

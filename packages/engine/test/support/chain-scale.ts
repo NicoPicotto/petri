@@ -98,17 +98,25 @@ export class ChainScales implements ScaleSource {
     for (const h of this.s.households) prefix.set(h.id, 'hogar');
     for (const f of [...this.s.consumptionFirms, ...this.s.capitalFirms]) prefix.set(f.id, 'empresa');
     for (const b of this.s.banks) prefix.set(b.id, 'banco');
+    // Gobierno y BC: sus etiquetas en `compareState` no llevan id (2026-11-16, eventos 29).
+    const wOf = (agent: AgentId): string =>
+      agent === this.s.government.id ? 'gobierno' : agent === this.s.centralBank.id ? 'BC' : `${prefix.get(agent) ?? 'agente'} ${this.toJ(agent)}`;
     const FIELD_LABEL: Record<string, string> = {
       interestReceived: 'intereses de depósitos',
       dividendsReceived: 'dividendos',
       debtBurden: 'servicio de la deuda',
       debtInterests: 'intereses de la deuda',
       creditDemanded: 'crédito pedido',
+      currentNonPerformingLoans: 'morosidad del tick',
       bailoutCost: 'costo de rescate',
       advancesDemand: 'adelantos de Basilea pedidos',
+      interestsOnAdvances: 'intereses de adelantos',
+      interestsOnBonds: 'intereses de bonos',
     };
     const byId = new Map<AgentId, { lags: Record<number, Record<number, number>> }>();
-    for (const a of [...this.s.households, ...this.s.consumptionFirms, ...this.s.capitalFirms, ...this.s.banks]) byId.set(a.id, a);
+    for (const a of [...this.s.households, ...this.s.consumptionFirms, ...this.s.capitalFirms, ...this.s.banks, this.s.centralBank, this.s.government]) {
+      byId.set(a.id, a as unknown as { lags: Record<number, Record<number, number>> });
+    }
     const fieldValue = (agent: AgentId, field: string): number => (byId.get(agent) as unknown as Record<string, number> | undefined)?.[field] ?? 0;
     // Montos en µ anotados por nombre de campo (no son rezagos): etiqueta de `compareState`.
     const AMOUNT_LABEL: Record<string, string> = {
@@ -117,6 +125,10 @@ export class ChainScales implements ScaleSource {
       cashAmount: 'efectivo deseado',
       bailoutCost: 'costo de rescate',
       advancesDemand: 'adelantos de Basilea pedidos',
+      interestReceived: 'intereses de depósitos',
+      totInterestsDeposits: 'intereses pagados a depósitos',
+      creditDemanded: 'crédito pedido',
+      profitsFromCB: 'ganancias del BC',
     };
     const groups = new WeakMap<readonly InputTerm[], number>();
     const scaleOf = (agent: AgentId, w: string, terms: readonly InputTerm[]): number => {
@@ -136,7 +148,8 @@ export class ChainScales implements ScaleSource {
         else {
           const label = FIELD_LABEL[t.field];
           if (!label) throw new Error(`ChainScales: campo sin etiqueta: ${t.field}`);
-          S += Math.abs(t.coef) * this.peek(`${w} ${label}`, fieldValue(agent, t.field));
+          // La etiqueta y el valor son los del agente del término (el de un campo del BC, en el evento 29).
+          S += Math.abs(t.coef) * this.peek(`${wOf(t.agent)} ${label}`, fieldValue(t.agent, t.field));
         }
       }
       return S;
@@ -145,11 +158,18 @@ export class ChainScales implements ScaleSource {
     for (const [key, terms] of rec.values) {
       const lag = /^(\d+):lag:(\d+):(\d+)$/.exec(key);
       const field = /^(\d+):([A-Za-z]+)$/.exec(key);
-      const agent = Number((lag ?? field)?.[1]);
-      if (!lag && !(field && AMOUNT_LABEL[field[2]!])) throw new Error(`ChainScales: clave de valor anotado desconocida: ${key}`);
-      const w = `${prefix.get(agent) ?? 'agente'} ${this.toJ(agent)}`;
+      // Observación de una expectativa (`exp:<id>:<fila>:0`; evento 75, 2026-11-16): en unidades, como un rezago.
+      const exp = /^(\d+):exp:(\d+):(\d+):0$/.exec(key);
+      const agent = Number((lag ?? field ?? exp)?.[1]);
+      if (!lag && !exp && !(field && AMOUNT_LABEL[field[2]!])) throw new Error(`ChainScales: clave de valor anotado desconocida: ${key}`);
+      const w = wOf(agent);
       const propagated = scaleOf(agent, w, terms); // µ
-      if (lag) {
+      if (exp) {
+        const label = `${w} expectativa ${exp[2]}[${exp[3]}][0]`;
+        const e = (byId.get(agent) as unknown as { expectations?: Record<number, { passed: number[][] }> } | undefined)?.expectations?.[Number(exp[2])];
+        const v = e?.passed[Number(exp[3])]?.[0] ?? 0;
+        this.overrides.set(label, this.peek(label, v) + propagated / 1e6);
+      } else if (lag) {
         const label = `${w} rezago ${lag[2]}[${lag[3]}]`;
         const lags = byId.get(agent)?.lags;
         const v = lags?.[Number(lag[2])]?.[Number(lag[3])] ?? 0;

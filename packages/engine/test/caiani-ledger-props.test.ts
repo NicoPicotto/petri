@@ -138,6 +138,12 @@ describe('ledger: propiedades con operaciones al azar', () => {
             debit(L, id, principal, 'bonds');
           }
         }
+        // Desde el 2026-11-16 `cleanup` no condona: un préstamo o adelanto que vence con saldo es un error explícito
+        // (no pasa en el base). Acá las operaciones al azar sí lo producen: el test lo condona antes, a mano.
+        for (const key of Object.keys(L.contracts)) {
+          const c = L.contracts[Number(key)]!;
+          if ((c.kind === 'loan' || c.kind === 'advance') && c.amount > 0 && c.age + 1 > (c.length as number)) writeDown(L, c.id, c.amount);
+        }
         for (const a of L.agents) cleanup(L, a.id);
         expect(checkLedger(L)).toEqual([]);
         expect(checkFlows(L, cp)).toEqual([]);

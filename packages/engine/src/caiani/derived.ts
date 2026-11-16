@@ -88,9 +88,32 @@ export interface DerivedPayment {
   kind?: PaymentKind;
 }
 
+/**
+ * Operación de un contrato fuera de un lote (`open`, `credit`, `debit` del ledger) cuyo monto se calcula a partir de
+ * entradas en µ (decisión de Nico, 2026-11-16: la regla de los montos calculados vale también fuera de los lotes; el
+ * primer caso es el adelanto del evento 37, copia del campo en µ `advancesDemand`). Los términos dan la variación del
+ * **contrato** en esa operación (con el signo de la variación: un `debit` lleva los coeficientes cambiados de signo);
+ * con `field`, la del monto inicial del contrato que se acaba de abrir.
+ */
+export interface DerivedContractFlow {
+  contract: ContractId;
+  terms: InputTerm[];
+  field?: 'initialAmount';
+  /**
+   * La variación (o el monto inicial) en µ como `double`, **antes** del redondeo que hace el evento (la cuota de un
+   * reparto por restos mayores, el interés antes del arrastre). Solo para el control de las anotaciones: compara el error
+   * de entrada verdadero sin el redondeo de salida. Sin `exact`, el control compara la variación registrada.
+   */
+  exact?: number;
+}
+
 /** Registro de los montos calculados (lo crea el arnés; `withInputs`). */
 export class InputRecorder {
   readonly payments: DerivedPayment[] = [];
+  /** Operaciones fuera de un lote (`derivedContract`), en el orden en que se registraron. */
+  readonly contracts: DerivedContractFlow[] = [];
+  /** Valor de un `derivedValue` antes del redondeo del evento (µ, `double`), si el motor lo da: solo para el control. */
+  readonly exactValues = new Map<string, number>();
   /** Clave `agente:clave` (p. ej. `lag:18:50`) → términos. */
   readonly values = new Map<string, InputTerm[]>();
 }
@@ -123,7 +146,22 @@ export function derivedPayment(from: ContractId, to: ContractId, terms: readonly
   if (inputs && terms.length > 0) inputs.payments.push(kind ? { from, to, terms: [...terms], kind } : { from, to, terms: [...terms] });
 }
 
+/**
+ * Anota que la variación del contrato en la operación que se acaba de registrar fuera de un lote (o, con `field`, su
+ * monto inicial) depende de esas entradas (`DerivedContractFlow`).
+ */
+export function derivedContract(contract: ContractId, terms: readonly InputTerm[], field?: 'initialAmount', exact?: number): void {
+  if (!inputs || terms.length === 0) return;
+  const f: DerivedContractFlow = { contract, terms: [...terms] };
+  if (field) f.field = field;
+  if (exact !== undefined) f.exact = exact;
+  inputs.contracts.push(f);
+}
+
 /** Anota que el valor `key` del agente (un `double` de montos, en unidades) depende de esas entradas. */
-export function derivedValue(agent: AgentId, key: string, terms: readonly InputTerm[]): void {
-  if (inputs && terms.length > 0) inputs.values.set(`${agent}:${key}`, [...terms]);
+export function derivedValue(agent: AgentId, key: string, terms: readonly InputTerm[], exact?: number): void {
+  if (inputs && terms.length > 0) {
+    inputs.values.set(`${agent}:${key}`, [...terms]);
+    if (exact !== undefined) inputs.exactValues.set(`${agent}:${key}`, exact);
+  }
 }

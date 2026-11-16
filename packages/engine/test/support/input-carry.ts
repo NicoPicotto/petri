@@ -107,9 +107,21 @@ export class InputCarry {
         this.carried.set(id, (this.carried.get(id) ?? 0) + Math.sign(d) * eps);
       }
     }
+    // Operaciones fuera de un lote (`derivedContract`, 2026-11-16): los términos ya dan la variación del contrato.
+    for (const f of rec.contracts) {
+      const eps = this.epsilon(f.terms);
+      if (eps === 0) continue;
+      const map = f.field === 'initialAmount' ? this.initialCarried : this.carried;
+      map.set(f.contract, (map.get(f.contract) ?? 0) + eps);
+    }
     this.values = rec;
     return this;
   }
+
+  private readonly initialCarried = new Map<number, number>();
+
+  /** Error de entrada (µ) del monto inicial de un contrato abierto en el evento con un monto anotado (`derivedContract`). */
+  readonly initialCarry = (contract: number): number => this.initialCarried.get(contract) ?? 0;
 
   private values: InputRecorder | undefined;
 
