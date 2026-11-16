@@ -220,6 +220,9 @@ const MICRO_FIELDS = {
     creditDemanded: ['ConsumptionFirm.creditDemanded', 'CapitalFirm.creditDemanded'],
     bailoutCost: ['AbstractFirm.bailoutCost', 'AbstractFirm.bailoutCost'],
   },
+  bank: {
+    advancesDemand: 'advancesDemand',
+  },
 } as const;
 
 export function stateFromDump(d: Dump): CaianiState {
@@ -242,6 +245,10 @@ export function stateFromDump(d: Dump): CaianiState {
       const j = d.agents.get(toJ(f.id))!;
       for (const [k, jf] of Object.entries(MICRO_FIELDS.firm)) rec(f.id, k, (f as unknown as Record<string, number>)[k]!, j[jf[i]] as number);
     }
+  }
+  for (const b of s.banks) {
+    const j = d.agents.get(toJ(b.id))!;
+    for (const [f, jf] of Object.entries(MICRO_FIELDS.bank)) rec(b.id, f, (b as unknown as Record<string, number>)[f]!, j[jf] as number);
   }
   // Monto inicial de los préstamos y adelantos (lo usa el capital de las cuotas, evento 20): clave `contrato:<id>:initialAmount`.
   for (const [id, java] of initialAmounts) fields.set(`contrato:${id}:initialAmount`, (s.ledger.contracts[id]!.initialAmount as number) - java);
@@ -424,6 +431,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>, initialAm
       bondInterestRate: j['bondInterestRate'],
       bondPrice: j['bondPrice'],
       bondDemand: j['bondDemand'],
+      advancesDemand: toMicro(j['advancesDemand']),
       selectedBondSupplier: ref(j['selectedBondSupplier']) === null ? null : fromJ(ref(j['selectedBondSupplier'])!),
       bondInterestReceived: toMicro(j['bondInterestReceived']),
       advancesInterests: toMicro(j['advancesInterests']),
@@ -482,6 +490,7 @@ function buildStateFromDump(d: Dump, inputValues: Map<number, number>, initialAm
       interestsOnAdvances: toMicro(jc['interestsOnAdvances']),
       interestsOnBonds: toMicro(jc['interestsOnBonds']),
       bondInterestsReceived: toMicro(jc['bondInterestsReceived']),
+      bondDemand: jc['bondDemand'],
     },
     aggregateLags: lagsOf(meta.aggregate, 'agregados'),
   };
@@ -913,6 +922,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     close(`${w} tasa de bonos`, b.bondInterestRate, j['bondInterestRate']);
     close(`${w} precio de los bonos`, b.bondPrice, j['bondPrice']);
     same(`${w} demanda de bonos`, b.bondDemand, j['bondDemand']);
+    amount(`${w} adelantos de Basilea pedidos`, b.advancesDemand, j['advancesDemand'], undefined, undefined, (opts.derivedValue?.(b.id, 'advancesDemand') ?? 0) * MICRO_PER_UNIT);
     same(`${w} vendedor de bonos`, b.selectedBondSupplier === null ? null : toJ(b.selectedBondSupplier), ref(j['selectedBondSupplier']));
     amount(`${w} intereses de bonos cobrados`, b.bondInterestReceived, j['bondInterestReceived']);
     amount(`${w} intereses de adelantos`, b.advancesInterests, j['advancesInterests']);
@@ -940,8 +950,9 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
       same('gobierno emisión propia tasa', o.rate, it['interestRate']);
       same('gobierno emisión propia vencimiento', o.maturity, it['maturity']);
       same('gobierno emisión propia edad', o.age, it['AbstractItem.age']);
-      // Bond.value = cantidad × precio (constructor de JMAB).
-      close('gobierno emisión propia valor', o.quantity * o.price, it['AbstractItem.value']);
+      // El campo `value` del bono propio no se compara (decisión de Nico, 2026-11-15): JMAB lo fija en el constructor
+      // (`emitBonds`) y `setQuantity` no lo actualiza (eventos 34 y 35); nada lo lee fuera de la serialización, que no se
+      // usa: `Bond.getValue()` lo reemplaza (reglas-caiani.md, sec. 33; caiani-referencia.md).
     }
   }
   const jcb = agentJ(s.centralBank.id);
@@ -949,6 +960,7 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   amount('BC intereses de adelantos', s.centralBank.interestsOnAdvances, jcb['interestsOnAdvances']);
   amount('BC intereses de bonos', s.centralBank.interestsOnBonds, jcb['interestsOnBonds']);
   amount('BC intereses de bonos cobrados', s.centralBank.bondInterestsReceived, jcb['bondInterestsReceived']);
+  same('BC demanda de bonos', s.centralBank.bondDemand, jcb['bondDemand']);
 
   return { diffs, total, counts, amountFields, doubleFieldsOver, scaled };
 }

@@ -278,6 +278,8 @@ export interface RuleParams {
   governmentBondPrice: number; // 2869
   /** `BondDemandStrategyReserves.liquidityRatio` de los bancos (evento 31): reservas que guardan por cada peso de depósitos. */
   bankBondLiquidityRatio: number; // 2509
+  /** `BaselIIIReserveRequirementsBLR.liquidityRatio` de los bancos (evento 36): ratio de liquidez obligatorio (paper, sec. 3: 8%). */
+  bankBaselLiquidityRatio: number; // 2483
   /** `SelectionRandomRobinBuyerMixer.nbSellers` del mercado de depósitos: bancos que ve cada depositante (evento 27). */
   depositMarketSellers: number; // 418
   /**
@@ -374,6 +376,7 @@ export const RULES: Readonly<RuleParams> = {
   governmentBondMaturity: 1,
   governmentBondPrice: 1,
   bankBondLiquidityRatio: 0.258026342,
+  bankBaselLiquidityRatio: 0.08,
   depositMarketSellers: 3,
   depositSwitchingLambda: LN2 / 0.15,
   depositSwitchingPayOrReceive: false,

@@ -105,6 +105,7 @@ export class ChainScales implements ScaleSource {
       debtInterests: 'intereses de la deuda',
       creditDemanded: 'crédito pedido',
       bailoutCost: 'costo de rescate',
+      advancesDemand: 'adelantos de Basilea pedidos',
     };
     const byId = new Map<AgentId, { lags: Record<number, Record<number, number>> }>();
     for (const a of [...this.s.households, ...this.s.consumptionFirms, ...this.s.capitalFirms, ...this.s.banks]) byId.set(a.id, a);
@@ -115,6 +116,7 @@ export class ChainScales implements ScaleSource {
       depositAmount: 'depósitos deseados',
       cashAmount: 'efectivo deseado',
       bailoutCost: 'costo de rescate',
+      advancesDemand: 'adelantos de Basilea pedidos',
     };
     const groups = new WeakMap<readonly InputTerm[], number>();
     const scaleOf = (agent: AgentId, w: string, terms: readonly InputTerm[]): number => {

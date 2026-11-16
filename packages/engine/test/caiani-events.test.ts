@@ -39,6 +39,14 @@ import {
   bondSupplyEvent,
   bondMarketFirstStepEvent,
   bondDemandEvent,
+  reservesDemandBondEvent,
+  reservesMarketBondEvent,
+  cbBondsPurchasesEvent,
+  retireExhaustedBondOffer,
+  bondMarketSecondStepEvent,
+  reservesDemandBaselEvent,
+  reservesMarketBaselEvent,
+  reservesMarketEvent,
   javaRint,
   writeDown,
   toMicro,
@@ -71,6 +79,7 @@ import {
   open,
   EXPECTATION,
   contractIds,
+  netFinancialWorths,
   contractOf,
   type AdaptiveRateParams,
   realCapitalDemand,
@@ -2310,5 +2319,338 @@ describe('evento 31 (demanda de bonos): casos a mano', () => {
     const { s } = setup(10);
     s.government.bondOffer = null;
     expect(() => bondDemandEvent(s)).toThrow(/no tiene emisión/);
+  });
+});
+
+describe('eventos 32 y 33 (adelantos para comprar bonos; mercado de reservas por bonos): casos a mano', () => {
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 1;
+    s.centralBank.active[MKT.ADVANCES] = true; // lo hace el evento 0
+    return s;
+  };
+  const snapshot = (s: ReturnType<typeof setup>) => JSON.stringify(s);
+
+  it('evento 32: no cambia nada (la llamada está comentada en JMAB)', () => {
+    const s = setup();
+    const before = snapshot(s);
+    reservesDemandBondEvent(s);
+    expect(snapshot(s)).toBe(before);
+  });
+
+  it('evento 33 con ningún banco activo en MKT_ADVANCES: mercado cerrado, no cambia nada ni sortea', () => {
+    const s = setup();
+    const before = snapshot(s);
+    reservesMarketBondEvent(s, new PrngCaianiRng(Rng.fromSeed(7)));
+    expect(snapshot(s)).toBe(before);
+  });
+
+  it('evento 33 con un banco activo pero el BC inactivo: cerrado (AbstractMarketMixer.closed)', () => {
+    const s = setup();
+    s.banks[3]!.active[MKT.ADVANCES] = true;
+    s.centralBank.active[MKT.ADVANCES] = false;
+    const before = snapshot(s);
+    reservesMarketBondEvent(s, new PrngCaianiRng(Rng.fromSeed(7)));
+    expect(snapshot(s)).toBe(before);
+  });
+
+  it('evento 33 abierto (banco y BC activos; no pasa en el base): la función compartida con el 37 da el adelanto y apaga al banco', () => {
+    const s = setup();
+    const b = s.banks[3]!;
+    b.active[MKT.ADVANCES] = true;
+    b.advancesDemand = 2_000_000;
+    reservesMarketBondEvent(s, new PrngCaianiRng(Rng.fromSeed(7)));
+    expect(b.active[MKT.ADVANCES]).toBe(false);
+    expect(contractOf(s.ledger, contractIds(s.ledger, b.id, 'liabilities', 'advance').at(-1)!)).toMatchObject({ amount: 2_000_000, age: 0 });
+  });
+});
+
+describe('evento 34 (compras de bonos del BC): casos a mano', () => {
+  /**
+   * Tick 50 de la semilla 12345: cuenta del gobierno en −100.666,629447 después del evento 29, emisión de 100.667 bonos y
+   * demandas de los bancos que suman 63.662 (el BC compra 37.005, como en el volcado).
+   */
+  const setup = (supply: number, demands: number[]) => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 50;
+    const L = s.ledger;
+    const account = contractOf(L, contractIds(L, s.government.id, 'assets', 'reserves')[0]!);
+    account.amount = -100_666_629_447; // solo para el caso (antes de beginPeriod)
+    s.government.bondOffer = { quantity: supply, price: 1, rate: 0.0025, maturity: 1, age: 0 };
+    s.government.active[MKT.BONDS] = true;
+    s.banks.forEach((b, i) => {
+      b.bondDemand = demands[i] ?? 0;
+      b.active[MKT.BONDS] = b.bondDemand > 0; // evento 31
+    });
+    return { s, L, account };
+  };
+  const tick50 = [9_000, 8_000, 7_000, 6_000, 5_000, 4_000, 3_000, 2_000, 1_000, 18_662]; // Σ = 63.662
+
+  it('tick 50: S = 100.667, B = 63.662: el BC compra 37.005 (bono nuevo al final de las dos listas, cuenta del gobierno +37.005, emisión 63.662)', () => {
+    const { s, L, account } = setup(100_667, tick50);
+    const cbBonds0 = [...contractIds(L, s.centralBank.id, 'assets', 'bond')]; // copias: contractIds devuelve la lista viva
+    const govBonds0 = [...contractIds(L, s.government.id, 'liabilities', 'bond')];
+    const nw = netFinancialWorths(L);
+    const cp = beginPeriod(L);
+    cbBondsPurchasesEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(s.centralBank.bondDemand).toBe(37_005);
+    const cbBonds = contractIds(L, s.centralBank.id, 'assets', 'bond');
+    const govBonds = contractIds(L, s.government.id, 'liabilities', 'bond');
+    expect(cbBonds.slice(0, -1)).toEqual(cbBonds0);
+    expect(govBonds.slice(0, -1)).toEqual(govBonds0);
+    const id = cbBonds[cbBonds.length - 1]!;
+    expect(govBonds[govBonds.length - 1]).toBe(id);
+    const b = contractOf(L, id);
+    expect(b).toMatchObject({ holder: s.centralBank.id, issuer: s.government.id, amount: 37_005_000_000, quantity: 37_005, price: 1, rate: 0.0025, maturity: 1, age: 0 });
+    expect(account.amount).toBe(-100_666_629_447 + 37_005_000_000);
+    expect(s.government.bondOffer).toEqual({ quantity: 63_662, price: 1, rate: 0.0025, maturity: 1, age: 0 });
+    expect(s.government.active[MKT.BONDS]).toBe(true);
+    expect(netFinancialWorths(L)).toEqual(nw); // ningún patrimonio cambia
+  });
+
+  it('solo cuentan los bancos activos en el mercado de bonos', () => {
+    const { s } = setup(100_667, tick50);
+    s.banks[0]!.active[MKT.BONDS] = false; // 9.000 que no cuentan
+    cbBondsPurchasesEvent(s);
+    expect(s.centralBank.bondDemand).toBe(37_005 + 9_000);
+  });
+
+  it('B ≥ S (los bancos piden toda la emisión o más): el BC no compra nada y su bondDemand queda en S − B (≤ 0)', () => {
+    for (const supply of [63_662, 60_000]) {
+      const { s, L } = setup(supply, tick50);
+      const before = JSON.stringify(L);
+      cbBondsPurchasesEvent(s);
+      expect(s.centralBank.bondDemand).toBe(supply - 63_662);
+      expect(JSON.stringify(L)).toBe(before);
+      expect(s.government.bondOffer?.quantity).toBe(supply);
+      expect(s.government.active[MKT.BONDS]).toBe(true);
+    }
+  });
+
+  it('B = 0 (ningún banco pide): el BC compra toda la emisión, que deja de existir, y el gobierno queda inactivo (retireExhaustedBondOffer)', () => {
+    const { s, L, account } = setup(1_234, []);
+    const cp = beginPeriod(L);
+    cbBondsPurchasesEvent(s);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(s.centralBank.bondDemand).toBe(1_234);
+    expect(account.amount).toBe(-100_666_629_447 + 1_234_000_000);
+    expect(s.government.bondOffer).toBeNull();
+    expect(s.government.active[MKT.BONDS]).toBe(false);
+  });
+
+  it('retireExhaustedBondOffer no toca una emisión con bonos ni la falta de emisión', () => {
+    const { s } = setup(5, []);
+    retireExhaustedBondOffer(s);
+    expect(s.government.bondOffer?.quantity).toBe(5);
+    s.government.bondOffer = null;
+    retireExhaustedBondOffer(s);
+    expect(s.government.bondOffer).toBeNull();
+  });
+
+  it('sin emisión del gobierno: error explícito (JMAB: NullPointerException)', () => {
+    const { s } = setup(10, []);
+    s.government.bondOffer = null;
+    expect(() => cbBondsPurchasesEvent(s)).toThrow(/no tiene emisión/);
+  });
+});
+
+describe('evento 35 (segunda etapa del mercado de bonos): casos a mano', () => {
+  /** Emisión de `supply` bonos en manos del gobierno; cada banco i pide demands[i] (activo si > 0) y ya eligió al gobierno. */
+  const setup = (supply: number, demands: number[]) => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 50;
+    const g = s.government;
+    g.bondOffer = { quantity: supply, price: 1, rate: 0.0025, maturity: 1, age: 0 };
+    g.active[MKT.BONDS] = true;
+    s.banks.forEach((b, i) => {
+      b.selectedBondSupplier = g.id;
+      b.bondPrice = 1;
+      b.bondDemand = demands[i] ?? 0;
+      b.active[MKT.BONDS] = b.bondDemand > 0;
+    });
+    return { s, L: s.ledger, rng: new PrngCaianiRng(Rng.fromSeed(7)) };
+  };
+  const reservesOf = (s: ReturnType<typeof setup>['s'], id: number) => contractOf(s.ledger, contractIds(s.ledger, id, 'assets', 'reserves')[0]!);
+  const govAccount = (s: ReturnType<typeof setup>['s']) => reservesOf(s, s.government.id);
+
+  it('cada banco activo compra su demanda en el orden de la mezcla (en el lugar, sobre la población); la emisión se agota y el gobierno queda inactivo', () => {
+    const demands = [500, 400, 0, 300, 200, 100, 50, 25, 10, 5]; // Σ = 1.590
+    const { s, L, rng } = setup(1_590, demands);
+    const list = s.populations.banks;
+    const before = [...list];
+    const res0 = s.banks.map((b) => reservesOf(s, b.id).amount);
+    const gov0 = govAccount(s).amount;
+    const govBonds0 = [...contractIds(L, s.government.id, 'liabilities', 'bond')];
+    const nw = netFinancialWorths(L);
+    const cp = beginPeriod(L);
+    bondMarketSecondStepEvent(s, rng);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(s.populations.banks).toBe(list); // en el lugar
+    expect([...list].sort((a, b) => a - b)).toEqual([...before].sort((a, b) => a - b));
+    expect(list).not.toEqual(before);
+    // Bonos nuevos al final de los pasivos del gobierno, en el orden de la mezcla (solo los que pidieron).
+    const buyersInOrder = list.filter((id) => demands[s.banks.findIndex((b) => b.id === id)]! > 0);
+    const newGov = contractIds(L, s.government.id, 'liabilities', 'bond').slice(govBonds0.length);
+    expect(newGov.map((c) => contractOf(L, c).holder)).toEqual(buyersInOrder);
+    s.banks.forEach((b, i) => {
+      const d = demands[i]!;
+      expect(reservesOf(s, b.id).amount).toBe(res0[i]! - d * 1_000_000);
+      expect(b.active[MKT.BONDS]).toBe(false);
+      const own = contractIds(L, b.id, 'assets', 'bond').map((c) => contractOf(L, c)).filter((c) => c.age === 0 && c.issuer === s.government.id);
+      if (d > 0) expect(own.at(-1)).toMatchObject({ amount: d * 1_000_000, quantity: d, price: 1, rate: 0.0025, maturity: 1, age: 0 });
+    });
+    expect(govAccount(s).amount).toBe(gov0 + 1_590_000_000);
+    expect(s.government.bondOffer).toBeNull(); // retireExhaustedBondOffer
+    expect(s.government.active[MKT.BONDS]).toBe(false);
+    expect(netFinancialWorths(L)).toEqual(nw);
+  });
+
+  it('banco activo sin emisión (ya agotada): no hace nada y sigue activo (ausencia de acción)', () => {
+    const { s, L, rng } = setup(10, [10, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    s.government.bondOffer = null;
+    const before = JSON.stringify(L.contracts);
+    bondMarketSecondStepEvent(s, rng);
+    expect(JSON.stringify(L.contracts)).toBe(before);
+    expect(s.banks[0]!.active[MKT.BONDS]).toBe(true);
+  });
+
+  it('un banco activo que pide 0: queda inactivo sin comprar', () => {
+    // Emisión de sobra (15 para una demanda de 10): el banco que pide 0 la encuentra en cualquier orden de la mezcla.
+    const { s, L, rng } = setup(15, [10]);
+    const b1 = s.banks[1]!;
+    b1.active[MKT.BONDS] = true; // demanda 0
+    const bonds1 = [...contractIds(L, b1.id, 'assets', 'bond')];
+    const res1 = reservesOf(s, b1.id).amount;
+    bondMarketSecondStepEvent(s, rng);
+    expect(b1.active[MKT.BONDS]).toBe(false);
+    expect(contractIds(L, b1.id, 'assets', 'bond')).toEqual(bonds1);
+    expect(reservesOf(s, b1.id).amount).toBe(res1);
+    expect(s.government.bondOffer?.quantity).toBe(5); // el banco 0 compró 10
+    expect(s.government.active[MKT.BONDS]).toBe(true);
+  });
+
+  it('racionamiento (pide más de lo que queda): error explícito (no portado; no pasa en el base)', () => {
+    const { s, rng } = setup(5, [10]);
+    expect(() => bondMarketSecondStepEvent(s, rng)).toThrow(/racionamiento/);
+  });
+
+  it('reservas insuficientes: error explícito (no portado; no pasa en el base)', () => {
+    const { s, rng } = setup(1_000_000_000, [1_000_000_000]);
+    expect(() => bondMarketSecondStepEvent(s, rng)).toThrow(/no tiene reservas/);
+  });
+});
+
+describe('evento 36 (demanda de adelantos de Basilea): casos a mano', () => {
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 50;
+    return { s, L: s.ledger };
+  };
+  const sum = (L: ReturnType<typeof setup>['L'], id: number, side: 'assets' | 'liabilities', kind: 'deposit' | 'cash' | 'reserves') =>
+    contractIds(L, id, side, kind).reduce((a, c) => a + contractOf(L, c).amount, 0);
+
+  it('advancesDemand = round(0,08 × depósitos − (efectivo + reservas)), con signo; sin pedido positivo no se activa', () => {
+    const { s, L } = setup();
+    const before = JSON.stringify(L.contracts);
+    reservesDemandBaselEvent(s);
+    for (const b of s.banks) {
+      const expected = Math.round(0.08 * sum(L, b.id, 'liabilities', 'deposit') - (sum(L, b.id, 'assets', 'cash') + sum(L, b.id, 'assets', 'reserves')));
+      expect(b.advancesDemand).toBe(expected);
+      expect(b.advancesDemand).toBeLessThan(0); // estado inicial: reservas de sobra
+      expect(b.active[MKT.ADVANCES]).toBe(false);
+    }
+    expect(JSON.stringify(L.contracts)).toBe(before); // no mueve contratos
+  });
+
+  it('un banco por debajo del 8%: pide la diferencia y queda activo en MKT_ADVANCES; el evento nunca apaga la bandera', () => {
+    const { s, L } = setup();
+    const b = s.banks[2]!;
+    const reserves = contractOf(L, contractIds(L, b.id, 'assets', 'reserves')[0]!);
+    const D = sum(L, b.id, 'liabilities', 'deposit');
+    reserves.amount = Math.round(0.05 * D); // solo para el caso
+    reservesDemandBaselEvent(s);
+    expect(b.advancesDemand).toBe(Math.round(0.08 * D - (sum(L, b.id, 'assets', 'cash') + reserves.amount)));
+    expect(b.advancesDemand).toBeGreaterThan(0);
+    expect(b.active[MKT.ADVANCES]).toBe(true);
+    const other = s.banks[3]!;
+    other.active[MKT.ADVANCES] = true; // de antes: el evento no la apaga
+    reservesDemandBaselEvent(s);
+    expect(other.advancesDemand).toBeLessThan(0);
+    expect(other.active[MKT.ADVANCES]).toBe(true);
+  });
+});
+
+describe('evento 37 (mercado de reservas de Basilea; función compartida con el 33): casos a mano', () => {
+  const setup = () => {
+    const s = initialize(new PrngCaianiRng(Rng.fromSeed(1)));
+    s.round = 292;
+    s.centralBank.active[MKT.ADVANCES] = true; // evento 0
+    return { s, L: s.ledger, rng: new PrngCaianiRng(Rng.fromSeed(7)) };
+  };
+  const reservesOf = (s: ReturnType<typeof setup>['s'], id: number) => contractOf(s.ledger, contractIds(s.ledger, id, 'assets', 'reserves')[0]!);
+
+  it('cerrado (ningún banco activo): nada, sin sorteo ni mezcla', () => {
+    const { s, L } = setup();
+    const before = JSON.stringify({ c: L.contracts, m: s.markets.reservesBasel });
+    const rng = { shuffle: () => { throw new Error('no debería sortear'); } } as unknown as Parameters<typeof reservesMarketBaselEvent>[1];
+    reservesMarketBaselEvent(s, rng);
+    expect(JSON.stringify({ c: L.contracts, m: s.markets.reservesBasel })).toBe(before);
+  });
+
+  it('banco 8256 del tick 292 (pide 994,90): adelanto al final de las dos listas (tasa 0,005, plazo 1, solo interés, edad 0), reservas + 994,90, banco inactivo; la lista propia se mezcla y la población no', () => {
+    const { s, L, rng } = setup();
+    const b = s.banks[3]!;
+    b.advancesDemand = 994_902_089;
+    b.active[MKT.ADVANCES] = true;
+    const list = s.markets.reservesBasel.buyers;
+    const before = [...list];
+    const pop = [...s.populations.banks];
+    const res0 = reservesOf(s, b.id).amount;
+    const cbAdv0 = [...contractIds(L, s.centralBank.id, 'assets', 'advance')];
+    const nw = netFinancialWorths(L);
+    const cp = beginPeriod(L);
+    reservesMarketBaselEvent(s, rng);
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(s.markets.reservesBasel.buyers).toBe(list);
+    expect([...list].sort((x, y) => x - y)).toEqual([...before].sort((x, y) => x - y));
+    expect(list).not.toEqual(before);
+    expect(s.populations.banks).toEqual(pop);
+    const cbAdv = contractIds(L, s.centralBank.id, 'assets', 'advance');
+    expect(cbAdv.slice(0, -1)).toEqual(cbAdv0);
+    const adv = contractOf(L, cbAdv[cbAdv.length - 1]!);
+    expect(contractIds(L, b.id, 'liabilities', 'advance').at(-1)).toBe(adv.id);
+    expect(adv).toMatchObject({ holder: s.centralBank.id, issuer: b.id, amount: 994_902_089, initialAmount: 994_902_089, rate: 0.005, length: 1, amortization: 'onlyInterest', age: 0 });
+    expect(reservesOf(s, b.id).amount).toBe(res0 + 994_902_089);
+    expect(b.active[MKT.ADVANCES]).toBe(false);
+    expect(netFinancialWorths(L)).toEqual(nw);
+  });
+
+  it('la misma función sobre la lista del 33 (reservesBonds) hace lo mismo con su propia lista', () => {
+    const { s, rng } = setup();
+    const b = s.banks[0]!;
+    b.advancesDemand = 5_000_000;
+    b.active[MKT.ADVANCES] = true;
+    const basel = [...s.markets.reservesBasel.buyers];
+    reservesMarketEvent(s, rng, 'reservesBonds');
+    expect(b.active[MKT.ADVANCES]).toBe(false);
+    expect(s.markets.reservesBasel.buyers).toEqual(basel);
+  });
+
+  it('errores explícitos: banco activo con pedido ≤ 0; banco sin cuenta de reservas en el BC', () => {
+    const a = setup();
+    a.s.banks[1]!.active[MKT.ADVANCES] = true;
+    a.s.banks[1]!.advancesDemand = 0;
+    expect(() => reservesMarketBaselEvent(a.s, a.rng)).toThrow(/pedido de 0 µ ≤ 0/);
+    const c = setup();
+    const b = c.s.banks[1]!;
+    b.active[MKT.ADVANCES] = true;
+    b.advancesDemand = 1_000_000;
+    (contractIds(c.L, b.id, 'assets', 'reserves') as number[]).length = 0; // lista viva: sin cuentas de reservas (solo para el caso)
+    expect(() => reservesMarketBaselEvent(c.s, c.rng)).toThrow(/no tiene cuenta de reservas/);
   });
 });

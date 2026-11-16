@@ -421,6 +421,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
       bondPrice: 0, // constructor de JMAB (init.jsonl: 0,0)
       selectedBondSupplier: null,
       bondDemand: 0,
+      advancesDemand: 0,
       bondInterestReceived: 0,
       advancesInterests: 0,
       dividends: 0,
@@ -528,7 +529,7 @@ export function initialize(rng: CaianiRng, options: InitOptions = {}): CaianiSta
     capitalFirms,
     banks,
     government,
-    centralBank: { ...newFlags(), id: cb, interestsOnAdvances: 0, interestsOnBonds: 0, bondInterestsReceived: 0 },
+    centralBank: { ...newFlags(), id: cb, interestsOnAdvances: 0, interestsOnBonds: 0, bondInterestsReceived: 0, bondDemand: 0 },
     aggregateLags,
   };
 }

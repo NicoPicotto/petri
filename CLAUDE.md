@@ -1,10 +1,10 @@
 # Petri — simulador de economía política (nombre de trabajo)
 
-## Estado actual (2026-11-14)
+## Estado actual (2026-11-16)
 
 - **Modelo base: Caiani et al. (2016)**, portado fielmente y verificado contra su código (JMAB, el `.jar` del paper); las particularidades argentinas entran después como extensiones documentadas ([docs/cambio-de-enfoque.md](docs/cambio-de-enfoque.md)). La Fase 0 está cerrada y la app la sigue usando hasta que el port pase sus criterios.
-- **P0 (referencia y oráculo), P1 (ledger en µ) y P2 (inicialización, V1): hechos.** **P3 (reglas, V3 por evento contra el oráculo): eventos 0 a 31 portados y verificados** (tandas 26–28 y 29–31 cerradas).
-- **Próximo paso:** evento 32 en adelante (reservas, compras del BC y segunda etapa del mercado de bonos, eventos 32–37; qué mirar de cada uno en la sec. 15 de reglas-caiani), después los del final del tick (74 y 75); describir cada regla contra JMAB y esperar el OK de Nico antes de portarla.
+- **P0 (referencia y oráculo), P1 (ledger en µ) y P2 (inicialización, V1): hechos.** **P3 (reglas, V3 por evento contra el oráculo): eventos 0 a 37 portados y verificados** (tandas 26–28, 29–31 y 32–37 cerradas; la 32–37 con la vigilancia del oráculo de 34–37).
+- **Próximo paso:** los eventos del final del tick (74 y 75) y la V3 encadenada que cruza ticks (obligatoria para cerrar P3); qué mirar, volcados a regenerar y lo que hay que definir, en la sec. 15 de reglas-caiani. Describir cada regla contra JMAB y esperar el OK de Nico antes de portarla. Una rama que no corre en el base se porta solo si es ausencia de acción o comparte función con otra que un V3 verifica; si no, error explícito confirmado con el oráculo (reglas-caiani, sec. 1).
 - **Detalle:** plan en [docs/plan-port-caiani.md](docs/plan-port-caiani.md); reglas, método del V3 y para retomar en [docs/reglas-caiani.md](docs/reglas-caiani.md) (sec. 1, 2 y 15); pendientes en [docs/pendientes.md](docs/pendientes.md); historia del estado en [docs/bitacora-port.md](docs/bitacora-port.md).
 - **Licencia:** GPL-3.0-or-later; encabezado obligatorio en los archivos portados (plantilla en `docs/arquitectura.md`). El código de Caiani está en `reference/`, fuera de git (`reference/README.md`).
 

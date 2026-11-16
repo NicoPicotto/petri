@@ -252,6 +252,11 @@ export interface BankState extends AgentFlags {
   /** `Bank.bondDemand`: bonos que pide (evento 31; entero; no se pone en 0 entre ticks). */
   bondDemand: number;
   /**
+   * `Bank.advancesDemand` (µ, con signo): adelantos de Basilea que pide al BC (evento 36: 0,08 × depósitos − (efectivo +
+   * reservas)); no se pone en 0 entre ticks. Es el monto del adelanto del evento 37.
+   */
+  advancesDemand: Micro;
+  /**
    * `Bank.bondInterestReceived` (µ): interés del último bono que le pagó el gobierno en el evento 22
    * (`setBondInterestsReceived` asigna, no suma).
    */
@@ -305,6 +310,11 @@ export interface CentralBankState extends AgentFlags {
   interestsOnBonds: Micro;
   /** `CentralBank.bondInterestsReceived` (µ): interés del último bono que le pagó el gobierno (evento 22; asigna). */
   bondInterestsReceived: Micro;
+  /**
+   * `CentralBank.bondDemand` (`int`): bonos que compra en el evento 34, oferta − demanda de los bancos; puede quedar
+   * negativo (los bancos piden toda la emisión o más). No se pone en 0 entre ticks; solo lo lee la serialización de JMAB.
+   */
+  bondDemand: number;
 }
 
 export function newFlags(): AgentFlags {

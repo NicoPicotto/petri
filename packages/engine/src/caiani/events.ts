@@ -3081,8 +3081,9 @@ export const SITE_BOND_FIRST = 'BrochureRandomRobinBuyerMixer.invokeFirstInterac
  * `BrochureRandomRobinBuyerMixer.invokeFirstInteractions` 45–52; aprobado por Nico el 2026-11-15, reglas-caiani.md,
  * sec. 29):
  * - los compradores son la lista de la **población** de bancos (`bondMarketPopulation`, `buyersList` = `banks`): se
- *   mezcla en el lugar, sin mirar quién está activo y sin chequeo de mercado cerrado. El orden queda para el resto del
- *   tick y para el siguiente (lo leen los eventos 6, 7, 24 y 28 del tick siguiente y el 34 de este);
+ *   mezcla en el lugar, sin mirar quién está activo y sin chequeo de mercado cerrado. Este orden lo lee el evento 34; la
+ *   segunda etapa (evento 35) vuelve a mezclar la misma lista, y el orden que cruza al tick siguiente (eventos 6, 7, 24 y
+ *   28) es el del 35 (reglas-caiani.md, sec. 29, corrección del 2026-11-15);
  * - cada banco, en ese orden, recibe la lista de vendedores (solo el gobierno) y guarda (`Bank.onAgentArrival` 340–345):
  *   el vendedor (el primero), el precio de sus bonos (`getBondPrice`, 1) y su tasa (`getBondInterestRate`, la que fijó el
  *   evento 29). La tasa es el piso de la de los préstamos que lee el evento 10 del tick siguiente.
@@ -3161,4 +3162,258 @@ export function bondDemandEvent(s: CaianiState): void {
     record(`${SITE_BOND_DEMAND} rint`, b.bondDemand > k, x * MICRO_PER_UNIT, (k + 0.5) * MICRO_PER_UNIT, 'amount', undefined, b.id);
     if (b.bondDemand > 0) b.active[MKT.BONDS] = true;
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 32: demanda de adelantos para comprar bonos (vacío en el base)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Evento 32, `reservesDemandBondTic` (TIC_RESERVEDEMANDBOND): solo lo escuchan los bancos (XML 2231), y en
+ * `Bank.onTicArrived` (218–220) la llamada está comentada (`//determineAdvancesDemandBond();`, y el método también,
+ * 289–297): **no hace nada**. Verificado contra el oráculo (2026-11-15): en las diez corridas de referencia el volcado
+ * después del evento 32 es idéntico byte a byte al de después del 31, y el evento no tiene sorteos
+ * (reglas-caiani.md, sec. 31). Se mantiene como función para conservar el mapa del tick.
+ */
+export function reservesDemandBondEvent(_s: CaianiState): void {
+  // Sin efecto, como en JMAB.
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 33: mercado de reservas para comprar bonos (cerrado en el base)
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_RESERVES_MARKET = 'RandomRobinBuyerMixer.invokeInteractions';
+
+/**
+ * Evento 33, `reservesMarketBondTic` (TIC_RESERVEMARKETBOND): el mercado `reservesMarketBonds` (XML 468–486), con su lista
+ * propia (`s.markets.reservesBonds`). Es `reservesMarketEvent`, la misma función que el evento 37 (decisión de Nico,
+ * 2026-11-15: el error explícito del 33 se reemplazó recién después de verificar en el V3 del 37, tick 292 de la semilla
+ * 102, que el mecanismo apaga al banco; reglas-caiani.md, sec. 32 y 36). En el base está siempre cerrado, por
+ * construcción: solo el evento 36 activa a un banco en `MKT_ADVANCES`, el 37 lo atiende enseguida y lo apaga siempre, y
+ * entre el 37 y el 33 del tick siguiente nada lo activa (sec. 32; se cuenta en la vigilancia de 34–37).
+ */
+export function reservesMarketBondEvent(s: CaianiState, rng: CaianiRng): void {
+  reservesMarketEvent(s, rng, 'reservesBonds');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 34: compras de bonos del BC
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_CB_BONDS = 'CentralBank.determineCBBondsPurchases';
+
+/**
+ * Emisión agotada: si a la emisión propia del gobierno no le quedan bonos, deja de existir y el gobierno queda inactivo
+ * en el mercado de bonos (`CentralBank.determineCBBondsPurchases` 192–195; en el evento 35, `BondMechanism`). En el port
+ * la emisión no es un contrato (`bondOffer`; ledger-contratos.md, sec. 2.2): sacarla es dejar la oferta en `null`.
+ * **Una sola función para los eventos 34 y 35** (decisión de Nico, 2026-11-15): en el 34 esta rama (los bancos no piden
+ * nada) no corre en el base, y su verificación es la del V3 del 35; si al portar el 35 la limpieza resulta distinta, la
+ * rama del 34 pasa a error explícito (reglas-caiani.md, sec. 33).
+ */
+export function retireExhaustedBondOffer(s: CaianiState): void {
+  const g = s.government;
+  if (g.bondOffer !== null && g.bondOffer.quantity === 0) {
+    g.bondOffer = null;
+    g.active[MKT.BONDS] = false;
+  }
+}
+
+/**
+ * Evento 34, `cbBondsPurchasesTic` (TIC_CBBONDSPURCHASES): solo el BC (`CentralBank.onTicArrived` 156 →
+ * `determineCBBondsPurchases` 164–198; aprobado por Nico el 2026-11-15, reglas-caiani.md, sec. 33):
+ * - B = Σ `bondDemand` de los bancos activos en `MKT_BONDS`, en el orden de la población (168–173; enteros);
+ * - S = cantidad de la emisión propia (`getBondSupply`, `(int)`); sin emisión, error explícito (JMAB:
+ *   `NullPointerException` en 177, antes del chequeo de `null` de 179, que es código muerto);
+ * - `bondDemand` del BC = S − B (entero; puede quedar negativo);
+ * - si es > 0: bono nuevo de q = S − B bonos, con el precio, la tasa y el vencimiento de la emisión, al final de los
+ *   activos del BC y de los pasivos del gobierno; la emisión baja q; la cuenta del gobierno en el BC sube precio × q
+ *   (el BC crea las reservas: `credit`, sin otra contrapartida; 182–190). Ningún patrimonio cambia;
+ * - emisión agotada: `retireExhaustedBondOffer` (192–195).
+ * Con B ≥ S no hace nada más que guardar `bondDemand`. Sin sorteos; las comparaciones son entre enteros. El monto
+ * precio × q sale de un entero y de un parámetro: no hereda error de entrada.
+ */
+export function cbBondsPurchasesEvent(s: CaianiState): void {
+  const L = s.ledger;
+  const g = s.government;
+  const cb = s.centralBank;
+  let B = 0;
+  for (const id of s.populations.banks) {
+    const b = bankById(s, id);
+    if (b.active[MKT.BONDS]) B += b.bondDemand;
+  }
+  const offer = g.bondOffer;
+  if (offer === null) {
+    throw new Error(`${SITE_CB_BONDS}: el gobierno no tiene emisión (JMAB: NullPointerException; no pasa en 7 semillas × 400 trimestres)`);
+  }
+  const S = Math.trunc(offer.quantity); // `(int)`
+  cb.bondDemand = S - B;
+  if (cb.bondDemand > 0) {
+    const q = cb.bondDemand;
+    const amount = toMicro(offer.price * q);
+    open(L, 'bond', cb.id, g.id, amount, { quantity: q, price: offer.price, maturity: offer.maturity, rate: offer.rate, age: 0 }, 'bonds');
+    offer.quantity -= q;
+    const account = contractIds(L, g.id, 'assets', 'reserves')[0];
+    if (account === undefined) throw new Error('gobierno sin cuenta en el BC');
+    credit(L, account, amount, 'bonds');
+    retireExhaustedBondOffer(s);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 35: segunda etapa del mercado de bonos
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BOND_SECOND = 'BrochureRandomRobinBuyerMixer.invokeSecondInteractions';
+export const SITE_BOND_MECHANISM = 'BondMechanism.execute';
+
+/**
+ * Evento 35, `bondMarket2Tic` (TIC_BONDMARKET2): segunda etapa del `BrochureMarket` de bonos
+ * (`AbstractTwoStepMarketSimulation.eventOccurred` 265–271 → `BrochureMarket.secondStep` 31–33 →
+ * `BrochureRandomRobinBuyerMixer.invokeSecondInteractions` 54–64; aprobado por Nico el 2026-11-15, reglas-caiani.md,
+ * sec. 34):
+ * - mezcla en el lugar la lista de compradores, que es la de la **población** de bancos, sin chequeo de mercado cerrado
+ *   (es el orden que cruza al tick siguiente);
+ * - cada banco activo en `MKT_BONDS`, en ese orden, compra al vendedor del evento 30 (`Bank.onAgentArrival` 346–347 →
+ *   `BondMechanism.execute` 59–112):
+ *   - sin emisión (ya agotada): no hace nada y el banco sigue activo (61–62; ausencia de acción, portada);
+ *   - q = min(`bondDemand`, `(int)` emisión); si q = demanda, el banco queda inactivo (67–71). **Racionamiento
+ *     (q < demanda): error explícito** (decisión de Nico, 2026-11-15: lógica propia que ningún V3 ejercita; no pasa en el
+ *     base porque el evento 34 deja exactamente la suma de las demandas);
+ *   - paga desde su primera cuenta de reservas (`getPayingStocks`, `reallocateLiquidity` sin efecto con una sola).
+ *     **Reservas < q × precio: error explícito** (86–94; misma decisión). La comparación es una decisión registrada,
+ *     en µ;
+ *   - compra (q > 0): reservas del banco → cuenta del gobierno en el BC (`CentralBank.transfer` 228–232; `pay` directo:
+ *     un pago por banco, monto exacto en µ); bono nuevo (banco, gobierno, q, precio, tasa, vencimiento de la emisión) al
+ *     final de las dos listas; la emisión baja q (95–103); emisión agotada: `retireExhaustedBondOffer` (104–108, la
+ *     misma función que el evento 34).
+ */
+export function bondMarketSecondStepEvent(s: CaianiState, rng: CaianiRng): void {
+  const L = s.ledger;
+  const g = s.government;
+  const buyers = s.populations.banks;
+  rng.shuffle(SITE_BOND_SECOND, 'buyers', buyers, ownId);
+  for (const id of buyers) {
+    const b = bankById(s, id);
+    if (!b.active[MKT.BONDS]) continue;
+    if (b.selectedBondSupplier !== g.id) throw new Error(`${SITE_BOND_MECHANISM}: el banco ${id} no tiene al gobierno como vendedor`);
+    const offer = g.bondOffer;
+    if (offer === null) continue; // emisión agotada: nada, el banco sigue activo
+    const demanded = b.bondDemand;
+    const q = Math.min(demanded, Math.trunc(offer.quantity));
+    if (q < demanded) {
+      throw new Error(
+        `${SITE_BOND_MECHANISM}: racionamiento del banco ${id} (pide ${demanded}, quedan ${offer.quantity}); no pasa en el base ` +
+          'y no está portado (reglas-caiani.md, sec. 34)',
+      );
+    }
+    b.active[MKT.BONDS] = false;
+    const amount = toMicro(q * offer.price);
+    const reserves = contractIds(L, id, 'assets', 'reserves')[0];
+    if (reserves === undefined) throw new Error(`banco ${id} sin reservas`);
+    if (lt(`${SITE_BOND_MECHANISM} reservas < monto`, contractOf(L, reserves).amount, amount, 'amount', undefined, id)) {
+      throw new Error(
+        `${SITE_BOND_MECHANISM}: el banco ${id} no tiene reservas para pagar ${q} bonos; no pasa en el base y no está portado ` +
+          '(reglas-caiani.md, sec. 34)',
+      );
+    }
+    if (q > 0) {
+      const account = contractIds(L, g.id, 'assets', 'reserves')[0];
+      if (account === undefined) throw new Error('gobierno sin cuenta en el BC');
+      pay(L, reserves, account, amount, 'bonds');
+      open(L, 'bond', id, g.id, amount, { quantity: q, price: offer.price, maturity: offer.maturity, rate: offer.rate, age: 0 }, 'bonds');
+      offer.quantity -= q;
+      retireExhaustedBondOffer(s);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 36: demanda de adelantos de Basilea
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_BASEL = 'BaselIIIReserveRequirementsBLR.computeCreditDemand';
+
+/**
+ * Evento 36, `reservesDemandBaselTic` (TIC_RESERVEDEMANDBASEL): los bancos, en orden de creación (`Bank.onTicArrived`
+ * 221–222 → `determineAdvancesDemandBasel` 282–287), con `BaselIIIReserveRequirementsBLR` (XML 2481–2496; aprobado por
+ * Nico el 2026-11-15, reglas-caiani.md, sec. 35):
+ * - `advancesDemand` = 0,08 × Σ depósitos de la lista del banco − (Σ efectivo + Σ reservas) (`computeCreditDemand`
+ *   43–61), en µ con un redondeo, con signo (no se pone en 0 entre ticks); anotado con su error de entrada;
+ * - si es > 0, el banco queda activo en `MKT_ADVANCES` (decisión registrada en µ); nunca lo apaga.
+ * Sin sorteos. Coincide con el paper (sec. 3, nota 18: ratio de liquidez obligatorio del 8%).
+ */
+export function reservesDemandBaselEvent(s: CaianiState): void {
+  const L = s.ledger;
+  const ratio = s.rules.bankBaselLiquidityRatio;
+  for (const b of s.banks) {
+    const D = sumContracts(L, b.id, 'liabilities', 'deposit');
+    const R = sumContracts(L, b.id, 'assets', 'cash') + sumContracts(L, b.id, 'assets', 'reserves');
+    b.advancesDemand = Math.round(ratio * D - R);
+    if (inputsActive()) {
+      derivedValue(b.id, 'advancesDemand', [
+        ...contractIds(L, b.id, 'liabilities', 'deposit').map((contract) => ({ contract, coef: ratio })),
+        ...contractIds(L, b.id, 'assets', 'cash').map((contract) => ({ contract, coef: -1 })),
+        ...contractIds(L, b.id, 'assets', 'reserves').map((contract) => ({ contract, coef: -1 })),
+      ]);
+    }
+    if (gt(`${SITE_BASEL} demanda > 0`, b.advancesDemand, 0, 'amount', undefined, b.id)) b.active[MKT.ADVANCES] = true;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evento 37: mercado de reservas de Basilea (y función compartida de los dos mercados de reservas)
+// ---------------------------------------------------------------------------------------------
+
+export const SITE_RESERVES_MECHANISM = 'ReservesMechanism.execute';
+
+/**
+ * Mercado de reservas (`SimpleMarketSimulation` de `MKT_ADVANCES`, `RandomRobinBuyerMixer`, `ReservesMechanism`,
+ * `nbRuns` = 1), con su lista propia: `reservesMarketBasel` (evento 37, XML 507–525) o `reservesMarketBonds` (evento 33,
+ * XML 468–486). Aprobado por Nico el 2026-11-15 (reglas-caiani.md, sec. 36):
+ * - cerrado (`AbstractMarketMixer.closed` 48–62: ningún comprador activo con algún vendedor activo): nada, sin sorteo;
+ * - abierto: mezcla en el lugar la lista propia de compradores (`RandomRobinBuyerMixer.invokeInteractions` 45–64); cada
+ *   banco activo, en ese orden, con el primer vendedor activo (el BC; `Bank.onAgentArrival` 349–351) →
+ *   `ReservesMechanism.execute` 72–87: adelanto nuevo de `advancesDemand` (`getLoanRequirement` 410) a la tasa del BC
+ *   (`CentralBank.getInterestRate` 108–111: 0,005), plazo 1, solo interés (`decideLoanAmortizationType` 425–427; XML
+ *   2294–2297), edad 0, al final de las dos listas; la cuenta de reservas del banco en el BC sube en el monto (el BC crea
+ *   las reservas: `credit`); el banco queda inactivo, siempre (86);
+ * - errores explícitos (criterio de la sec. 1): pedido ≤ 0 con el banco activo (el 36 activa solo con pedido > 0 y el 37
+ *   corre enseguida) y banco sin cuenta de reservas en el BC (JMAB la crea, 79–82; no pasa por construcción, sec. 36).
+ * El monto es una copia del campo en µ `advancesDemand` (evento 36): en el suelto hereda su redondeo de entrada (≤ 0,5 µ),
+ * como un traspaso de saldo entero; no se anota (punto abierto para Nico, reglas-caiani.md, sec. 36).
+ */
+export function reservesMarketEvent(s: CaianiState, rng: CaianiRng, market: 'reservesBonds' | 'reservesBasel'): void {
+  const L = s.ledger;
+  const m = s.markets[market];
+  const cb = s.centralBank;
+  const sellerActive = (id: AgentId) => {
+    if (id !== cb.id) throw new Error(`${SITE_RESERVES_MARKET}: vendedor ${id} no es el BC`);
+    return cb.active[MKT.ADVANCES]!;
+  };
+  // AbstractMarketMixer.closed
+  if (!m.buyers.some((id) => bankById(s, id).active[MKT.ADVANCES]) || !m.sellers.some(sellerActive)) return;
+  rng.shuffle(SITE_RESERVES_MARKET, 'buyers', m.buyers, ownId);
+  for (const id of m.buyers) {
+    const b = bankById(s, id);
+    if (!b.active[MKT.ADVANCES]) continue;
+    const seller = m.sellers.find(sellerActive);
+    if (seller === undefined) throw new Error(`${SITE_RESERVES_MARKET}: sin vendedor activo`);
+    const amount = b.advancesDemand;
+    if (amount <= 0) {
+      throw new Error(`${SITE_RESERVES_MECHANISM}: el banco ${id} está activo con un pedido de ${amount} µ ≤ 0 (no pasa: el 36 activa solo con pedido > 0)`);
+    }
+    const reserves = contractIds(L, id, 'assets', 'reserves').find((c) => contractOf(L, c).issuer === cb.id);
+    if (reserves === undefined) {
+      throw new Error(`${SITE_RESERVES_MECHANISM}: el banco ${id} no tiene cuenta de reservas en el BC (JMAB la crea; no pasa por construcción, reglas-caiani.md, sec. 36)`);
+    }
+    open(L, 'advance', cb.id, id, amount, { rate: s.rules.centralBankAdvancesRate, age: 0, length: s.structure.advancesLength, amortization: 'onlyInterest', initialAmount: amount }, 'advances');
+    credit(L, reserves, amount, 'advances');
+    b.active[MKT.ADVANCES] = false;
+  }
+}
+
+/** Evento 37, `reservesMarketBaselTic` (TIC_RESERVEMARKETBASEL): `reservesMarketEvent` sobre `reservesMarketBasel`. */
+export function reservesMarketBaselEvent(s: CaianiState, rng: CaianiRng): void {
+  reservesMarketEvent(s, rng, 'reservesBasel');
 }

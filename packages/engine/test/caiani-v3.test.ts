@@ -50,6 +50,12 @@ import {
   bondSupplyEvent,
   bondMarketFirstStepEvent,
   bondDemandEvent,
+  reservesDemandBondEvent,
+  reservesMarketBondEvent,
+  cbBondsPurchasesEvent,
+  bondMarketSecondStepEvent,
+  reservesDemandBaselEvent,
+  reservesMarketBaselEvent,
   parseDraws,
   DecisionRecorder,
   compareOutcomes,
@@ -102,6 +108,11 @@ const ALL_RUNS = [
   // en el 161 (semilla 12345).
   { run: 'p3-t146', tick: 146 },
   { run: 'p3-t161', tick: 161 },
+  // Semilla 102, tick 292: el único tick conocido con un pedido de adelantos de Basilea positivo (banco 8256, 994,90,
+  // evento 36) y el mercado del evento 37 abierto (reglas-caiani.md, sec. 29 y 35). Volcados 0–37, 74 y 75 y el
+  // principio del tick 293 (para la V3 que cruza ticks). El encadenado se corta en el evento 10 (8204 pide un crédito
+  // residual, como en los ticks 293 y 300): el 36 y el 37 con el mercado abierto quedan verificados solo en el suelto.
+  { run: 'p3-s102-t292', tick: 292 },
 ];
 
 /**
@@ -215,6 +226,12 @@ const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
   { e: 29, run: (s) => bondSupplyEvent(s) },
   { e: 30, run: bondMarketFirstStepEvent },
   { e: 31, run: (s) => bondDemandEvent(s) },
+  { e: 32, run: (s) => reservesDemandBondEvent(s) },
+  { e: 33, run: reservesMarketBondEvent },
+  { e: 34, run: (s) => cbBondsPurchasesEvent(s) },
+  { e: 35, run: bondMarketSecondStepEvent },
+  { e: 36, run: (s) => reservesDemandBaselEvent(s) },
+  { e: 37, run: reservesMarketBaselEvent },
 ];
 const LAST = EVENTS[EVENTS.length - 1]!.e;
 
