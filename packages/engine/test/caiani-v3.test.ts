@@ -76,6 +76,8 @@ import {
 } from '../src/caiani';
 import { ChainScales } from './support/chain-scale';
 import { InputCarry } from './support/input-carry';
+import { decisionsFile, formatForced, nanFields, readOracleDecisions } from './support/jmab-decisions';
+import type { OracleDecision } from '../src/caiani';
 import { INPUT_FIELDS, INPUT_VALUES, V3_CHAIN_RHO, chainedAmountTol, compareState, dumpExists, idMaps, readDump, stateFromDump, type CompareResult, type Dump, type ScaleSource } from './support/jmab-dump';
 
 /**
@@ -327,7 +329,37 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     scales = undefined;
     single = new DecisionRecorder();
     chained = new DecisionRecorder();
+    oracleCache = null;
   });
+  /**
+   * Registro de decisiones del oráculo (d1, paso 4; inventario-decisiones, sec. I–J): si la corrida lo tiene, los dos
+   * registradores van en modo oráculo (se toma la rama de JMAB solo en las frágiles de los dos lados, R2 sobre residuos;
+   * una decisión sin par es falla) y cada evento informa las forzadas, las líneas consumidas sin evaluar y los NaN (R4).
+   */
+  const decFile = decisionsFile(`${ORACLE}${run}`);
+  let oracleCache: Map<number, OracleDecision[]> | null = null;
+  const oracleLines = () => (oracleCache ??= readOracleDecisions(decFile!, tick));
+  /** Totales del modo oráculo, para el resumen de la corrida. */
+  const d1Totals = { single: { forced: 0, residue: 0, alarms: 0, consumed: 0 }, chained: { forced: 0, residue: 0, alarms: 0, consumed: 0 } };
+  const d1Report = (mode: 'single' | 'chained', label: string, e: number, rec: DecisionRecorder, from: number) => {
+    if (!decFile) return;
+    const list = rec.forced.slice(from);
+    const consumed = rec.consumed.get(e) ?? 0;
+    const t = d1Totals[mode];
+    t.forced += list.filter((f) => f.kind === 'frágil').length;
+    t.residue += list.filter((f) => f.kind === 'residuo').length;
+    t.alarms += list.filter((f) => f.alarm).length;
+    t.consumed += consumed;
+    if (list.length === 0 && consumed === 0) return;
+    const maxCorr = Math.max(0, ...list.map((f) => f.distancePort));
+    const maxRaw = Math.max(0, ...list.map((f) => f.distancePortRaw));
+    console.log(
+      `d1, tick ${tick}, ${label}: ${list.length} forzadas (frágiles ${list.filter((f) => f.kind === 'frágil').length}, R2 ${list.filter((f) => f.kind === 'residuo').length}, ` +
+        `alarmas ${list.filter((f) => f.alarm).length}), distancia máx del port ${maxCorr.toPrecision(3)} (cruda ${maxRaw.toPrecision(3)}), ` +
+        `${consumed} líneas de JMAB consumidas sin evaluar` +
+        (list.length > 0 ? `\n  ${formatForced(list.slice(0, 20), toJ!).join('\n  ')}${list.length > 20 ? `\n  … y ${list.length - 20} más` : ''}` : ''),
+    );
+  };
   const before = `tick-${tick}.jsonl`;
   const after = (e: number) => `tick-${tick}-ev-${END_DUMPS[e] ?? e}.jsonl`;
   const available = dumpExists(dir + after(LAST));
@@ -450,8 +482,21 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const derived = new DerivedRecorder();
     const inputs = new InputRecorder();
     lastEdges = undefined;
+    const forcedFrom = single.forced.length;
+    if (decFile) {
+      single.oracle = oracleLines();
+      single.toJmab = toJ!;
+      // Operandos agregados: la fragilidad se mide con el operando corregido por su error de entrada (punto 3 de Nico).
+      single.inputError = (t) => carry.inputError(t);
+    }
     withDecisions(single, e, () => withDerived(derived, () => withInputs(inputs, () => ev(s, rng))));
     expect(rng.remaining).toBe(0);
+    if (decFile) {
+      // Los bloques del 75 comparten la secuencia de JMAB: se cierra con el último.
+      if (Number.isInteger(e) || e === LAST) single.finishEvent(Math.floor(e));
+      d1Report('single', `evento ${e}`, e, single, forcedFrom);
+      expect(nanFields(s, toJ!)).toEqual([]);
+    }
     carry.fromLog(s.ledger.flowLog).fromInputs(inputs);
     const cs = carry.summary();
     if (cs.contracts > 0) console.log(`V3 tick ${tick}, evento ${e}: error de entrada descontado en ${cs.contracts} contratos, máx ${cs.max.toFixed(3)} µ`);
@@ -483,8 +528,21 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     }
     const snap = sc.snapshot();
     const inputs = new InputRecorder();
+    const forcedFrom = chained.forced.length;
+    if (decFile) {
+      chained.oracle = oracleLines();
+      chained.toJmab = toJ!;
+      // En el encadenado la fragilidad de los montos es 2k µ (aprobado por Nico, 2026-11-16), sin corrección de entrada.
+      chained.inputError = null;
+      chained.amountTolerance = chainedAmountTol(k + 1);
+    }
     withDecisions(chained, e, () => withInputs(inputs, () => ev(s, rng)));
     expect(rng.remaining).toBe(0);
+    if (decFile) {
+      if (Number.isInteger(e) || e === LAST) chained.finishEvent(Math.floor(e));
+      d1Report('chained', `encadenado 0–${e}`, e, chained, forcedFrom);
+      expect(nanFields(s, toJ!)).toEqual([]);
+    }
     const created = sc.propagate(snap);
     sc.propagateInputs(inputs);
     if (created > 0) console.log(`Escala propagada, tick ${tick}, evento ${e}: ${created} bienes de consumo nuevos`);
@@ -508,6 +566,13 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const { flips, lengthMismatch } = compareOutcomes(single.log, chained.log);
     console.log(`Decisiones dadas vuelta, tick ${tick}: ${flips.length}`, JSON.stringify(flips.slice(0, 10)), lengthMismatch);
     console.log(`Decisiones frágiles dadas vuelta respecto de JMAB, tick ${tick}: ${flippedVsJmab.length}`, JSON.stringify(flippedVsJmab.slice(0, 10)));
+    if (decFile) {
+      // Con d1, la excusa de las frágiles no se tiene que usar nunca (se saca en el paso 6): se informa cuántas veces se usó.
+      console.log(
+        `d1, tick ${tick}: suelto ${JSON.stringify(d1Totals.single)}, encadenado ${JSON.stringify(d1Totals.chained)}; ` +
+          `usos de la excusa de las frágiles: ${flippedVsJmab.length}`,
+      );
+    }
     // Con la cadena cortada, el encadenado no tiene los eventos siguientes: no se comparan.
     if (FULL && !ONLY_EVENTS && !only && chainCut === undefined) expect(lengthMismatch).toEqual([]);
   });

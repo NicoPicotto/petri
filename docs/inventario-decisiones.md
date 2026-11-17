@@ -319,6 +319,29 @@ Aprobado por Nico (2026-11-16): el orden de los eventos 0 y 9, el operando del a
 - **La corrección es exacta** (emparejamiento del tick 133 contra los operandos de JMAB). Los operandos agregados, que crudos difieren hasta 48,8 µ, quedan a **≤ 2·10⁻³ µ** una vez corregidos. Sin corregir, una decisión de un banco a 20 µ del umbral se habría tomado por clara y se habría visto como falla.
 - **Restos sin corregir:** hasta 1,2 µ, del redondeo a µ del propio operando, que no se anota. Requerimiento financiero 1,17 µ (`toMicro` del requerimiento), servicio de la deuda 0,95 µ (las cuotas), demanda de Basilea 0,32 µ (`Math.round` del pedido). Quedan dentro de los 2 µ.
 
+## K. Paso 4: el V3 con el registro del oráculo (2026-11-16)
+
+Aprobado por Nico (2026-11-16): el paso 3, incluidas las dos excepciones `nanOk` (con NaN exigido en el mismo lugar del lado de JMAB) y la fragilidad sobre el operando corregido. Para el informe: la alarma de las forzadas a más de 2 µ se mide sobre el operando corregido y se muestra también la distancia cruda.
+
+**Arnés** (`test/caiani-v3.test.ts`, `test/support/jmab-decisions.ts`).
+- **Modo oráculo:** si la corrida tiene `decisions.tsv(.gz)`, los dos registradores (suelto y encadenado) pasan a modo oráculo.
+  - En el suelto, el error de entrada lo da `InputCarry.inputError` y la fragilidad de los montos es 2 µ.
+  - En el encadenado, la fragilidad es 2k µ, sin corrección de entrada.
+  - Los bloques del 75 comparten la secuencia de JMAB del evento 75.
+- **Después de cada evento:**
+  - una decisión de JMAB sin par es falla (`finishEvent`);
+  - control de NaN (R4): un NaN fuera de la lista de la sec. 1 es falla;
+  - informe de las forzadas (tipo, lugar, agente, resultados, distancia del port corregida y cruda, distancia de JMAB, alarma), de la distancia máxima del evento y de las líneas de JMAB consumidas sin evaluar.
+- **Al final de la corrida:** totales y cuántas veces se usó la excusa de las frágiles. Con d1 tiene que dar 0; se saca en el paso 6.
+
+**Tick 133** (`p3-t133`, con el `decisions.tsv.gz` de `p3-t133-d1`, que es la misma trayectoria verificada byte a byte): **95 tests en verde**.
+- **Suelto y encadenado iguales:**
+  - evento 19: 3 frágiles forzadas, las de 8140 ("depósito < monto" a distancia 0, el piso 35 → 34, y la segunda vuelta al revés), con distancias ≤ 1,9·10⁻⁹ µ;
+  - evento 21: 8.000 R2 (reembolsos de un residuo del primer préstamo de 8183);
+  - ninguna alarma; ninguna línea consumida sin evaluar.
+- **El encadenado llega completo, de 0 a 75.6.** Antes se cortaba en el evento 19.
+- **Usos de la excusa: 0.**
+
 ## Para que revise Nico
 
 **Aprobado por Nico (2026-11-16):** B6 con la opción (a); D con silencio y verificación; F2; F5 ("referencia > umbral" pasa a `fromAmounts`); C8 como error explícito; las listas B y C tal como están. Pendiente: la sección H.

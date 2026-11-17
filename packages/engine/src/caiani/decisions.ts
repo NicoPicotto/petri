@@ -80,10 +80,18 @@ export interface ForcedDecision {
   kind: ForcedKind;
   port: number;
   jmab: number;
-  /** Distancias del port y de JMAB, en la escala de la clase (µ en montos). */
+  /**
+   * Distancias del port y de JMAB, en la escala de la clase (µ en montos). La del port se mide sobre los operandos
+   * corregidos por su error de entrada anotado (operandos agregados); `distancePortRaw`, sobre los crudos (pedido de Nico,
+   * 2026-11-16: para ver cuánto aporta la corrección en cada forzada). Sin términos de entrada, las dos son iguales.
+   */
   distancePort: number;
+  distancePortRaw: number;
   distanceJmab: number;
-  /** Alarma (pedido de Nico, 2026-11-16): forzada a más de 2 µ en montos o fuera de la tolerancia del suelto en double. */
+  /**
+   * Alarma (pedido de Nico, 2026-11-16): forzada a más de 2 µ en montos o fuera de la tolerancia del suelto en double,
+   * medida sobre el operando corregido.
+   */
   alarm: boolean;
 }
 
@@ -164,18 +172,27 @@ export class DecisionRecorder {
     return tolerance === 'amount' ? this.amountTolerance : DECISION_TOLERANCE[tolerance];
   }
 
+  /**
+   * Evento del registro de JMAB: los bloques del evento 75 que el V3 corre por separado (75.1…75.6) comparten la secuencia
+   * del 75, que JMAB no separa.
+   */
+  private key(): number {
+    return Math.floor(this.event);
+  }
+
   private nextOracle(site: string): OracleDecision {
-    const lines = this.oracle!.get(this.event) ?? [];
-    const i = this.cursor.get(this.event) ?? 0;
+    const k = this.key();
+    const lines = this.oracle!.get(k) ?? [];
+    const i = this.cursor.get(k) ?? 0;
     const line = lines[i];
     if (!line) throw new Error(`d1: el port decide en "${site}" (evento ${this.event}, posición ${i}) y JMAB no tiene más decisiones en el evento`);
-    this.cursor.set(this.event, i + 1);
+    this.cursor.set(k, i + 1);
     return line;
   }
 
   /** Posición en curso del evento (para los mensajes). */
   position(): number {
-    return this.cursor.get(this.event) ?? 0;
+    return this.cursor.get(this.key()) ?? 0;
   }
 
   /**
@@ -257,6 +274,7 @@ export class DecisionRecorder {
       port: outcome,
       jmab: line.outcome,
       distancePort: distance,
+      distancePortRaw: ca === a && cb === b ? distance : decisionDistance(a, b, tolerance, scale, opts?.nanOk, site),
       distanceJmab: distanceJ,
       alarm: kind === 'frágil' && Math.max(distance, distanceJ) > suelto,
     });
@@ -271,8 +289,9 @@ export class DecisionRecorder {
    */
   consumeResidue(site: string): number {
     if (!this.oracle) return 0;
-    const lines = this.oracle.get(this.event) ?? [];
-    let i = this.cursor.get(this.event) ?? 0;
+    const k = this.key();
+    const lines = this.oracle.get(k) ?? [];
+    let i = this.cursor.get(k) ?? 0;
     let n = 0;
     while (i < lines.length && lines[i]!.site === site && n < 101) {
       const l = lines[i]!;
@@ -283,7 +302,7 @@ export class DecisionRecorder {
       n++;
       if (l.outcome === 1) break;
     }
-    this.cursor.set(this.event, i);
+    this.cursor.set(k, i);
     this.consumed.set(this.event, (this.consumed.get(this.event) ?? 0) + n);
     return n;
   }
