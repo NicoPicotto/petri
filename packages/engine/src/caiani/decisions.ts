@@ -117,12 +117,8 @@ export class NanDecisionError extends Error {}
 export class DecisionRecorder {
   readonly log: DecisionLog = {};
   event = -1;
-  /**
-   * Evento → agentes con al menos una decisión frágil en ese evento (las que pasan el agente). El V3 informa una
-   * diferencia de estado sobre esos agentes como decisión frágil dada vuelta, no como falla (decisión de Nico,
-   * 2026-11-13, la de P1 aplicada al estado; reglas-caiani.md, sec. 1, "Decisiones discretas"). Con d1 en verde se saca.
-   */
-  readonly fragileAgents = new Map<number, Set<number>>();
+  // La excusa de las frágiles (`fragileAgents`: diferencia de estado sobre el agente de una frágil = informada, no falla;
+  // decisión de Nico del 2026-11-13) se sacó en el paso 6 de d1 (2026-11-17): la reemplaza el modo oráculo de abajo.
 
   // ---- Modo oráculo (opción (d) con d1; reglas-caiani.md, sec. 40; docs/inventario-decisiones.md) ----
 
@@ -148,7 +144,7 @@ export class DecisionRecorder {
   /** Si la última decisión fue forzada (lo leen los caminos de la rama forzada). */
   lastForced = false;
 
-  record(site: string, outcome: number, a: number, b: number, distance: number, tolerance: Tolerance, agent?: number): void {
+  record(site: string, outcome: number, a: number, b: number, distance: number, tolerance: Tolerance, _agent?: number): void {
     const ev = this.log[this.event] ?? (this.log[this.event] = {});
     const s =
       ev[site] ??
@@ -159,11 +155,6 @@ export class DecisionRecorder {
     // NaN (operandos NaN declarados con `nanOk`) no cuenta como frágil: la rama es la misma en JMAB y en el port.
     if (distance <= this.fragility(tolerance)) {
       s.fragile++;
-      if (agent !== undefined) {
-        let set = this.fragileAgents.get(this.event);
-        if (!set) this.fragileAgents.set(this.event, (set = new Set()));
-        set.add(agent);
-      }
       if (s.examples.length < MAX_EXAMPLES) s.examples.push({ index, a, b, distance });
     }
   }

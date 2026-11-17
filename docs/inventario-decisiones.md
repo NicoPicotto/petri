@@ -368,6 +368,34 @@ Las cifras son iguales en el suelto y en el encadenado.
 - **Los 8.000 R2 de los eventos 21** de los ticks 133, 146 y 300 son reembolsos de un residuo en la quiebra.
 - **Ninguna decisión frágil forzada pasa de 2 µ**, ni de la tolerancia del suelto en `double`.
 
+## M. Paso 6: sin la excusa ni `chainCut`; d1 cerrado (2026-11-17)
+
+Aprobado por Nico (2026-11-17), con un cambio de orden: primero, el tick 103 entero con la excusa todavía puesta, como prueba principal de d1.
+
+**Prueba principal: el tick 103 entero** (`p3-s104-t103` sin `only`), en modo oráculo y con la excusa todavía puesta.
+- 95 tests en verde y encadenado completo.
+- **54 forzadas frágiles en el evento 19, todas de 8202 y 8206, 27 cada una:** 6 "depósito < monto", 6 pisos de la cantidad y 15 "reunido < monto", una por cada vuelta al mismo proveedor previo.
+- Distancia máxima 3,7·10⁻⁹ µ, sin alarmas.
+- La excusa se usó 0 veces.
+- Es el caso que hasta d1 arrastraba a otros agentes del evento y obligaba a correr solo los bloques del 75.
+
+**Cambios.**
+1. **La excusa de las frágiles, fuera:**
+   - en el V3: `fragileJ`, las diferencias "explicadas" y `flippedVsJmab`;
+   - en el registrador: `fragileAgents`.
+   - Toda diferencia de estado que no sea un campo reportado es falla.
+2. **`chainCut`, fuera.** Ningún encadenado se corta: una diferencia es falla.
+3. **El registro del oráculo es obligatorio.** Una corrida del V3 sin `decisions.tsv` es error.
+4. **Informe:** cuando un evento tiene más de 20 forzadas, se agrega un resumen agrupado por lugar y agente.
+5. **Documentación:** la regla de la sec. 1 de reglas-caiani.md reemplaza la excusa por d1; la sec. 40 explica cómo retomar.
+
+**Verificación.**
+- **`pnpm test:v3` completo:** 1.440 tests en verde (el tick 103 suma los eventos que antes no corría).
+- **Control de las anotaciones del error de entrada:** en verde.
+- **Hash de estado en PRNG** (semilla 1, 20 ticks): idéntico al de `HEAD`.
+
+**Totales por corrida:** los de la sec. L, más el tick 103 con 54 forzadas frágiles. En total, 57 frágiles forzadas y 24.012 R2. Ninguna indeterminada ni alarma, 800 líneas consumidas sin evaluar y ningún encadenado cortado.
+
 ## Para que revise Nico
 
 **Aprobado por Nico (2026-11-16):** B6 con la opción (a); D con silencio y verificación; F2; F5 ("referencia > umbral" pasa a `fromAmounts`); C8 como error explícito; las listas B y C tal como están. Pendiente: la sección H.
