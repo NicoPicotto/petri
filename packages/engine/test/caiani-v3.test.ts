@@ -340,7 +340,10 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
   let oracleCache: Map<number, OracleDecision[]> | null = null;
   const oracleLines = () => (oracleCache ??= readOracleDecisions(decFile!, tick));
   /** Totales del modo oráculo, para el resumen de la corrida. */
-  const d1Totals = { single: { forced: 0, residue: 0, alarms: 0, consumed: 0 }, chained: { forced: 0, residue: 0, alarms: 0, consumed: 0 } };
+  const d1Totals = {
+    single: { forced: 0, residue: 0, indeterminate: 0, alarms: 0, consumed: 0 },
+    chained: { forced: 0, residue: 0, indeterminate: 0, alarms: 0, consumed: 0 },
+  };
   const d1Report = (mode: 'single' | 'chained', label: string, e: number, rec: DecisionRecorder, from: number) => {
     if (!decFile) return;
     const list = rec.forced.slice(from);
@@ -348,6 +351,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const t = d1Totals[mode];
     t.forced += list.filter((f) => f.kind === 'frágil').length;
     t.residue += list.filter((f) => f.kind === 'residuo').length;
+    t.indeterminate += list.filter((f) => f.kind === 'indeterminada').length;
     t.alarms += list.filter((f) => f.alarm).length;
     t.consumed += consumed;
     if (list.length === 0 && consumed === 0) return;

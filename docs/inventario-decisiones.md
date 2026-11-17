@@ -342,6 +342,32 @@ Aprobado por Nico (2026-11-16): el paso 3, incluidas las dos excepciones `nanOk`
 - **El encadenado llega completo, de 0 a 75.6.** Antes se cortaba en el evento 19.
 - **Usos de la excusa: 0.**
 
+## L. Paso 5: las corridas con el registro y el V3 en modo oráculo sobre todas (2026-11-17)
+
+**Corridas** (`reference/tools/rerun-decisions.sh`; registro en `reference/p0/runs/oracle/rerun-decisions.log`):
+- Las 11 de `ALL_RUNS` que faltaban se volvieron a correr con el registro y sin volcados: misma semilla, mismas rondas y misma ventana de registro que la original. La del tick 133 ya lo tenía, del paso 2.
+- **`draws.tsv` idéntico byte a byte en las 11.** El registro se movió a cada corrida original.
+- Decisiones por tick: 165.055 (1) a 459.121 (292).
+- Las demoras largas (hasta 3,4 h en el tick 161) fueron la Mac dormida: la corrida queda en pausa y sigue sola.
+
+**`pnpm test:v3` completo en modo oráculo sobre las 12: 1.356 tests en verde.**
+
+| Tick | Frágiles forzadas | R2 | Indeterminadas | Alarmas | Líneas consumidas sin evaluar | Usos de la excusa |
+|---|---|---|---|---|---|---|
+| 1, 50, 81, 108, 128, 161 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 103 (solo los bloques del 75) | 0 | 0 | 0 | 0 | 0 | 0 |
+| 133 | 3 (evento 19, 8140) | 8.000 (evento 21) | 0 | 0 | 0 | 0 |
+| 146 | 0 | 8.000 (evento 21) | 0 | 0 | 0 | 0 |
+| 292 | 0 | 3 (eventos 9 y 10, 8204) | 0 | 0 | 200 (evento 10) | 0 |
+| 293 | 0 | 3 (eventos 9 y 10, 8204) | 0 | 0 | 200 (evento 10) | 0 |
+| 300 | 0 | 8.006 (6 en los eventos 9 y 10, 8204 y 8227; 8.000 en el 21) | 0 | 0 | 400 (evento 10) | 0 |
+
+Las cifras son iguales en el suelto y en el encadenado.
+- **Ningún encadenado se corta.** Antes se cortaban el del 133 (evento 19) y los de los ticks 292, 293 y 300 (evento 10, empresas zombis).
+- **Las zombis van por R2, no como frágiles.** El pedido del port es 0 µ exacto contra un residuo de JMAB: activación, "requerimiento > liquidez" y "se le dio todo". Cada búsqueda de oferta sobre un residuo consume 100 líneas.
+- **Los 8.000 R2 de los eventos 21** de los ticks 133, 146 y 300 son reembolsos de un residuo en la quiebra.
+- **Ninguna decisión frágil forzada pasa de 2 µ**, ni de la tolerancia del suelto en `double`.
+
 ## Para que revise Nico
 
 **Aprobado por Nico (2026-11-16):** B6 con la opción (a); D con silencio y verificación; F2; F5 ("referencia > umbral" pasa a `fromAmounts`); C8 como error explícito; las listas B y C tal como están. Pendiente: la sección H.
