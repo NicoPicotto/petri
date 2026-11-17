@@ -14,7 +14,8 @@
     "report:fase0": "vite-node scripts/fase0-report.ts",
     "report:fase1": "vite-node scripts/fase1-report.ts",
     "test:slow": "PETRI_SLOW=1 vitest run",
-    "test:v3": "PETRI_V3=full vitest run --no-file-parallelism"
+    "test:v3": "PETRI_V3=full vitest run --no-file-parallelism",
+    "test:v3-chain": "PETRI_V3_CHAIN=1 vitest run --no-file-parallelism test/caiani-v3-chain.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -212,7 +212,7 @@ export class OracleCaianiRng implements CaianiRng {
   /** Tick esperado; si se fija, se verifica contra el del registro. */
   tick: number | undefined;
   /** Bernoullis cuya p difirió de la registrada (dentro de la tolerancia, si no es error). */
-  readonly pDiffs: { seq: number; site: string; logged: number; port: number }[] = [];
+  readonly pDiffs: { seq: number; site: string; logged: number; port: number; guard: number }[] = [];
   private readonly pTolerance: number;
   private readonly agentId: (id: number) => number;
 
@@ -274,7 +274,10 @@ export class OracleCaianiRng implements CaianiRng {
       if (!ok) {
         throw new Error(`oráculo: Bernoulli en ${site} con p = ${p}, el registro tiene p = ${logged} (secuencia ${r.seq})`);
       }
-      this.pDiffs.push({ seq: r.seq, site, logged, port: p });
+      // La guarda en valor absoluto, solo para el informe (la decisión de arriba no la usa: queda como estaba).
+      const guard =
+        opts?.sensitivity !== undefined ? (1 - Math.min(p, logged)) * opts.sensitivity : this.pTolerance * Math.max(Math.abs(logged), Math.abs(p));
+      this.pDiffs.push({ seq: r.seq, site, logged, port: p, guard });
     }
     return res === '1';
   }

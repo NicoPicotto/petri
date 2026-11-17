@@ -22,7 +22,7 @@ import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
-import { ceiling, consumeResidueDecisions, decisionsActive, flooring, ge, gt, lastDecisionForced, lt, oracleDecisions, record, rounding, type DecisionOptions, type Tolerance } from './decisions';
+import { ceiling, consumeResidueDecisions, decisionsActive, flooring, ge, gt, indeterminateQuotient, lastDecisionForced, lt, oracleDecisions, record, rounding, type DecisionOptions, type Tolerance } from './decisions';
 import { derivedContract, derivedInput, derivedPayment, derivedRounded, derivedValue, inputsActive, scaleTerms, type InputTerm } from './derived';
 import {
   EXPECTATION,
@@ -642,6 +642,7 @@ export function adaptiveInterestRate(
   rng: CaianiRng,
   p: AdaptiveRateParams,
   agent?: AgentId,
+  quotient?: { num: number; den: number },
 ): number {
   let tot = 0;
   let inter = 0;
@@ -656,7 +657,9 @@ export function adaptiveInterestRate(
   const step = () => p.adaptive * avInterest * rng.foldedNormal(SITE_INTEREST_RATE, p.sigma);
   let iR: number;
   // La referencia (ratio de capital o de liquidez) sale de montos.
-  if (gt(`${SITE_INTEREST_RATE} ${p.reference} > promedio`, referenceVariable, threshold, 'fromAmounts', undefined, agent)) {
+  // `quotient`: operandos en µ de la referencia cuando es un cociente (ratio de capital), para la regla del cociente
+  // indeterminado (solo cuenta en modo oráculo; reglas-caiani.md, sec. 40).
+  if (gt(`${SITE_INTEREST_RATE} ${p.reference} > promedio`, referenceVariable, threshold, 'fromAmounts', undefined, agent, quotient ? { quotient } : undefined)) {
     iR = p.increase ? avInterest + step() : avInterest - step();
   } else {
     iR = p.increase ? avInterest - step() : avInterest + step();
@@ -701,7 +704,7 @@ export function creditSupplyEvent(s: CaianiState, rng: CaianiRng): void {
     return b;
   };
   // `getNumericBalanceSheet()[0][SM_LOAN] != 0 && getNetWealth() > 0`. No cambia dentro del evento.
-  const eligible = s.populations.banks
+  const eligibleBanks = s.populations.banks
     .map(bank)
     .filter((b) => {
       const loans = sumContracts(L, b.id, 'assets', 'loan');
@@ -712,8 +715,36 @@ export function creditSupplyEvent(s: CaianiState, rng: CaianiRng): void {
         record(`${SITE_INTEREST_RATE} préstamos ≠ 0`, loans !== 0, loans, 0, 'amount', undefined, b.id, on ? { inputs: { a: kindTerms(L, b.id, 'assets', 'loan') } } : undefined) &&
         gt(`${SITE_INTEREST_RATE} patrimonio > 0`, netFinancialWorth(L, b.id), 0, 'amount', undefined, b.id, on ? { inputs: { a: netWorthTerms(L, b.id) } } : undefined)
       );
-    })
-    .map((b) => ({ ratio: b.capitalRatio, pastRate: getLag(b.lags, LAG.LOANINTEREST, s.round, 1) }));
+    });
+  const eligible = eligibleBanks.map((b) => ({ ratio: b.capitalRatio, pastRate: getLag(b.lags, LAG.LOANINTEREST, s.round, 1) }));
+  // Regla del cociente indeterminado (aprobada por Nico, 2026-11-17; reglas-caiani.md, sec. 40): los operandos en µ del
+  // ratio de capital del evento 0 (el rezago del patrimonio, que no cambia en el tick, y los préstamos, que no cambian
+  // entre el 0 y el 6). Solo con un registrador activo; sin él (modo PRNG, V4, la app) no se calcula nada.
+  const quotientOf = (b: CaianiState['banks'][number]): { num: number; den: number } | undefined => {
+    if (!decisionsActive()) return undefined;
+    const lag = getLag(b.lags, LAG.NETWEALTH, s.round, 1);
+    const den = sumContracts(L, b.id, 'assets', 'loan');
+    if (oracleDecisions()) {
+      // Los operandos tienen que ser los del ratio del evento 0. No finito (denominador 0): el mismo valor exacto. Finito:
+      // dentro de la tolerancia de los double de montos, porque en el V3 suelto el ratio llega del volcado de JMAB (suma de
+      // préstamos en double) y el port suma en µ.
+      const r = lag / toUnits(den);
+      const ok = Number.isFinite(b.capitalRatio) || Number.isFinite(r)
+        ? Math.abs(r - b.capitalRatio) <= 1e-6 * Math.max(Math.abs(r), Math.abs(b.capitalRatio))
+        : Object.is(r, b.capitalRatio);
+      if (!ok) throw new Error(`banco ${b.id}: el ratio de capital del evento 0 (${b.capitalRatio}) no sale de los operandos del evento 6 (${lag} / ${toUnits(den)})`);
+    }
+    return { num: lag * MICRO_PER_UNIT, den };
+  };
+  if (oracleDecisions()) {
+    for (const b of eligibleBanks) {
+      const q = quotientOf(b)!;
+      if (indeterminateQuotient(q.num, q.den)) {
+        // solo rama forzada (modo oráculo): reglas-caiani.md, sec. 40, punto 4 (no visto en 7 × 400; error explícito)
+        throw new Error(`banco ${b.id}: umbral indeterminado (banco elegible con ratio de capital indeterminado): rama no portada (reglas-caiani.md, sec. 40)`);
+      }
+    }
+  }
   const p: AdaptiveRateParams = {
     adaptive: s.rules.loanRateAdaptive,
     increase: s.rules.loanRateIncrease,
@@ -722,7 +753,7 @@ export function creditSupplyEvent(s: CaianiState, rng: CaianiRng): void {
     reference: 'ratio de capital',
   };
   for (const b of s.banks) {
-    b.bankInterestRate = adaptiveInterestRate(b.capitalRatio, eligible, rng, p, b.id);
+    b.bankInterestRate = adaptiveInterestRate(b.capitalRatio, eligible, rng, p, b.id, quotientOf(b));
     const loanSupply = Infinity; // InfiniteSupplyCreditStrategy.computeCreditSupply
     b.totalLoanSupply = loanSupply;
     setLag(b.lags, LAG.BANKTOTLOANSUPPLY, s.round, loanSupply);

@@ -557,6 +557,14 @@ export interface CompareResult {
    * regla: en µ para los montos, en unidades del campo para los `double`).
    */
   scaled: Record<string, { maxErrOverS: number; byScale: number; maxRhoS: number }>;
+  /** Dónde se dio `counts.maxRelFromAmounts` (campo, port y JMAB): solo para el informe. */
+  maxRelFromAmountsWhere: string;
+  /**
+   * Campos con un cociente indeterminado en los dos lados, que no se comparan (regla del cociente indeterminado, aprobada por
+   * Nico el 2026-11-17; reglas-caiani.md, sec. 40): hoy, el ratio de capital de un banco con préstamos y patrimonio
+   * rezagado de ≤ 2 µ en el port y en JMAB.
+   */
+  indeterminate: string[];
 }
 
 /**
@@ -670,6 +678,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   const counts = { contracts: 0, goods: 0, lags: 0, expectations: 0, maxAmountDiff: 0, maxRelPure: 0, maxRelFromAmounts: 0 };
   const amountFields: CompareResult['amountFields'] = {};
   const doubleFieldsOver: CompareResult['doubleFieldsOver'] = {};
+  let maxRelFromAmountsWhere = '';
+  const indeterminate: string[] = [];
   const note = (msg: string) => {
     total++;
     if (diffs.length < 40) diffs.push(msg);
@@ -696,8 +706,12 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     const port = portRaw - discount;
     const r = Number.isNaN(port) && Number.isNaN(java) ? 0 : rel(port, java);
     const tol = fromAmounts ? AMOUNTS_TOL : PURE_TOL;
-    if (fromAmounts) counts.maxRelFromAmounts = Math.max(counts.maxRelFromAmounts, r);
-    else counts.maxRelPure = Math.max(counts.maxRelPure, r);
+    if (fromAmounts) {
+      if (r > counts.maxRelFromAmounts) {
+        counts.maxRelFromAmounts = r;
+        maxRelFromAmountsWhere = `${what}: port ${port}, JMAB ${java}`;
+      }
+    } else counts.maxRelPure = Math.max(counts.maxRelPure, r);
     const floorOk = fromAmounts && Math.abs(port - java) <= amountTol / MICRO_PER_UNIT;
     const baseOk = r <= tol || floorOk;
     const scaleOk = fromAmounts && scale !== undefined && Number.isFinite(port) && Number.isFinite(java) && byScale(what, Math.abs(port - java), scale.value(what, port), baseOk);
@@ -766,6 +780,12 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     same(`mercado ${i} compradores`, m.buyers.map(toJ).join(), meta.markets[i]!.buyers.join());
     same(`mercado ${i} vendedores`, m.sellers.map(toJ).join(), meta.markets[i]!.sellers.join());
   });
+  /**
+   * Empresas de consumo: su producción deseada, costo variable esperado, precio del bien de consumo y rezago `PRICE` salen
+   * de montos (tabla de la sec. 1 de reglas-caiani.md, "Campos de las empresas de consumo calculados de montos", aprobada
+   * por Nico el 2026-11-16 para la V3 que cruza ticks). En las de capital siguen puros.
+   */
+  const consumptionFirmIds = new Set<AgentId>(s.consumptionFirms.map((f) => f.id));
   const lagsCompare = (w: string, port: Lags, jl: J | null, agent?: AgentId) => {
     const jlags = jl ?? {};
     for (const [lid, pv] of Object.entries(jlags)) {
@@ -777,7 +797,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
           continue;
         }
         const disc = agent !== undefined ? (opts.derivedValue?.(agent, `lag:${lid}:${period}`) ?? 0) : 0;
-        close(`${w} rezago ${lid}[${period}]`, p, v, LAGS_FROM_AMOUNTS.includes(Number(lid)), disc);
+        const fromAmounts = LAGS_FROM_AMOUNTS.includes(Number(lid)) || (Number(lid) === LAG.PRICE && agent !== undefined && consumptionFirmIds.has(agent));
+        close(`${w} rezago ${lid}[${period}]`, p, v, fromAmounts, disc);
       }
     }
     for (const [lid, m] of Object.entries(port)) {
@@ -852,7 +873,8 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
       // un hogar vale lo que pagó.
       close(`${w} cantidad`, g.quantity, it['AbstractItem.quantity'], true);
       close(`${w} valor`, g.value, it['AbstractItem.value'], isHousehold);
-      close(`${w} precio`, g.price, it['AbstractGood.price']);
+      // El precio del bien de consumo sale del costo esperado de la empresa de consumo (de montos; sec. 1).
+      close(`${w} precio`, g.price, it['AbstractGood.price'], true);
       close(`${w} costo unitario`, g.unitCost, it['AbstractGood.unitCost']);
       same(`${w} edad`, g.age, it['AbstractItem.age']);
       same(`${w} productor`, toJ(g.producer), ref(it['AbstractGood.producer']));
@@ -922,12 +944,13 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     const w = `empresa ${toJ(f.id)}`;
     flags(w, f, j);
     same(`${w} empleados`, f.employees.map(toJ).join(), (j['AbstractFirm.employees'] as J[]).map(ref).join());
-    close(`${w} producción deseada`, f.desiredOutput, j['AbstractFirm.desiredOutput']);
+    const isConsumption = consumptionFirmIds.has(f.id);
+    close(`${w} producción deseada`, f.desiredOutput, j['AbstractFirm.desiredOutput'], isConsumption);
     amount(`${w} costo de rescate`, f.bailoutCost, j['AbstractFirm.bailoutCost']);
     amount(`${w} dividendos pagados`, f.dividends, j['AbstractFirm.dividends'], undefined, undefined, (opts.derivedValue?.(f.id, 'dividends') ?? 0) * MICRO_PER_UNIT);
     close(`${w} margen`, f.markUp, strat(j, 5)['markUp']);
     const evc = j['ConsumptionFirm.expectedVariableCosts'] ?? j['CapitalFirm.expectedVariableCosts'];
-    close(`${w} costo variable esperado`, f.expectedVariableCosts, evc);
+    close(`${w} costo variable esperado`, f.expectedVariableCosts, evc, isConsumption);
     same(`${w} banco previo`, toJ(f.previousBank), ref(strat(j, 11)['previousDepositSupplier']));
     same(`${w} prestamista previo`, f.previousLender === null ? null : toJ(f.previousLender), ref(strat(j, 1)['previousLender']));
     if (j['ConsumptionFirm.desiredCapacityGrowth'] !== undefined) {
@@ -959,7 +982,17 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
     const w = `banco ${toJ(b.id)}`;
     flags(w, b, j);
     close(`${w} ratio de liquidez`, b.liquidityRatio, j['liquidityRatio'], true);
-    close(`${w} ratio de capital`, b.capitalRatio, j['capitalRatio'], true);
+    // Regla del cociente indeterminado (sec. 40): con el ratio no finito en los dos lados (denominador 0), si el numerador
+    // (el rezago del patrimonio, que no cambia en el tick) es ≤ 2 µ en los dos lados, el ratio es indeterminado y no se
+    // compara; si no, tiene que ser el mismo infinito. Uno finito y el otro no es diferencia (la de `close`).
+    const crJ = j['capitalRatio'] as number;
+    if (!Number.isFinite(b.capitalRatio) && !Number.isFinite(crJ)) {
+      const period = String(Math.max(0, s.round - 1));
+      const numP = (b.lags[LAG.NETWEALTH]?.[Number(period)] ?? NaN) * MICRO_PER_UNIT;
+      const numJ = Number(j['SimpleAbstractAgent.passedValues']?.[String(LAG.NETWEALTH)]?.passedValues?.[period]) * MICRO_PER_UNIT;
+      if (Math.abs(numP) <= V3_AMOUNT_TOL && Math.abs(numJ) <= V3_AMOUNT_TOL) indeterminate.push(`${w} ratio de capital`);
+      else if (!Object.is(b.capitalRatio, crJ)) note(`${w} ratio de capital (no finito): port ${b.capitalRatio}, JMAB ${crJ}; numerador port ${numP} µ, JMAB ${numJ} µ`);
+    } else close(`${w} ratio de capital`, b.capitalRatio, crJ, true);
     amount(`${w} costo de rescate`, b.bailoutCost, j['bailoutCost'], undefined, undefined, (opts.derivedValue?.(b.id, 'bailoutCost') ?? 0) * MICRO_PER_UNIT);
     amount(`${w} morosidad del tick`, b.currentNonPerformingLoans, j['AbstractBank.currentNonPerformingLoans'], undefined, opts.derived?.(b.id, 'currentNonPerformingLoans'));
     close(`${w} tasa de préstamos`, b.bankInterestRate, j['bankInterestRate']);
@@ -1009,5 +1042,5 @@ export function compareState(s: CaianiState, d: Dump, opts: CompareOptions = {})
   amount('BC intereses de bonos cobrados', s.centralBank.bondInterestsReceived, jcb['bondInterestsReceived']);
   same('BC demanda de bonos', s.centralBank.bondDemand, jcb['bondDemand']);
 
-  return { diffs, total, counts, amountFields, doubleFieldsOver, scaled };
+  return { diffs, total, counts, amountFields, doubleFieldsOver, scaled, maxRelFromAmountsWhere, indeterminate };
 }

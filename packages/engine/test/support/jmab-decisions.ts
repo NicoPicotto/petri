@@ -49,7 +49,10 @@ export function readOracleDecisions(file: string, tick: number): Map<number, Ora
     const ev = Number(f[2]);
     let list = out.get(ev);
     if (!list) out.set(ev, (list = []));
-    list.push({ site: f[3]!, agent: Number(f[4]), outcome: Number(f[5]), a: Number(f[6]), b: Number(f[7]) });
+    const d: OracleDecision = { site: f[3]!, agent: Number(f[4]), outcome: Number(f[5]), a: Number(f[6]), b: Number(f[7]) };
+    // Columna 9 (oráculo A1): operandos del cociente indeterminado, solo en las líneas que la regla pide.
+    if (f.length > 8 && f[8] !== '') d.extra = f[8];
+    list.push(d);
   }
   return out;
 }

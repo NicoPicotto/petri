@@ -66,6 +66,11 @@ export interface OracleDecision {
   /** Operandos de JMAB en sus unidades (los de clase `amount` en unidades de Caiani; el arnés los pasa a µ). */
   a: number;
   b: number;
+  /**
+   * Columna 9 del registro, solo donde la regla del cociente indeterminado la pide (reglas-caiani.md, sec. 40; oráculo A1):
+   * "numerador;denominador" del ratio de capital del evento 0, en unidades de JMAB.
+   */
+  extra?: string;
 }
 
 /** Cómo se tomó la rama de JMAB en una decisión distinta de la del port (modo oráculo). */
@@ -109,6 +114,19 @@ export interface DecisionOptions {
    * Sin esto, una distancia NaN es error (pedido de Nico, 2026-11-16).
    */
   nanOk?: boolean;
+  /**
+   * Regla del cociente indeterminado (aprobada por Nico, 2026-11-17; reglas-caiani.md, sec. 40): el operando `a` es un
+   * cociente num / den y estos son sus operandos **en µ** del lado del port. Si |num| y |den| son ≤ 2 µ, el cociente es
+   * indeterminado (NaN, ±∞ o cualquier finito valen lo mismo): en modo oráculo, si el de JMAB también lo es (columna 9 del
+   * registro), se toma la rama de JMAB y se anota como `indeterminada`; si lo es de un solo lado, error. Sin oráculo no cambia
+   * nada (la comparación de siempre).
+   */
+  quotient?: { num: number; den: number };
+}
+
+/** |num| y |den| ≤ 2 µ: cociente indeterminado (regla del cociente indeterminado). */
+export function indeterminateQuotient(num: number, den: number): boolean {
+  return Math.abs(num) <= DECISION_TOLERANCE.amount && Math.abs(den) <= DECISION_TOLERANCE.amount;
 }
 
 /** Distancia NaN en un lugar que no lo declara: error (que un 0/0 nunca decida en silencio). */
@@ -213,7 +231,10 @@ export class DecisionRecorder {
       const e = Math.max(Math.abs(ea), Math.abs(eb));
       if (e > (this.aggregateError.get(site) ?? 0)) this.aggregateError.set(site, e);
     }
-    const distance = decisionDistance(ca, cb, tolerance, scale, opts?.nanOk, site);
+    // Cociente indeterminado del lado del port: la distancia no está definida (no se calcula; NaN no cuenta como frágil).
+    const q = opts?.quotient;
+    const portIndeterminate = q !== undefined && indeterminateQuotient(q.num, q.den);
+    const distance = portIndeterminate ? NaN : decisionDistance(ca, cb, tolerance, scale, opts?.nanOk, site);
     this.record(site, outcome, a, b, distance, tolerance, agent);
     if (!this.oracle) return outcome;
 
@@ -226,6 +247,46 @@ export class DecisionRecorder {
       throw new Error(`d1: agente distinto en "${site}" (evento ${this.event}, posición ${index}): port ${this.toJmab(agent)}, JMAB ${line.agent}`);
     }
     const u = tolerance === 'amount' ? 1_000_000 : 1;
+    if (q !== undefined) {
+      // Regla del cociente indeterminado: los operandos de JMAB, de la columna 9 (unidades de JMAB → µ).
+      let jq: { num: number; den: number } | null = null;
+      if (line.extra !== undefined) {
+        const [n, d] = line.extra.split(';').map(Number);
+        if (n === undefined || d === undefined || Number.isNaN(n) || Number.isNaN(d)) {
+          throw new Error(`d1: columna 9 ilegible en "${site}" (evento ${this.event}, posición ${index}): "${line.extra}"`);
+        }
+        jq = { num: n * 1_000_000, den: d * 1_000_000 };
+      }
+      const jmabIndeterminate = jq !== null && indeterminateQuotient(jq.num, jq.den);
+      if (portIndeterminate) {
+        if (jq === null) {
+          throw new Error(`d1: cociente indeterminado en el port y el registro de JMAB no trae sus operandos (columna 9) en "${site}" (evento ${this.event}, posición ${index}); hace falta el oráculo A1`);
+        }
+        if (!jmabIndeterminate) {
+          throw new Error(`d1: cociente indeterminado solo en el port en "${site}" (evento ${this.event}, posición ${index}): port num ${q.num} µ, den ${q.den} µ; JMAB num ${jq.num} µ, den ${jq.den} µ`);
+        }
+        // Indeterminado en los dos lados: la rama de JMAB, anotada aunque coincida con la del port. En lugar de las
+        // distancias (no definidas) se anota max(|num|, |den|) en µ de cada lado.
+        this.forced.push({
+          event: this.event,
+          index,
+          site,
+          agent,
+          kind: 'indeterminada',
+          port: outcome,
+          jmab: line.outcome,
+          distancePort: Math.max(Math.abs(q.num), Math.abs(q.den)),
+          distancePortRaw: Math.max(Math.abs(q.num), Math.abs(q.den)),
+          distanceJmab: Math.max(Math.abs(jq.num), Math.abs(jq.den)),
+          alarm: false,
+        });
+        this.lastForced = line.outcome !== outcome;
+        return line.outcome;
+      }
+      if (jmabIndeterminate) {
+        throw new Error(`d1: cociente indeterminado solo en JMAB en "${site}" (evento ${this.event}, posición ${index}): port num ${q.num} µ, den ${q.den} µ; JMAB num ${jq!.num} µ, den ${jq!.den} µ`);
+      }
+    }
     if (Number.isNaN(distance)) {
       // NaN declarado (`nanOk`): JMAB tiene que tener el mismo NaN, y entonces la comparación da lo mismo.
       const nanJ = Number.isNaN(line.a) || Number.isNaN(line.b);

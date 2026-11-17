@@ -8,7 +8,8 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "test:slow": "pnpm --filter @petri/engine test:slow",
-    "test:v3": "pnpm --filter @petri/engine test:v3"
+    "test:v3": "pnpm --filter @petri/engine test:v3",
+    "test:v3-chain": "pnpm --filter @petri/engine test:v3-chain"
   },
   "devDependencies": {
     "typescript": "~5.9.0"

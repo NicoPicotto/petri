@@ -67,6 +67,52 @@ describe('decisiones discretas: casos a mano', () => {
     expect(() => withDecisions(r4, 3, () => gt('n', NaN, 0.1, 'pure', undefined, undefined, { nanOk: true }))).toThrow(/NaN en el port y no en JMAB/);
   });
 
+  it('cociente indeterminado (sec. 40): rama de JMAB si lo es en los dos lados; de un solo lado o sin columna 9, error', () => {
+    const site = 'q';
+    // Banco 8258 en el tick 298: port 0 / 0 µ = NaN (rama 0); JMAB num 1,455·10⁻¹¹, den 0 (+∞, rama 1).
+    const line = (outcome: number, a: number, extra?: string) => ({ site, agent: -1, outcome, a, b: 0.108, ...(extra === undefined ? {} : { extra }) });
+    const rec = new DecisionRecorder();
+    rec.oracle = new Map([
+      [
+        6,
+        [
+          line(1, Infinity, '1.4551915228366852E-11;0.0'), // 298: +∞, rama distinta del NaN del port
+          line(0, -Infinity, '-7.275957614183426E-12;0.0'), // 299: −∞, misma rama
+          line(1, Infinity, '0.5;0.0'), // numerador 500.000 µ: no es indeterminado (infinito con signo)
+        ],
+      ],
+    ]);
+    withDecisions(rec, 6, () => {
+      expect(gt(site, NaN, 0.108, 'fromAmounts', undefined, undefined, { quotient: { num: 0, den: 0 } })).toBe(true);
+      // ±∞ del port con numerador de 1 µ: indeterminado igual (|num| ≤ 2 µ); misma rama, se anota igual.
+      expect(gt(site, -Infinity, 0.108, 'fromAmounts', undefined, undefined, { quotient: { num: -1, den: 0 } })).toBe(false);
+      // Infinito con signo en los dos lados (numerador > 2 µ): camino normal, mismo resultado.
+      expect(gt(site, Infinity, 0.108, 'fromAmounts', undefined, undefined, { quotient: { num: 500_000, den: 0 } })).toBe(true);
+    });
+    expect(rec.forced.map((f) => [f.kind, f.port, f.jmab, f.distancePort, f.alarm])).toEqual([
+      ['indeterminada', 0, 1, 0, false],
+      ['indeterminada', 0, 0, 1, false],
+    ]);
+    expect(rec.forced[0]!.distanceJmab).toBeCloseTo(1.455e-5, 8);
+    // De un solo lado: el port indeterminado y JMAB no, o al revés.
+    const one = (extra: string, num: number, den: number, a: number) => {
+      const r = new DecisionRecorder();
+      r.oracle = new Map([[6, [line(1, 0.2, extra)]]]);
+      return () => withDecisions(r, 6, () => gt(site, a, 0.108, 'fromAmounts', undefined, undefined, { quotient: { num, den } }));
+    };
+    expect(one('1.6;8.1', 0, 0, NaN)).toThrow(/solo en el port/);
+    expect(one('1.4551915228366852E-11;0.0', 1_600_000, 8_100_000, 0.2)).toThrow(/solo en JMAB/);
+    // Port indeterminado y el registro sin la columna 9 (corrida sin el oráculo A1).
+    const r5 = new DecisionRecorder();
+    r5.oracle = new Map([[6, [line(1, Infinity)]]]);
+    expect(() => withDecisions(r5, 6, () => gt(site, NaN, 0.108, 'fromAmounts', undefined, undefined, { quotient: { num: 0, den: 0 } }))).toThrow(/columna 9/);
+    // Sin oráculo: la comparación de siempre (NaN > x es falso), sin error; con registrador sin oráculo, se anota sin distancia.
+    expect(gt(site, NaN, 0.108, 'fromAmounts', undefined, undefined, { quotient: { num: 0, den: 0 } })).toBe(false);
+    const r6 = new DecisionRecorder();
+    expect(withDecisions(r6, 6, () => gt(site, NaN, 0.108, 'fromAmounts', undefined, undefined, { quotient: { num: 0, den: 0 } }))).toBe(false);
+    expect(r6.log[6]![site]!.fragile).toBe(0);
+  });
+
   it('sin registrador los helpers solo comparan; con registrador anotan y marcan las frágiles', () => {
     expect(gt('x', 2, 1, 'pure')).toBe(true);
     const rec = new DecisionRecorder();

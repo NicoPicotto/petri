@@ -18,49 +18,12 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import {
   OracleCaianiRng,
-  computeExpectationsEvent,
-  capitalPriceEvent,
-  consumptionPriceEvent,
-  capitalMarketFirstStepEvent,
-  rdDecisionEvent,
-  investmentDemandEvent,
-  creditSupplyEvent,
-  depositSupplyEvent,
-  depositInterestEvent,
-  creditDemandEvent,
   creditMarketEvent,
-  laborSupplyEvent,
-  laborDemandEvent,
-  governmentLaborEvent,
-  laborMarketEvent,
-  productionEvent,
-  rdOutcomeEvent,
-  consumptionDemandEvent,
-  consumptionMarketEvent,
-  capitalMarketSecondStepEvent,
-  creditInterestsEvent,
-  wagePaymentEvent,
-  bondInterestEvent,
-  advanceInterestEvent,
-  taxesEvent,
-  dividendsEvent,
-  depositDemandEvent,
-  depositMarketEvent,
-  bankBankruptcyEvent,
-  bondSupplyEvent,
-  bondMarketFirstStepEvent,
-  bondDemandEvent,
-  reservesDemandBondEvent,
-  reservesMarketBondEvent,
-  cbBondsPurchasesEvent,
-  bondMarketSecondStepEvent,
-  reservesDemandBaselEvent,
   reservesMarketBaselEvent,
-  populationHandlerEvent,
-  UPDATE_EXPECTATIONS_BLOCKS,
   parseDraws,
   contractIds,
   MKT,
+  LAG,
   DecisionRecorder,
   compareOutcomes,
   summarizeDecisions,
@@ -76,9 +39,10 @@ import {
 } from '../src/caiani';
 import { ChainScales } from './support/chain-scale';
 import { InputCarry } from './support/input-carry';
-import { decisionsFile, formatForced, nanFields, readOracleDecisions } from './support/jmab-decisions';
+import { decisionsFile, nanFields, readOracleDecisions } from './support/jmab-decisions';
+import { EVENTS, LAST, afterDump, checkCompare, d1Report as d1EventReport, lastEdges, newD1Totals, prevEvent, resetLastEdges } from './support/v3-steps';
 import type { OracleDecision } from '../src/caiani';
-import { INPUT_FIELDS, INPUT_VALUES, V3_CHAIN_RHO, chainedAmountTol, compareState, dumpExists, idMaps, readDump, stateFromDump, type CompareResult, type Dump, type ScaleSource } from './support/jmab-dump';
+import { INPUT_FIELDS, INPUT_VALUES, V3_CHAIN_RHO, chainedAmountTol, compareState, dumpExists, idMaps, readDump, stateFromDump, type Dump, type ScaleSource } from './support/jmab-dump';
 
 /**
  * Tiempo máximo de cada test del V3: 5 minutos. Con la máquina cargada (otras corridas, el oráculo) un evento que
@@ -134,135 +98,6 @@ const ALL_RUNS: { run: string; tick: number; only?: readonly number[] }[] = [
 const PENDING: { tick: number; event: number; error: RegExp; why: string }[] = [];
 const pendingOf = (tick: number, event: number) => PENDING.find((p) => p.tick === tick && p.event === event);
 
-/** Eventos portados, en orden; `rng` = el evento sortea (si no, se verifica que el registro no tenga sorteos). */
-/**
- * Cierre de un lote de pagos en el V3: se informa y se exige que cierre sin cotas relajadas, con cada pago y cada
- * grupo a < 1 µ de su suma en double (decisión de Nico, 2026-11-13: lo estricto de los agregados derivados queda en
- * los componentes; reglas-caiani.md, sec. 1).
- */
-/** Bordes redondeados por contrato del último lote cerrado (cota del lote por mecanismo; la lee el suelto). */
-let lastEdges: ReadonlyMap<number, number> | undefined;
-function settled(event: number, r: { relaxed: boolean; maxPaymentDiff: number; maxGroupDiff: number; edges: ReadonlyMap<number, number> }): void {
-  lastEdges = r.edges;
-  const maxEdges = Math.max(0, ...r.edges.values());
-  console.log(`evento ${event}, cierre del lote: ${JSON.stringify({ payments: (r as { payments?: number }).payments, relaxed: r.relaxed, maxPaymentDiff: r.maxPaymentDiff, maxGroupDiff: r.maxGroupDiff, maxEdges })}`);
-  expect(r.relaxed).toBe(false);
-  expect(r.maxPaymentDiff).toBeLessThan(1);
-  expect(r.maxGroupDiff).toBeLessThan(1);
-}
-
-const EVENTS: { e: number; run: (s: CaianiState, rng: CaianiRng) => void }[] = [
-  { e: 0, run: (s) => computeExpectationsEvent(s) },
-  { e: 1, run: capitalPriceEvent },
-  { e: 2, run: consumptionPriceEvent },
-  { e: 3, run: capitalMarketFirstStepEvent },
-  { e: 4, run: (s) => rdDecisionEvent(s) },
-  { e: 5, run: investmentDemandEvent },
-  { e: 6, run: creditSupplyEvent },
-  { e: 7, run: depositSupplyEvent },
-  { e: 8, run: (s) => depositInterestEvent(s) },
-  { e: 9, run: (s) => creditDemandEvent(s) },
-  { e: 10, run: creditMarketEvent },
-  { e: 11, run: laborSupplyEvent },
-  { e: 12, run: laborDemandEvent },
-  { e: 13, run: governmentLaborEvent },
-  { e: 14, run: laborMarketEvent },
-  { e: 15, run: (s) => productionEvent(s) },
-  { e: 16, run: (s) => rdOutcomeEvent(s) },
-  { e: 17, run: (s) => consumptionDemandEvent(s) },
-  {
-    e: 18,
-    run: (s, rng) => {
-      const r = consumptionMarketEvent(s, rng);
-      settled(18, r);
-    },
-  },
-  {
-    e: 19,
-    run: (s, rng) => {
-      const r = capitalMarketSecondStepEvent(s, rng);
-      settled(19, r);
-    },
-  },
-  {
-    e: 20,
-    run: (s) => {
-      const r = creditInterestsEvent(s);
-      settled(20, r);
-    },
-  },
-  {
-    e: 21,
-    run: (s, rng) => {
-      const r = wagePaymentEvent(s, rng);
-      settled(21, r);
-    },
-  },
-  {
-    e: 22,
-    run: (s) => {
-      const r = bondInterestEvent(s);
-      settled(22, r);
-    },
-  },
-  {
-    e: 23,
-    run: (s) => {
-      const r = advanceInterestEvent(s);
-      settled(23, r);
-    },
-  },
-  {
-    e: 24,
-    run: (s) => {
-      const r = taxesEvent(s);
-      settled(24, r);
-    },
-  },
-  {
-    e: 25,
-    run: (s) => {
-      const r = dividendsEvent(s);
-      settled(25, r);
-    },
-  },
-  {
-    e: 26,
-    run: (s) => {
-      const r = depositDemandEvent(s);
-      settled(26, r);
-    },
-  },
-  { e: 27, run: depositMarketEvent },
-  { e: 28, run: bankBankruptcyEvent },
-  { e: 29, run: (s) => bondSupplyEvent(s) },
-  { e: 30, run: bondMarketFirstStepEvent },
-  { e: 31, run: (s) => bondDemandEvent(s) },
-  { e: 32, run: (s) => reservesDemandBondEvent(s) },
-  { e: 33, run: reservesMarketBondEvent },
-  { e: 34, run: (s) => cbBondsPurchasesEvent(s) },
-  { e: 35, run: bondMarketSecondStepEvent },
-  { e: 36, run: (s) => reservesDemandBaselEvent(s) },
-  { e: 37, run: reservesMarketBaselEvent },
-  // 38–73: reportes, no tocan el estado (no se portan); el suelto del 74 arranca del volcado del 37.
-  { e: 74, run: (s) => populationHandlerEvent(s) },
-  // Evento 75 por bloques (despacho de JMAB: consumo, capital, bancos, gobierno, hogares, BC), contra los volcados de adentro
-  // del 75 (`tick-T-ev-75-in-K-Clase.jsonl`, DUMP_INSIDE) y el del 75 (reglas-caiani.md, sec. 38–39). 75.k = bloque k.
-  ...UPDATE_EXPECTATIONS_BLOCKS.map((run, k) => ({ e: 75 + (k + 1) / 10, run: (s: CaianiState) => run(s) })),
-];
-const LAST = EVENTS[EVENTS.length - 1]!.e;
-/** Volcados de los bloques del 75: el que hay **después** de cada bloque (el de antes del bloque siguiente, y el del 75). */
-const END_DUMPS: Record<number, string> = {
-  75.1: '75-in-1-CopyOfCapitalFirm2WagesEnd',
-  75.2: '75-in-2-Bank',
-  75.3: '75-in-3-GovernmentAntiCyclical',
-  75.4: '75-in-4-HouseholdsWithDole',
-  75.5: '75-in-5-CentralBank',
-  75.6: '75',
-};
-/** Evento anterior en la lista (el 74 sigue al 37: los reportes 38–73 no se portan). */
-const prevEvent = (e: number): number => EVENTS[EVENTS.findIndex((x) => x.e === e) - 1]!.e;
-
 /** Modo de la suite (encabezado del archivo): rápido (por defecto) o completo (`PETRI_V3=full`). */
 const FULL = process.env.PETRI_V3 === 'full';
 /** Ticks del modo rápido (Nico, 2026-11-14): 50 (el que ejercita las ramas) y 108 (quiebras con dos depósitos). */
@@ -287,24 +122,6 @@ EVENTS.forEach((x, k) => {
 });
 /** Volcados leídos que se guardan por corrida (~70 MB cada uno). */
 const DUMP_CACHE = 2;
-
-/**
- * Campos que no cumplen la regla general de tolerancia y quedan **reportados** (no se agranda la tolerancia):
- * se informan en cada corrida y esperan una decisión de Nico. Ver reglas-caiani.md, sec. 1, "Tolerancias".
- * Cada entrada es el tipo de campo (la etiqueta sin ids ni índices, como la imprime `compareState`) y en qué
- * modalidad se reporta.
- * - Montos: ninguno desde el redondeo con arrastre (2026-11-13).
- * - Bienes de consumo después del evento 18, encadenado (2026-11-13): cantidades y valores que son **residuos**
- *   (lo que queda del inventario de una empresa después de decenas de ventas, o el resto de la demanda de un
- *   hogar en su segunda compra). El error absoluto es el de las demandas del encadenado (~10⁻⁶), pero relativo
- *   a un residuo chico pasa el 10⁻⁶. En el evento suelto son bit a bit. Ver reglas-caiani.md, sec. 17.
- * - Morosidad de un banco en el evento 20, suelto: **resuelta** con la regla de agregados derivados (2026-11-13;
- *   ya no se reporta). Registro: en el tick 108 la
- *   morosidad del banco 8255 queda a 3,67 µ de JMAB. Suma lo que queda de los 5 préstamos de la empresa 8182
- *   (todos de ese banco): cada préstamo está a < 1 µ de lo que recibe en double (redondeo controlado), pero la suma
- *   de los 5 no tiene cota propia (~3,1 µ), más el error de entrada de los saldos (~0,5 µ). reglas-caiani.md, sec. 19.
- */
-const REPORTED_FIELDS: { field: string; chainedOnly: boolean; events?: number[] }[] = [];
 
 describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, fuera de git)', ({ run, tick, only }) => {
   // Una corrida con `only`: solo el suelto de esos eventos.
@@ -339,41 +156,13 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
   let oracleCache: Map<number, OracleDecision[]> | null = null;
   const oracleLines = () => (oracleCache ??= readOracleDecisions(decFile!, tick));
   /** Totales del modo oráculo, para el resumen de la corrida. */
-  const d1Totals = {
-    single: { forced: 0, residue: 0, indeterminate: 0, alarms: 0, consumed: 0 },
-    chained: { forced: 0, residue: 0, indeterminate: 0, alarms: 0, consumed: 0 },
-  };
+  const d1Totals = { single: newD1Totals(), chained: newD1Totals() };
   const d1Report = (mode: 'single' | 'chained', label: string, e: number, rec: DecisionRecorder, from: number) => {
     if (!decFile) return;
-    const list = rec.forced.slice(from);
-    const consumed = rec.consumed.get(e) ?? 0;
-    const t = d1Totals[mode];
-    t.forced += list.filter((f) => f.kind === 'frágil').length;
-    t.residue += list.filter((f) => f.kind === 'residuo').length;
-    t.indeterminate += list.filter((f) => f.kind === 'indeterminada').length;
-    t.alarms += list.filter((f) => f.alarm).length;
-    t.consumed += consumed;
-    if (list.length === 0 && consumed === 0) return;
-    const maxCorr = Math.max(0, ...list.map((f) => f.distancePort));
-    const maxRaw = Math.max(0, ...list.map((f) => f.distancePortRaw));
-    console.log(
-      `d1, tick ${tick}, ${label}: ${list.length} forzadas (frágiles ${list.filter((f) => f.kind === 'frágil').length}, R2 ${list.filter((f) => f.kind === 'residuo').length}, ` +
-        `alarmas ${list.filter((f) => f.alarm).length}), distancia máx del port ${maxCorr.toPrecision(3)} (cruda ${maxRaw.toPrecision(3)}), ` +
-        `${consumed} líneas de JMAB consumidas sin evaluar` +
-        (list.length > 0 ? `\n  ${formatForced(list.slice(0, 20), toJ!).join('\n  ')}${list.length > 20 ? `\n  … y ${list.length - 20} más` : ''}` : ''),
-    );
-    if (list.length > 20) {
-      // Resumen agrupado (lugar, agente, tipo): todas las forzadas del evento, aunque el detalle se corte.
-      const groups = new Map<string, number>();
-      for (const f of list) {
-        const key = `${f.kind}: "${f.site}"${f.agent === undefined ? '' : `, agente ${toJ!(f.agent)}`}`;
-        groups.set(key, (groups.get(key) ?? 0) + 1);
-      }
-      console.log(`d1, tick ${tick}, ${label}, por lugar y agente:\n  ${[...groups].map(([k, n]) => `${n} × ${k}`).join('\n  ')}`);
-    }
+    d1EventReport(d1Totals[mode], tick, label, e, rec, from, toJ!);
   };
   const before = `tick-${tick}.jsonl`;
-  const after = (e: number) => `tick-${tick}-ev-${END_DUMPS[e] ?? e}.jsonl`;
+  const after = (e: number) => afterDump(tick, e);
   const available = dumpExists(dir + after(LAST));
   // Registro de sorteos: se lee al primer uso y se suelta al terminar la corrida (con 10 corridas, leerlos todos al
   // recolectar los tests llenaba el heap de 4 GB; 2026-11-14).
@@ -412,35 +201,9 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
             return t.rounded + e;
           }
         : undefined;
-    const edges = !chained && lastEdges ? (c: number) => lastEdges!.get(c) : undefined;
+    const edges = !chained && lastEdges() ? (c: number) => lastEdges()!.get(c) : undefined;
     const r = compareState(s, dumpOf(name), { amountTol, scale, carry: carry?.carry, initialCarry: carry?.initialCarry, derived: derivedTol, derivedValue: carry?.valueCarry, edges });
-    console.log(`V3 tick ${tick}, ${label}:`, JSON.stringify(r.counts));
-    report(label, r);
-    const scaledRows = Object.entries(r.scaled)
-      .filter(([, v]) => v.maxErrOverS > 0)
-      .sort((a, b) => b[1].maxErrOverS - a[1].maxErrOverS)
-      // Los 8 con el peor cociente y, siempre, los que necesitaron la escala para pasar.
-      .filter(([, v], i) => i < 8 || v.byScale > 0)
-      .map(([k, v]) => `${k}: diferencia/S máx ${v.maxErrOverS.toExponential(2)}, ρ·S máx ${v.maxRhoS.toPrecision(3)}${v.byScale > 0 ? `, ${v.byScale} pasan solo por ρ·S` : ''}`);
-    if (scaledRows.length > 0) console.log(`Escala de los flujos, tick ${tick}, ${label} (ρ = ${V3_CHAIN_RHO}):\n  ${scaledRows.join('\n  ')}`);
-    const reported = REPORTED_FIELDS.filter((f) => (chained || !f.chainedOnly) && (!f.events || f.events.includes(event))).map((f) => f.field);
-    const isReported = (kind: string) => reported.includes(kind);
-    const reportedRows = [...Object.entries(r.amountFields), ...Object.entries(r.doubleFieldsOver)].filter(([k, v]) => isReported(k) && v.over > 0);
-    if (reportedRows.length > 0) {
-      console.log(`Campos reportados, tick ${tick}, ${label}:\n  ${reportedRows.map(([k, v]) => `${k}: ${v.over} sobre la tolerancia, máx ${v.max}`).join('\n  ')}`);
-    }
-    const unexpected = r.diffs.filter((d) => !isReported(d.slice(0, d.indexOf(':')).replace(/\d+/g, '#')));
-    expect(unexpected).toEqual([]);
-    // `diffs` guarda solo las primeras 40: si se llenó con reportados, el total tiene que cuadrar con ellos.
-    const reportedOver = reportedRows.reduce((a, [, v]) => a + v.over, 0);
-    expect(r.total - reportedOver).toBe(unexpected.length);
-  };
-  /** Montos con diferencia > 0, por tipo de campo: máximo, cuántos superan la tolerancia y de cuántos. */
-  const report = (label: string, r: CompareResult) => {
-    const rows = Object.entries(r.amountFields)
-      .filter(([, v]) => v.max > 0)
-      .map(([k, v]) => `${k}: máx ${v.max} µ${v.over > 0 ? `, ${v.over} de ${v.n} sobre la tolerancia` : ''}`);
-    if (rows.length > 0) console.log(`Montos, tick ${tick}, ${label}:\n  ${rows.join('\n  ')}`);
+    checkCompare(r, tick, label, event, chained);
   };
   /** Registro de decisiones de cada modalidad (lo llenan los dos tests de abajo; vitest los corre en orden). */
   let single = new DecisionRecorder();
@@ -484,7 +247,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
     const carry = new InputCarry(s);
     const derived = new DerivedRecorder();
     const inputs = new InputRecorder();
-    lastEdges = undefined;
+    resetLastEdges();
     const forcedFrom = single.forced.length;
     single.oracle = oracleLines();
     single.toJmab = toJ!;
@@ -654,5 +417,32 @@ describe('pedido residual de crédito redondeado a 1 µ: qué préstamo recibe l
     // ~10⁻¹⁴, dentro de la tolerancia de 2 µ).
     const r = compareState(s, readDump(`${run}state/tick-300-ev-10.jsonl`));
     expect(r.diffs).toEqual([]);
+  });
+});
+
+describe('arnés del V3: ratio de capital indeterminado en la comparación del estado (reglas-caiani.md, sec. 40)', () => {
+  const dump = `${ORACLE}p3-s102-t300/state/tick-300.jsonl`;
+  it.skipIf(!dumpExists(dump))('tick 300, semilla 102: el banco 8258 (−∞ en JMAB, rezago del patrimonio −2,9·10⁻¹¹) no se compara; con numerador > 2 µ sí', () => {
+    const d = readDump(dump);
+    const { toJ } = idMaps(d.meta);
+    const s = stateFromDump(d);
+    const b = s.banks.find((x) => toJ(x.id) === 8258)!;
+    // Del volcado: −2,9·10⁻¹¹ / 0 = −∞, como JMAB. Indeterminado en los dos lados: no se compara y no es diferencia.
+    expect(b.capitalRatio).toBe(-Infinity);
+    let r = compareState(s, d);
+    expect(r.diffs).toEqual([]);
+    expect(r.indeterminate).toEqual(['banco 8258 ratio de capital']);
+    // El port con 0/0 = NaN (patrimonio 0 µ, el caso del encadenado): sigue indeterminado.
+    b.capitalRatio = NaN;
+    b.lags[LAG.NETWEALTH]![299] = 0;
+    r = compareState(s, d);
+    expect(r.diffs).toEqual([]);
+    expect(r.indeterminate).toHaveLength(1);
+    // Numerador del port de 3 µ (> 2 µ): ya no es indeterminado, y +∞ contra −∞ de JMAB es diferencia.
+    b.capitalRatio = Infinity;
+    b.lags[LAG.NETWEALTH]![299] = 3e-6;
+    r = compareState(s, d);
+    expect(r.indeterminate).toEqual([]);
+    expect(r.diffs.some((x) => x.includes('banco 8258 ratio de capital (no finito)'))).toBe(true);
   });
 });
