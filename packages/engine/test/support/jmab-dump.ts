@@ -8,7 +8,8 @@
  * calculados a partir de montos, 1e-6 relativo; double que no dependen de montos, 1e-9 relativo. En el
  * encadenado, además, montos y double de montos pasan con ρ·S (escala de los flujos; `CompareOptions.scale`).
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import {
   INITIALISER,
   KIND_INDEX,
@@ -74,8 +75,27 @@ export function itemValue(it: J, kind: ContractKind): number {
   return (it['AbstractItem.quantity'] as number) * (it['price'] as number);
 }
 
+/**
+ * Archivo de un volcado: la ruta tal cual (`.jsonl`) o, si no existe, la comprimida (`.jsonl.gz`). Los volcados del oráculo
+ * se guardan comprimidos con gzip (decisión de Nico, 2026-11-16; reglas-caiani.md, sec. 40): quien llama sigue usando el
+ * nombre `.jsonl`.
+ */
+export function dumpFile(path: string): string | undefined {
+  if (existsSync(path)) return path;
+  if (existsSync(path + '.gz')) return path + '.gz';
+  return undefined;
+}
+
+/** Si el volcado existe, sin comprimir o comprimido. */
+export function dumpExists(path: string): boolean {
+  return dumpFile(path) !== undefined;
+}
+
 export function readDump(path: string): Dump {
-  const lines = readFileSync(path, 'utf8').split('\n').filter((l) => l.length > 0);
+  const file = dumpFile(path);
+  if (!file) throw new Error(`no existe el volcado ${path} (ni ${path}.gz)`);
+  const text = file.endsWith('.gz') ? gunzipSync(readFileSync(file)).toString('utf8') : readFileSync(file, 'utf8');
+  const lines = text.split('\n').filter((l) => l.length > 0);
   const meta = JSON.parse(lines[0]!, reviveNonFinite).meta as DumpMeta;
   const agents = new Map<number, J>();
   for (const line of lines.slice(1)) {

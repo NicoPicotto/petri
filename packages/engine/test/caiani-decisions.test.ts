@@ -8,6 +8,7 @@ import {
   compareOutcomes,
   decisionDistance,
   gt,
+  record,
   rounding,
   targetOutput,
   withDecisions,
@@ -21,7 +22,49 @@ describe('decisiones discretas: casos a mano', () => {
     expect(decisionDistance(1e-12, 0, 'pure', 100)).toBe(1e-14); // escala explícita
     expect(decisionDistance(Infinity, 0.2, 'fromAmounts')).toBe(Infinity);
     expect(decisionDistance(Infinity, Infinity, 'pure')).toBe(0);
-    expect(decisionDistance(NaN, 1, 'pure')).toBeNaN();
+    // NaN: error salvo que el lugar lo declare (pedido de Nico, 2026-11-16).
+    expect(() => decisionDistance(NaN, 1, 'pure')).toThrow(/NaN/);
+    expect(decisionDistance(NaN, 1, 'pure', undefined, true)).toBeNaN();
+  });
+
+  it('modo oráculo (d1): fuerza solo si las dos son frágiles; R2 sobre un residuo; desalineada y no frágil fallan', () => {
+    const rec = new DecisionRecorder();
+    rec.oracle = new Map([
+      [
+        5,
+        [
+          { site: 'm', agent: -1, outcome: 1, a: 1.0000005, b: 1, }, // JMAB: a > b por 0,5 µ (frágil)
+          { site: 'm', agent: -1, outcome: 0, a: 1, b: 1 }, // igual que el port: no se fuerza
+          { site: 'r', agent: -1, outcome: 1, a: -9.2e-14, b: 0 }, // residuo de JMAB (R2)
+          { site: 'm', agent: -1, outcome: 1, a: 2, b: 1 }, // JMAB claro
+        ],
+      ],
+    ]);
+    withDecisions(rec, 5, () => {
+      // Port: 1 µ contra 1 µ (empate, frágil); JMAB: 1,0000005 > 1 (0,5 µ). Se toma la rama de JMAB.
+      expect(gt('m', 1_000_000, 1_000_000, 'amount')).toBe(true);
+      expect(gt('m', 1_000_000, 1_000_000, 'amount')).toBe(false);
+      // R2: operandos del port 0 exacto, de JMAB un residuo: se toma la de JMAB y se cuenta como residuo.
+      expect(record('r', false, 0, 0, 'fromAmounts', 0)).toBe(true);
+      // JMAB 2 > 1 (1.000.000 µ de distancia): no es frágil; el port da falso → error.
+      expect(() => gt('m', 1_000_000, 1_000_000, 'amount')).toThrow(/no frágil/);
+    });
+    expect(rec.forced.map((f) => [f.site, f.kind, f.port, f.jmab])).toEqual([
+      ['m', 'frágil', 0, 1],
+      ['r', 'residuo', 0, 1],
+    ]);
+    // Desalineada: otro lugar en la misma posición.
+    const r2 = new DecisionRecorder();
+    r2.oracle = new Map([[1, [{ site: 'x', agent: -1, outcome: 1, a: 1, b: 0 }]]]);
+    expect(() => withDecisions(r2, 1, () => gt('y', 1, 0, 'pure'))).toThrow(/desalineada/);
+    // JMAB con una decisión de más al terminar el evento.
+    const r3 = new DecisionRecorder();
+    r3.oracle = new Map([[2, [{ site: 'x', agent: -1, outcome: 1, a: 1, b: 0 }]]]);
+    expect(() => r3.finishEvent(2)).toThrow(/1 decisiones más/);
+    // NaN declarado: el de JMAB también tiene que ser NaN.
+    const r4 = new DecisionRecorder();
+    r4.oracle = new Map([[3, [{ site: 'n', agent: -1, outcome: 0, a: 0.5, b: 0.1 }]]]);
+    expect(() => withDecisions(r4, 3, () => gt('n', NaN, 0.1, 'pure', undefined, undefined, { nanOk: true }))).toThrow(/NaN en el port y no en JMAB/);
   });
 
   it('sin registrador los helpers solo comparan; con registrador anotan y marcan las frágiles', () => {

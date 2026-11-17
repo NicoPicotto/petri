@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { compareState, idMaps, readDump } from './support/jmab-dump';
+import { compareState, dumpExists, idMaps, readDump } from './support/jmab-dump';
 import { Rng } from '../src/rng';
 import {
   LAG,
@@ -128,7 +128,7 @@ const RUN = fileURLToPath(new URL('../../../reference/p0/runs/oracle/p2-init/', 
 const DUMP = RUN + 'state/init.jsonl';
 const DRAWS = RUN + 'draws.tsv';
 
-describe.skipIf(!existsSync(DUMP) || !existsSync(DRAWS))('V1: inicialización contra el oráculo (reference/, fuera de git)', () => {
+describe.skipIf(!dumpExists(DUMP) || !existsSync(DRAWS))('V1: inicialización contra el oráculo (reference/, fuera de git)', () => {
   it('el estado inicial coincide con el de JMAB agente por agente', () => {
     const dump = readDump(DUMP);
     const { toJ } = idMaps(dump.meta);

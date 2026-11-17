@@ -28,11 +28,23 @@
 import { Rng } from '../rng';
 import { foldedNormalFromUniform } from './normal';
 
+/** Opciones de una Bernoulli (solo las usa el generador del oráculo; el del modo PRNG las ignora). */
+export interface BernoulliOptions {
+  /**
+   * Guarda de la p derivada del mecanismo (aprobada por Nico, 2026-11-16; reglas-caiani.md, sec. 40):
+   * (λ + x)·(ε_previo + ε_potencial) + η, con ε la tolerancia relativa de la clase de origen de cada operando y η el error
+   * de `expNeg`. El oráculo admite |p − p_JMAB| ≤ (1 − min(p, p_JMAB)) × sensitivity.
+   */
+  sensitivity?: number;
+  /** Solo rama forzada (modo oráculo; inventario-decisiones H): sortea aunque p ≤ 0 (JMAB sorteó con p ~ ε). */
+  forced?: boolean;
+}
+
 export interface CaianiRng {
   /** |N(0, σ)|. */
   foldedNormal(site: string, sigma: number): number;
-  /** true con probabilidad p. Con p ≤ 0 o p ≥ 1 no sortea (como JMAB, que no llama al generador). */
-  bernoulli(site: string, p: number): boolean;
+  /** true con probabilidad p. Con p ≤ 0 o p ≥ 1 no sortea (como JMAB, que no llama al generador), salvo `opts.forced`. */
+  bernoulli(site: string, p: number, opts?: BernoulliOptions): boolean;
   /** Mezcla `items` en el lugar (AgentList.shuffle). `what` identifica la lista (p. ej. "buyers"). */
   shuffle<T>(site: string, what: string, items: T[], idOf: (t: T) => number): T[];
   /** Mezcla los empleados de `ownerId` en el lugar (Collections.shuffle). */
@@ -245,15 +257,21 @@ export class OracleCaianiRng implements CaianiRng {
     return v;
   }
 
-  bernoulli(site: string, p: number): boolean {
-    if (p <= 0) return false;
-    if (p >= 1) return true;
+  bernoulli(site: string, p: number, opts?: BernoulliOptions): boolean {
+    if (!opts?.forced) {
+      if (p <= 0) return false;
+      if (p >= 1) return true;
+    }
     const r = this.next('bern', site);
     const [ps, res] = splitDetail(r);
     const logged = Number.parseFloat(ps);
     if (logged !== p) {
-      const rel = Math.abs(logged - p) / Math.max(Math.abs(logged), Math.abs(p));
-      if (rel > this.pTolerance) {
+      // Guarda derivada del mecanismo (aprobada por Nico, 2026-11-16) si quien llama la da; si no, la relativa de siempre.
+      const ok =
+        opts?.sensitivity !== undefined
+          ? Math.abs(logged - p) <= (1 - Math.min(p, logged)) * opts.sensitivity
+          : Math.abs(logged - p) / Math.max(Math.abs(logged), Math.abs(p)) <= this.pTolerance;
+      if (!ok) {
         throw new Error(`oráculo: Bernoulli en ${site} con p = ${p}, el registro tiene p = ${logged} (secuencia ${r.seq})`);
       }
       this.pDiffs.push({ seq: r.seq, site, logged, port: p });

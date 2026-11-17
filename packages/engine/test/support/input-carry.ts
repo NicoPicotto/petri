@@ -94,6 +94,15 @@ export class InputCarry {
   }
 
   /**
+   * Error de entrada (µ) de los operandos agregados de una decisión (punto 3 de Nico, 2026-11-16; `DecisionOptions.inputs`
+   * en decisions.ts): Σ coeficiente × δ, con el δ del saldo inicial de cada contrato. Se pasa al registrador como
+   * `inputError`.
+   */
+  inputError(terms: readonly InputTerm[]): number {
+    return this.epsilon(terms);
+  }
+
+  /**
    * Montos calculados (decisión de Nico, 2026-11-13): por cada pago anotado por el motor, ε = Σ coeficiente × δ de sus
    * entradas, llevado con signo a cada pata del pago (las de `paymentLegs`: la cuenta que paga, la que cobra y la
    * liquidación entre bancos). Llamar después de correr el evento.

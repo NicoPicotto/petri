@@ -22,7 +22,7 @@ import { PaymentBatch, type SettleReport } from './payments';
 import { expNeg } from '../detmath';
 import { logistic } from '../creditRisk';
 import type { CaianiRng } from './rng';
-import { ceiling, flooring, ge, gt, lt, record, rounding } from './decisions';
+import { ceiling, consumeResidueDecisions, decisionsActive, flooring, ge, gt, lastDecisionForced, lt, oracleDecisions, record, rounding, type DecisionOptions, type Tolerance } from './decisions';
 import { derivedContract, derivedInput, derivedPayment, derivedRounded, derivedValue, inputsActive, scaleTerms, type InputTerm } from './derived';
 import {
   EXPECTATION,
@@ -92,18 +92,26 @@ function sumContracts(ledger: Ledger, agent: AgentId, side: 'assets' | 'liabilit
  */
 export const SITE_TARGET_OUTPUT = 'TargetExpectedInventoriesOutputStrategy.computeOutput';
 
-export function targetOutput(expectedRealSales: number, inventoryQuantity: number, share: number): number {
+export function targetOutput(expectedRealSales: number, inventoryQuantity: number, share: number, agent?: AgentId, tolerance: Tolerance = 'pure'): number {
   const expInv = expectedRealSales * share;
   const x = expectedRealSales + (expInv - inventoryQuantity);
-  // Decisión: el piso 0. Escala: la de los términos (el resultado sale de una resta).
-  record(SITE_TARGET_OUTPUT, x > 0, x, 0, 'pure', Math.max(Math.abs(expectedRealSales), Math.abs(expInv), Math.abs(inventoryQuantity)));
-  return Math.max(0, x);
+  // Math.max(0, x) de Java (NaN si x es NaN, igual que en JS).
+  if (Number.isNaN(x)) return x;
+  // Decisión: el piso 0. Escala: la de los términos (el resultado sale de una resta). La clase es la del origen: de
+  // montos en las de consumo (la expectativa de ventas reales y el inventario son de montos; reglas-caiani.md, sec. 1).
+  const positive = record(SITE_TARGET_OUTPUT, x > 0, x, 0, tolerance, Math.max(Math.abs(expectedRealSales), Math.abs(expInv), Math.abs(inventoryQuantity)), agent);
+  if (positive && !(x > 0)) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R3: con x ≤ 0 la producción deseada tendría otro signo
+    // que en JMAB y el piso del precio iría por otra rama)
+    throw new Error(`${SITE_TARGET_OUTPUT}: rama forzada no portada (x = ${x} ≤ 0 y JMAB > 0; inventario-decisiones H, R3)`);
+  }
+  return positive ? x : 0;
 }
 
-function firmOutput(f: FirmState, inventoryQuantity: number, share: number): void {
+function firmOutput(f: FirmState, inventoryQuantity: number, share: number, tolerance: Tolerance): void {
   const exp = f.expectations[EXPECTATION.REALSALES];
   if (!exp) throw new Error(`empresa ${f.id} sin expectativa de ventas reales`);
-  f.desiredOutput = targetOutput(exp.expectation, inventoryQuantity, share);
+  f.desiredOutput = targetOutput(exp.expectation, inventoryQuantity, share, f.id, tolerance);
 }
 
 /**
@@ -117,10 +125,24 @@ function firmOutput(f: FirmState, inventoryQuantity: number, share: number): voi
  * - bancos (`Bank.onTicArrived`): bailoutCost = 0, morosidad del tick = 0, defaulted = false,
  *   expectativas, ratio de liquidez y ratio de capital;
  * - BC (`CentralBank.onTicArrived`): ganancias por adelantos y por bonos; activo en adelantos.
- * El gobierno no lo escucha. No hay sorteos ni interacción entre agentes: el orden no importa.
+ * El gobierno no lo escucha. No hay sorteos ni interacción entre agentes: el orden no cambia el estado (sí la secuencia
+ * de decisiones: van primero las de consumo, como en JMAB).
  */
 export function computeExpectationsEvent(s: CaianiState): void {
   const L = s.ledger;
+
+  // Orden de JMAB: primero las empresas de consumo y después las de capital (registro de decisiones del oráculo, tick
+  // 133; inventario-decisiones I). Cada empresa decide sola: el orden no cambia el resultado, pero sí la secuencia de
+  // decisiones que se empareja con la de JMAB (aprobado por Nico, 2026-11-16).
+  for (const c of s.consumptionFirms) {
+    c.bailoutCost = 0;
+    c.defaulted = false;
+    computeExpectations(c.expectations);
+    const inv = c.consumptionGoods[0];
+    if (!inv) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
+    firmOutput(c, inv.quantity, s.rules.inventoryShareConsumption, 'fromAmounts');
+    c.active[MKT.CAPGOOD] = true;
+  }
 
   for (const k of s.capitalFirms) {
     k.bailoutCost = 0;
@@ -129,22 +151,13 @@ export function computeExpectationsEvent(s: CaianiState): void {
     // getItemStockMatrix(true, SM_CAPGOOD): el primer bien de capital es el inventario propio.
     const inv = k.capitalGoods[0];
     if (!inv) throw new Error(`empresa de capital ${k.id} sin inventario (JMAB: NullPointerException)`);
-    firmOutput(k, inv.quantity, s.rules.inventoryShareCapital);
+    firmOutput(k, inv.quantity, s.rules.inventoryShareCapital, 'pure');
     // Decisión: con inventario > 0 queda activa; sin inventario, el borde es Y* = 1 (⌊Y*⌋ > 0).
     const activeK = inv.quantity + Math.floor(k.desiredOutput) > 0;
-    if (inv.quantity !== 0) record('CapitalFirm.determineOutput activo (inventario)', activeK, inv.quantity, 0, 'pure');
-    else record('CapitalFirm.determineOutput activo (⌊Y*⌋)', activeK, k.desiredOutput, 1, 'pure');
-    k.active[MKT.CAPGOOD] = activeK;
-  }
-
-  for (const c of s.consumptionFirms) {
-    c.bailoutCost = 0;
-    c.defaulted = false;
-    computeExpectations(c.expectations);
-    const inv = c.consumptionGoods[0];
-    if (!inv) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
-    firmOutput(c, inv.quantity, s.rules.inventoryShareConsumption);
-    c.active[MKT.CAPGOOD] = true;
+    k.active[MKT.CAPGOOD] =
+      inv.quantity !== 0
+        ? record('CapitalFirm.determineOutput activo (inventario)', activeK, inv.quantity, 0, 'pure', undefined, k.id)
+        : record('CapitalFirm.determineOutput activo (⌊Y*⌋)', activeK, k.desiredOutput, 1, 'pure', undefined, k.id);
   }
 
   for (const h of s.households) computeExpectations(h.expectations);
@@ -157,7 +170,12 @@ export function computeExpectationsEvent(s: CaianiState): void {
     const deposits = sumContracts(L, b.id, 'liabilities', 'deposit');
     const reserves = sumContracts(L, b.id, 'assets', 'reserves');
     // Cociente de sumas en µ: igual al de JMAB salvo el redondeo de los saldos.
-    b.liquidityRatio = record('Bank.onTicArrived depósitos = 0', deposits === 0, deposits, 0, 'amount') ? 0 : reserves / deposits;
+    const zeroDeposits = record('Bank.onTicArrived depósitos = 0', deposits === 0, deposits, 0, 'amount', undefined, b.id, decisionsActive() ? { inputs: { a: kindTerms(L, b.id, 'liabilities', 'deposit') } } : undefined);
+    if (!zeroDeposits && deposits === 0) {
+      // solo rama forzada (modo oráculo): inventario-decisiones H (R3: reservas / 0; un banco sin depósitos no pasa nunca)
+      throw new Error(`banco ${b.id}: rama forzada no portada (depósitos 0 µ y JMAB ≠ 0; inventario-decisiones H, R3)`);
+    }
+    b.liquidityRatio = zeroDeposits ? 0 : reserves / deposits;
     const loans = toUnits(sumContracts(L, b.id, 'assets', 'loan'));
     // Como JMAB: sin préstamos da Infinity (o NaN si el patrimonio también es 0).
     b.capitalRatio = getLag(b.lags, LAG.NETWEALTH, s.round, 1) / loans;
@@ -202,15 +220,20 @@ export function adaptiveMarkUpPrice(
   lowerBound: () => number,
   rng: CaianiRng,
   r: { markUpThreshold: number; markUpAdaptive: number; markUpSigma: number },
+  tolerance: Tolerance = 'pure',
 ): number {
+  // Clase por origen (aprobado por Nico, 2026-11-16; reglas-caiani.md, sec. 1): en las de consumo, la referencia, el piso y
+  // el precio salen de montos (inventario, ventas, producción deseada); en las de capital, de enteros y puros.
   const reference = inventoryQuantity / pastRealSales;
   const previousLowerBound = price / (1 + f.markUp);
   const x = rng.foldedNormal(SITE_MARKUP, r.markUpSigma);
-  if (gt(`${SITE_MARKUP} referencia > umbral`, reference, r.markUpThreshold, 'pure')) f.markUp -= r.markUpAdaptive * f.markUp * x;
+  // nanOk: inventario 0 / ventas 0 = NaN en las empresas zombis, igual en JMAB (lista de NaN declarados, reglas-caiani.md,
+  // sec. 1): la comparación da falso en los dos.
+  if (gt(`${SITE_MARKUP} referencia > umbral`, reference, r.markUpThreshold, tolerance, undefined, f.id, { nanOk: true })) f.markUp -= r.markUpAdaptive * f.markUp * x;
   else f.markUp += r.markUpAdaptive * f.markUp * x;
   const lb = lowerBound();
-  const p = record(`${SITE_MARKUP} piso ≠ 0`, lb !== 0, lb, 0, 'pure') ? lb * (1 + f.markUp) : previousLowerBound * (1 + f.markUp);
-  return gt(`${SITE_MARKUP} precio > piso`, p, lb, 'pure') ? p : lb;
+  const p = record(`${SITE_MARKUP} piso ≠ 0`, lb !== 0, lb, 0, tolerance, undefined, f.id) ? lb * (1 + f.markUp) : previousLowerBound * (1 + f.markUp);
+  return gt(`${SITE_MARKUP} precio > piso`, p, lb, tolerance, undefined, f.id) ? p : lb;
 }
 
 /**
@@ -219,7 +242,7 @@ export function adaptiveMarkUpPrice(
  * igual productividad, en el orden de la lista) y cada una necesita cantidad / (capital/trabajo)
  * trabajadores. Sin redondear (el redondeo lo hace quien llama).
  */
-export function requiredWorkers(capital: readonly CapitalGoodStock[], output: number): number {
+export function requiredWorkers(capital: readonly CapitalGoodStock[], output: number, agent?: AgentId): number {
   const prods: number[] = [];
   for (const g of capital) if (!prods.includes(g.productivity)) prods.push(g.productivity);
   prods.sort((a, b) => b - a);
@@ -228,7 +251,8 @@ export function requiredWorkers(capital: readonly CapitalGoodStock[], output: nu
   for (const p of prods) {
     for (const g of capital) {
       if (g.productivity !== p) continue;
-      if (gt('ConsumptionFirm.getRequiredWorkers residual > capacidad de la añada', residual, g.productivity * g.quantity, 'pure')) {
+      // De montos por origen (la producción deseada o el inventario de consumo; reglas-caiani.md, sec. 1).
+      if (gt('ConsumptionFirm.getRequiredWorkers residual > capacidad de la añada', residual, g.productivity * g.quantity, 'fromAmounts', undefined, agent)) {
         workers += g.quantity / g.capitalLaborRatio;
         residual -= g.productivity * g.quantity;
       } else {
@@ -278,12 +302,13 @@ export function capitalPriceEvent(s: CaianiState, rng: CaianiRng): void {
 export function consumptionLowerBound(c: FirmState): number {
   const w = wageExpectation(c);
   if (c.desiredOutput > 0) {
-    const workers = requiredWorkers(c.capitalGoods, c.desiredOutput);
-    return (w * rounding('ConsumptionFirm.getPriceLowerBound Math.round(trabajadores)', workers, Math.round(workers), 'pure')) / c.desiredOutput;
+    const workers = requiredWorkers(c.capitalGoods, c.desiredOutput, c.id);
+    // Misma línea de JMAB que el redondeo de `getRequiredWorkers` (298): mismo lugar (F2 del inventario de decisiones).
+    return (w * rounding('ConsumptionFirm.getRequiredWorkers Math.round(trabajadores)', workers, Math.round(workers), 'fromAmounts', c.id)) / c.desiredOutput;
   }
   const inv = c.consumptionGoods[0];
   if (!inv) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
-  return (w * requiredWorkers(c.capitalGoods, inv.quantity)) / inv.quantity;
+  return (w * requiredWorkers(c.capitalGoods, inv.quantity, c.id)) / inv.quantity;
 }
 
 /** Evento 2, `consumptionPriceTic`: `ConsumptionFirm.computePrice` (683–690), en orden de creación. */
@@ -299,6 +324,7 @@ export function consumptionPriceEvent(s: CaianiState, rng: CaianiRng): void {
       () => (c.expectedVariableCosts = consumptionLowerBound(c)),
       rng,
       s.rules,
+      'fromAmounts',
     );
     inv.price = price;
     setLag(c.lags, LAG.PRICE, s.round, price);
@@ -401,28 +427,53 @@ export const SITE_SWITCHING = 'AbstractSwitchingStrategy.switches';
  * - cobro: si previous < potential, 1 − e^{λ(previous − potential)/previous}; si no, 0.
  * La exponencial va con `expNeg` (detmath). Un exponente positivo (montos negativos) no se porta: error.
  */
-export function switchingProbability(previous: number, potential: number, lambda: number, payOrReceive: boolean): number {
+export function switchingProbability(previous: number, potential: number, lambda: number, payOrReceive: boolean, tolerance: Tolerance = 'pure'): number {
+  return switchingExponent(previous, potential, lambda, payOrReceive, tolerance).p;
+}
+
+function switchingExponent(previous: number, potential: number, lambda: number, payOrReceive: boolean, tolerance: Tolerance): { p: number; x: number } {
   let x: number;
   if (payOrReceive) {
-    if (!lt(`${SITE_SWITCHING} potencial < previo`, potential, previous, 'pure')) return 0;
+    if (!lt(`${SITE_SWITCHING} potencial < previo`, potential, previous, tolerance)) return { p: 0, x: 0 };
     x = (lambda * (previous - potential)) / potential;
   } else {
-    if (!lt(`${SITE_SWITCHING} previo < potencial`, previous, potential, 'pure')) return 0;
+    if (!lt(`${SITE_SWITCHING} previo < potencial`, previous, potential, tolerance)) return { p: 0, x: 0 };
     x = (lambda * (potential - previous)) / previous;
   }
+  if (lastDecisionForced() && !(x > 0)) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (con los operandos iguales, o al revés por ε, x ≤ 0; JMAB
+    // tiene x ~ ε y sortea con p ~ ε: x = 0 y `switches` pide la Bernoulli igual)
+    x = 0;
+  }
   if (!(x >= 0)) throw new Error(`switchingProbability: exponente positivo (previous ${previous}, potential ${potential})`);
-  return 1 - expNeg(x);
+  return { p: 1 - expNeg(x), x };
 }
+
+/** Error relativo de `expNeg` (detmath): η de la guarda de la p. */
+const EXPNEG_ERROR = 1e-12;
 
 /**
  * `AbstractSwitchingStrategy.switches`: con p = 1 cambia y con p = 0 no, **sin sortear**; si no, una
- * Bernoulli(p).
+ * Bernoulli(p). `cls`: la clase de origen de los operandos (reglas-caiani.md, sec. 1), para la decisión y para la guarda
+ * de la p del oráculo; el modo PRNG no la usa.
  */
-export function switches(previous: number, potential: number, lambda: number, payOrReceive: boolean, rng: CaianiRng): boolean {
-  const p = switchingProbability(previous, potential, lambda, payOrReceive);
+export function switches(
+  previous: number,
+  potential: number,
+  lambda: number,
+  payOrReceive: boolean,
+  rng: CaianiRng,
+  cls: { tolerance: Tolerance; epsPrevious: number; epsPotential: number } = { tolerance: 'pure', epsPrevious: 1e-9, epsPotential: 1e-9 },
+): boolean {
+  const { p, x } = switchingExponent(previous, potential, lambda, payOrReceive, cls.tolerance);
+  // La decisión de `switchingExponent` es la última registrada: si se forzó, JMAB sorteó (solo en modo oráculo).
+  const forced = oracleDecisions() && lastDecisionForced();
   if (p === 1) return true;
-  if (p === 0) return false;
-  return rng.bernoulli(SITE_SWITCHING, p);
+  if (p === 0 && !forced) return false;
+  // Guarda de la p derivada del mecanismo (aprobada por Nico, 2026-11-16; reglas-caiani.md, sec. 40): el error de entrada
+  // de los operandos, según su clase de origen, propagado por p = 1 − e^{−x}.
+  const sensitivity = (lambda + x) * (cls.epsPrevious + cls.epsPotential) + EXPNEG_ERROR;
+  return rng.bernoulli(SITE_SWITCHING, p, { sensitivity, forced });
 }
 
 /**
@@ -455,16 +506,16 @@ export function realCapitalDemand(c: FirmState, newCapital: CapitalGoodStock): n
     if (old.age !== -1) currentCapacity += old.productivity * old.quantity;
     const saving = ((lpOld - lpNew) / w) * (old.duration - old.age);
     // x − p > 0 ⇔ x > p en double (IEEE, con subnormales): se registra contra el precio.
-    if (record('RealCapitalDemandWithPayBackPeriod obsolescencia', saving - newCapital.price > 0, saving, newCapital.price, 'pure')) {
+    if (record('RealCapitalDemandWithPayBackPeriod obsolescencia', saving - newCapital.price > 0, saving, newCapital.price, 'pure', undefined, c.id)) {
       old.obsolete = true;
     } else if (old.duration - old.age > 1) {
       residualCapacity += old.productivity * old.quantity;
     }
   }
   const desiredCapacity = (1 + c.desiredCapacityGrowth) * currentCapacity;
-  if (ge('RealCapitalDemandWithPayBackPeriod deseada ≥ residual', desiredCapacity, residualCapacity, 'pure')) {
+  if (ge('RealCapitalDemandWithPayBackPeriod deseada ≥ residual', desiredCapacity, residualCapacity, 'pure', undefined, c.id)) {
     const x = (desiredCapacity - residualCapacity) / newCapital.productivity;
-    return rounding('RealCapitalDemandWithPayBackPeriod Math.round(demanda)', x, javaRoundToInt(x), 'pure');
+    return rounding('RealCapitalDemandWithPayBackPeriod Math.round(demanda)', x, javaRoundToInt(x), 'pure', c.id);
   }
   return 0;
 }
@@ -523,7 +574,7 @@ function selectCapitalSupplier(s: CaianiState, c: FirmState, sellers: readonly A
   let maxAttr = -Infinity;
   for (const k of sellers) {
     const a = capitalAttractiveness(w, capitalOffered(s, k));
-    if (gt('BestQualityPriceCapitalSupplierWithSwitching mejor atractivo', a, maxAttr, 'pure')) {
+    if (gt('BestQualityPriceCapitalSupplierWithSwitching mejor atractivo', a, maxAttr, 'pure', undefined, c.id)) {
       best = k;
       maxAttr = a;
     }
@@ -533,9 +584,10 @@ function selectCapitalSupplier(s: CaianiState, c: FirmState, sellers: readonly A
   const prevAttr = capitalFirmById(s, prev).active[MKT.CAPGOOD] ? capitalAttractiveness(w, capitalOffered(s, prev)) : -Infinity;
   // Si el previo es el mejor, los dos atractivos son el mismo cálculo: no es una decisión que pueda
   // darse vuelta y no se registra. Un empate con otra empresa sí se registra.
-  const prevWorse = prev === best ? prevAttr < maxAttr : lt('BestQualityPriceCapitalSupplierWithSwitching previo < mejor', prevAttr, maxAttr, 'pure');
+  const prevWorse = prev === best ? prevAttr < maxAttr : lt('BestQualityPriceCapitalSupplierWithSwitching previo < mejor', prevAttr, maxAttr, 'pure', undefined, c.id);
   if (prevWorse) {
-    if (prevAttr === -Infinity || switches(prevAttr, maxAttr, s.rules.capitalSwitchingLambda, s.rules.capitalSwitchingPayOrReceive, rng)) {
+    // Guarda de la p: el atractivo sale del salario esperado y del precio del capital (puros): ε = 2·10⁻⁹ por operando.
+    if (prevAttr === -Infinity || switches(prevAttr, maxAttr, s.rules.capitalSwitchingLambda, s.rules.capitalSwitchingPayOrReceive, rng, { tolerance: 'pure', epsPrevious: 2e-9, epsPotential: 2e-9 })) {
       c.previousCapitalSupplier = best;
     }
   }
@@ -589,6 +641,7 @@ export function adaptiveInterestRate(
   banks: readonly { ratio: number; pastRate: number }[],
   rng: CaianiRng,
   p: AdaptiveRateParams,
+  agent?: AgentId,
 ): number {
   let tot = 0;
   let inter = 0;
@@ -603,14 +656,29 @@ export function adaptiveInterestRate(
   const step = () => p.adaptive * avInterest * rng.foldedNormal(SITE_INTEREST_RATE, p.sigma);
   let iR: number;
   // La referencia (ratio de capital o de liquidez) sale de montos.
-  if (gt(`${SITE_INTEREST_RATE} ${p.reference} > promedio`, referenceVariable, threshold, 'fromAmounts')) {
+  if (gt(`${SITE_INTEREST_RATE} ${p.reference} > promedio`, referenceVariable, threshold, 'fromAmounts', undefined, agent)) {
     iR = p.increase ? avInterest + step() : avInterest - step();
   } else {
     iR = p.increase ? avInterest - step() : avInterest + step();
   }
-  record(`${SITE_INTEREST_RATE} piso 0`, iR > 0, iR, 0, 'pure', avInterest);
-  if (p.upperBound !== Infinity) record(`${SITE_INTEREST_RATE} techo`, iR < p.upperBound, iR, p.upperBound, 'pure');
-  return Math.min(Math.max(iR, 0), p.upperBound);
+  // Sin bancos elegibles la tasa media es 0/0 = NaN y Math.min(Math.max(NaN, 0), techo) da NaN, como Java (no pasa en el
+  // base; no se registra: en modo oráculo se vería como decisión de JMAB sin par).
+  if (Number.isNaN(iR)) return iR;
+  // Math.min(Math.max(iR, 0), techo): el piso y el techo son decisiones registradas y el resultado sale de lo que
+  // devuelven (F3 del inventario de decisiones). Con el techo +∞ (crédito) no hay decisión.
+  const aboveFloor = record(`${SITE_INTEREST_RATE} piso 0`, iR > 0, iR, 0, 'pure', avInterest, agent);
+  const belowCeiling = p.upperBound === Infinity || record(`${SITE_INTEREST_RATE} techo`, iR < p.upperBound, iR, p.upperBound, 'pure', undefined, agent);
+  if ((aboveFloor && !(iR > 0)) || (belowCeiling && !(iR < p.upperBound))) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R3: la tasa quedaría de otro lado del piso o del techo
+    // que en JMAB)
+    throw new Error(`${SITE_INTEREST_RATE}: rama forzada no portada (tasa ${iR}, piso 0, techo ${p.upperBound}; inventario-decisiones H, R3)`);
+  }
+  return !belowCeiling ? p.upperBound : aboveFloor ? iR : 0;
+}
+
+/** Términos de una suma de contratos de un tipo (coeficiente `coef`), para el error de entrada de una decisión. */
+function kindTerms(L: Ledger, agent: AgentId, side: 'assets' | 'liabilities', kind: ContractKind, coef = 1): InputTerm[] {
+  return contractIds(L, agent, side, kind).map((contract) => ({ contract, coef }));
 }
 
 /**
@@ -637,9 +705,12 @@ export function creditSupplyEvent(s: CaianiState, rng: CaianiRng): void {
     .map(bank)
     .filter((b) => {
       const loans = sumContracts(L, b.id, 'assets', 'loan');
+      // Operandos agregados (punto 3 de Nico, 2026-11-16): la suma de los préstamos y el patrimonio del banco llevan el
+      // error de entrada de cada contrato; la fragilidad se mide con los operandos corregidos.
+      const on = decisionsActive();
       return (
-        record(`${SITE_INTEREST_RATE} préstamos ≠ 0`, loans !== 0, loans, 0, 'amount') &&
-        gt(`${SITE_INTEREST_RATE} patrimonio > 0`, netFinancialWorth(L, b.id), 0, 'amount')
+        record(`${SITE_INTEREST_RATE} préstamos ≠ 0`, loans !== 0, loans, 0, 'amount', undefined, b.id, on ? { inputs: { a: kindTerms(L, b.id, 'assets', 'loan') } } : undefined) &&
+        gt(`${SITE_INTEREST_RATE} patrimonio > 0`, netFinancialWorth(L, b.id), 0, 'amount', undefined, b.id, on ? { inputs: { a: netWorthTerms(L, b.id) } } : undefined)
       );
     })
     .map((b) => ({ ratio: b.capitalRatio, pastRate: getLag(b.lags, LAG.LOANINTEREST, s.round, 1) }));
@@ -651,7 +722,7 @@ export function creditSupplyEvent(s: CaianiState, rng: CaianiRng): void {
     reference: 'ratio de capital',
   };
   for (const b of s.banks) {
-    b.bankInterestRate = adaptiveInterestRate(b.capitalRatio, eligible, rng, p);
+    b.bankInterestRate = adaptiveInterestRate(b.capitalRatio, eligible, rng, p, b.id);
     const loanSupply = Infinity; // InfiniteSupplyCreditStrategy.computeCreditSupply
     b.totalLoanSupply = loanSupply;
     setLag(b.lags, LAG.BANKTOTLOANSUPPLY, s.round, loanSupply);
@@ -685,7 +756,7 @@ export function depositSupplyEvent(s: CaianiState, rng: CaianiRng): void {
     reference: 'ratio de liquidez',
   };
   for (const b of s.banks) {
-    b.depositInterestRate = adaptiveInterestRate(b.liquidityRatio, all, rng, p);
+    b.depositInterestRate = adaptiveInterestRate(b.liquidityRatio, all, rng, p, b.id);
     b.active[MKT.DEPOSIT] = true;
   }
 }
@@ -776,13 +847,23 @@ export const SITE_PECKING_ORDER = 'PeckingOrderTheory.computeCreditDemand';
 export function peckingOrderCreditDemand(L: Ledger, firm: AgentId, requirement: number): Micro {
   const liquidity = sumContracts(L, firm, 'assets', 'deposit') + sumContracts(L, firm, 'assets', 'cash');
   const req = toMicro(requirement);
-  return gt(`${SITE_PECKING_ORDER} requerimiento > liquidez`, req, liquidity, 'amount', undefined, firm) ? req - liquidity : 0;
+  // Operando agregado (punto 3 de Nico): la liquidez es la suma de los depósitos y el efectivo de la empresa.
+  const inputs = decisionsActive() ? { b: liquidTerms(L, firm) } : undefined;
+  if (!gt(`${SITE_PECKING_ORDER} requerimiento > liquidez`, req, liquidity, 'amount', undefined, firm, { inputs })) return 0;
+  // solo rama forzada (modo oráculo): inventario-decisiones H (con req ≤ liquidez, max(req − liquidez, 0): JMAB tiene un
+  // residuo de < 2 µ)
+  return Math.max(req - liquidity, 0);
+}
+
+/** Términos de la liquidez de un agente (depósitos y efectivo, coeficiente 1), para el error de entrada de una decisión. */
+function liquidTerms(L: Ledger, agent: AgentId): InputTerm[] {
+  return [...contractIds(L, agent, 'assets', 'deposit'), ...contractIds(L, agent, 'assets', 'cash')].map((contract) => ({ contract, coef: 1 }));
 }
 
 /** `ConsumptionFirm.getRequiredWorkers` (267–298): trabajadores para la producción deseada, `(int) Math.round`. */
 function consumptionRequiredWorkersInt(c: FirmState): number {
-  const w = requiredWorkers(c.capitalGoods, c.desiredOutput);
-  return rounding('ConsumptionFirm.getRequiredWorkers Math.round(trabajadores)', w, javaRoundToInt(w), 'pure');
+  const w = requiredWorkers(c.capitalGoods, c.desiredOutput, c.id);
+  return rounding('ConsumptionFirm.getRequiredWorkers Math.round(trabajadores)', w, javaRoundToInt(w), 'fromAmounts', c.id);
 }
 
 function expectationOf(f: FirmState, id: number): number {
@@ -811,7 +892,8 @@ export function consumptionFinancialRequirement(s: CaianiState, c: FirmState): n
   const inventories = c.consumptionGoods[0];
   if (!inventories) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
   const uc = inventories.unitCost;
-  const inv = Math.trunc(inventories.quantity); // (int) inventories.getQuantity()
+  // (int) inventories.getQuantity(): B2 (inventario de decisiones), un piso sobre el inventario de consumo (de montos).
+  const inv = flooring('ConsumptionFirm.computeCreditDemand (int) inventario', inventories.quantity, 'fromAmounts', c.id);
   const expRevenues = expectationOf(c, EXPECTATION.NOMINALSALES);
   const nbWorkers = consumptionRequiredWorkersInt(c);
   const expWages = wageExpectation(c);
@@ -880,7 +962,7 @@ export function capitalFinancialRequirement(s: CaianiState, k: FirmState): numbe
 /** `CapitalFirm.getRequiredWorkers` (535–537): `(int) Math.round(Y* / laborProductivity)`. */
 function capitalRequiredWorkersInt(s: CaianiState, k: FirmState): number {
   const x = k.desiredOutput / s.rules.capitalLaborProductivity;
-  return rounding('CapitalFirm.getRequiredWorkers Math.round(Y*/productividad)', x, javaRoundToInt(x), 'pure');
+  return rounding('CapitalFirm.getRequiredWorkers Math.round(Y*/productividad)', x, javaRoundToInt(x), 'pure', k.id);
 }
 
 /**
@@ -898,10 +980,14 @@ export function creditDemandEvent(s: CaianiState): void {
     f.debtBurden = d.burden;
     f.debtInterests = d.interests;
     f.creditDemanded = peckingOrderCreditDemand(L, f.id, requirement());
-    if (f.creditDemanded > 0) f.active[MKT.CREDIT] = true;
+    // B1 (inventario de decisiones): "pedido > 0" en µ es una decisión (un pedido residual de JMAB, ~10⁻¹⁴, es 0 µ en el
+    // port: las empresas zombis, reglas-caiani.md, sec. 37).
+    if (gt('ConsumptionFirm/CapitalFirm.computeCreditDemand pedido > 0', f.creditDemanded, 0, 'amount', undefined, f.id)) f.active[MKT.CREDIT] = true;
   };
-  for (const k of s.capitalFirms) demand(k, () => capitalFinancialRequirement(s, k));
+  // Orden de JMAB: primero las de consumo (inventario-decisiones I; aprobado por Nico, 2026-11-16). Cada empresa decide
+  // sola: el orden no cambia el estado.
   for (const c of s.consumptionFirms) demand(c, () => consumptionFinancialRequirement(s, c));
+  for (const k of s.capitalFirms) demand(k, () => capitalFinancialRequirement(s, k));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -965,6 +1051,13 @@ export function expectedReturnCreditSupply(s: CaianiState, bank: BankState, firm
   const interest = loanInterestRate(bank);
   const ocf = getLag(firm.lags, LAG.OPERATINGCASHFLOW, s.round, 1);
   const riskAversion = isConsumption ? r.riskAversionC : r.riskAversionK; // Bank.getRiskAversion
+  if (required === 0 && oracleDecisions()) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R2: con el pedido en 0 µ exacto, JMAB busca la oferta
+    // sobre un residuo de < 2 µ y registra hasta 101 decisiones sin par en el port; se consumen sin evaluar y la oferta
+    // del port es 0 µ, como la de JMAB redondeada)
+    consumeResidueDecisions(`${SITE_CREDIT_SUPPLY} rendimiento esperado ≥ 0`);
+    return 0;
+  }
   for (let i = 0; i < 101; i++) {
     const amount = required * (1 - i / 100);
     const probability = logisticDefaultProbability(ocf, interest, amount, duration, riskAversion);
@@ -988,7 +1081,10 @@ export function expectedReturnCreditSupply(s: CaianiState, bank: BankState, firm
     const scale = Math.abs(probability) * abs + Math.abs(last);
     // Con monto 0 (i = 100) se devuelve 0 por cualquier rama: no es una decisión y no se registra.
     if (amount === 0) return 0;
-    if (ge(`${SITE_CREDIT_SUPPLY} rendimiento esperado ≥ 0`, er, 0, 'fromAmounts', scale)) return amount;
+    // nanOk: una empresa sin préstamos y sin capital (las de capital no tienen bienes de capital) tiene recupero 0/0 = NaN y
+    // rendimiento NaN, igual en JMAB: la comparación da falso y el banco no le presta (rareza, caiani-referencia.md; lista
+    // de NaN declarados, reglas-caiani.md, sec. 1).
+    if (ge(`${SITE_CREDIT_SUPPLY} rendimiento esperado ≥ 0`, er, 0, 'fromAmounts', scale, bank.id, { nanOk: true })) return amount;
   }
   return 0;
 }
@@ -1005,7 +1101,7 @@ function selectLender(s: CaianiState, firm: FirmState, lenders: readonly BankSta
   let minLender = lenders[0]!;
   for (const b of lenders) {
     const rate = loanInterestRate(b);
-    if (lt('CheapestLenderWithSwitching más barato', rate, minRate, 'pure')) {
+    if (lt('CheapestLenderWithSwitching más barato', rate, minRate, 'pure', undefined, firm.id)) {
       minRate = rate;
       minLender = b;
     }
@@ -1017,7 +1113,7 @@ function selectLender(s: CaianiState, firm: FirmState, lenders: readonly BankSta
   const available = expectedReturnCreditSupply(s, prev, firm, required, isConsumption) > 0 && prev.active[MKT.CREDIT]!;
   const previousRate = available ? loanInterestRate(prev) : Infinity;
   // Si el previo es el más barato, las dos tasas son el mismo cálculo: no se registra.
-  const prevWorse = prev === minLender ? previousRate > minRate : gt('CheapestLenderWithSwitching previo > mínimo', previousRate, minRate, 'pure');
+  const prevWorse = prev === minLender ? previousRate > minRate : gt('CheapestLenderWithSwitching previo > mínimo', previousRate, minRate, 'pure', undefined, firm.id);
   if (prevWorse) {
     if (previousRate === Infinity || switches(previousRate, minRate, s.rules.lenderSwitchingLambda, s.rules.lenderSwitchingPayOrReceive, rng)) {
       firm.previousLender = minLender.id;
@@ -1168,7 +1264,7 @@ export function adaptiveWage(s: CaianiState, h: HouseholdState, rng: CaianiRng):
   let wage = h.wage;
   if (wageMicroReference(s, h) > r.wageMicroThreshold) {
     wage -= r.wageMicroAdaptive * wage * rng.foldedNormal(SITE_WAGE, r.wageSigma);
-  } else if (!gt(`${SITE_WAGE} desempleo agregado > umbral`, wageMacroReference(s, h), r.wageMacroThreshold, 'pure')) {
+  } else if (!gt(`${SITE_WAGE} desempleo agregado > umbral`, wageMacroReference(s, h), r.wageMacroThreshold, 'pure', undefined, h.id)) {
     wage += r.wageMacroAdaptive * wage * rng.foldedNormal(SITE_WAGE, r.wageSigma);
   }
   return Math.max(wage, 0);
@@ -1253,7 +1349,7 @@ export function laborDemandEvent(s: CaianiState, rng: CaianiRng): void {
       SITE_LABOR_DEMAND_CAPITAL,
       () => {
         const x = k.amountResearch / wageExpectation(k);
-        return capitalRequiredWorkersInt(s, k) + rounding('CopyOfCapitalFirm2WagesEnd.computeLaborDemand Math.round(I+D/salario)', x, javaRoundToInt(x), 'pure');
+        return capitalRequiredWorkersInt(s, k) + rounding('CopyOfCapitalFirm2WagesEnd.computeLaborDemand Math.round(I+D/salario)', x, javaRoundToInt(x), 'pure', k.id);
       },
       rng,
     );
@@ -1420,7 +1516,14 @@ function consumptionProduce(s: CaianiState, c: FirmState): void {
       capValue += goodValue(g, c.id);
     }
   }
-  c.active[MKT.CONSGOOD] = inventories.quantity > 0;
+  // B3 (inventario de decisiones): "inventario > 0" sobre un `double` de montos (un inventario residual de JMAB puede ser
+  // 0 en el port). Escala: la del inventario y la producción del tick.
+  const positiveInventory = gt('ConsumptionFirm.produce inventario > 0', inventories.quantity, 0, 'fromAmounts', Math.max(Math.abs(inventories.quantity), outputQty), c.id);
+  if (positiveInventory && !(inventories.quantity > 0)) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R3: JMAB vendería un bien de cantidad residual)
+    throw new Error(`empresa de consumo ${c.id}: rama forzada no portada (inventario ${inventories.quantity}, JMAB > 0; inventario-decisiones H, R3)`);
+  }
+  c.active[MKT.CONSGOOD] = positiveInventory;
   setLag(c.lags, LAG.PRODUCTION, s.round, outputQty);
   setLag(c.lags, LAG.CAPACITY, s.round, capacity);
   setLag(c.lags, LAG.CAPITALFINANCIALVALUE, s.round, capValue);
@@ -1620,7 +1723,12 @@ export function consumptionDemandEvent(s: CaianiState): void {
     h.demand = r.consumptionPersistency * pastConsumption + (1 - r.consumptionPersistency) * (fromIncome + fromWealth);
     setLag(h.lags, LAG.CONSUMPTION, s.round, h.demand);
     // La demanda sale de una suma: la escala de la decisión es la de sus términos.
-    if (gt(`${SITE_CONSUMPTION_DEMAND} demanda > 0`, h.demand, 0, 'fromAmounts', Math.abs(fromIncome) + Math.abs(fromWealth))) {
+    if (gt(`${SITE_CONSUMPTION_DEMAND} demanda > 0`, h.demand, 0, 'fromAmounts', Math.abs(fromIncome) + Math.abs(fromWealth), h.id)) {
+      if (!(h.demand > 0)) {
+        // solo rama forzada (modo oráculo): inventario-decisiones H (R3: con demanda ≤ 0 el hogar no compraría y JMAB compra
+        // un bien de cantidad residual)
+        throw new Error(`hogar ${h.id}: rama forzada no portada (demanda ${h.demand} ≤ 0, JMAB > 0; inventario-decisiones H, R3)`);
+      }
       h.active[MKT.CONSGOOD] = true;
     }
   }
@@ -1658,7 +1766,8 @@ export function selectGoodSupplier(s: CaianiState, h: HouseholdState, sellers: r
   let minSupplier = sellers[0]!;
   for (const id of sellers) {
     const p = consumptionPrice(consumptionFirmById(s, id));
-    if (lt(`${SITE_CHEAPEST_SUPPLIER} más barato`, p, minPrice, 'pure')) {
+    // Precios de consumo: de montos por origen (aprobado por Nico, 2026-11-16; reglas-caiani.md, sec. 1).
+    if (lt(`${SITE_CHEAPEST_SUPPLIER} más barato`, p, minPrice, 'fromAmounts', undefined, h.id)) {
       minPrice = p;
       minSupplier = id;
     }
@@ -1667,9 +1776,18 @@ export function selectGoodSupplier(s: CaianiState, h: HouseholdState, sellers: r
   const previousPrice = previous.active[MKT.CONSGOOD] ? consumptionPrice(previous) : Infinity;
   // Si el previo es el más barato, los dos precios son el mismo: no es una decisión que pueda darse vuelta.
   const previousDearer =
-    h.previousSeller === minSupplier ? previousPrice > minPrice : gt(`${SITE_CHEAPEST_SUPPLIER} previo más caro`, previousPrice, minPrice, 'pure');
+    h.previousSeller === minSupplier
+      ? previousPrice > minPrice
+      : gt(`${SITE_CHEAPEST_SUPPLIER} previo más caro`, previousPrice, minPrice, 'fromAmounts', undefined, h.id);
   if (previousDearer) {
-    if (previousPrice === Infinity || switches(previousPrice, minPrice, s.rules.consumerSwitchingLambda, s.rules.consumerSwitchingPayOrReceive, rng)) {
+    if (
+      previousPrice === Infinity ||
+      switches(previousPrice, minPrice, s.rules.consumerSwitchingLambda, s.rules.consumerSwitchingPayOrReceive, rng, {
+        tolerance: 'fromAmounts',
+        epsPrevious: 1e-6,
+        epsPotential: 1e-6,
+      })
+    ) {
       h.previousSeller = minSupplier;
     }
   }
@@ -1697,28 +1815,50 @@ function consumptionPurchase(s: CaianiState, h: HouseholdState, c: FirmState, ba
   const output = c.consumptionGoods[0];
   if (!output) throw new Error(`empresa de consumo ${c.id} sin inventario (JMAB: NullPointerException)`);
   const price = output.price;
-  let quantity = record(`${SITE_AT_ONCE} demanda ≤ inventario`, demand <= output.quantity, demand, output.quantity, 'fromAmounts')
+  let quantity = record(`${SITE_AT_ONCE} demanda ≤ inventario`, demand <= output.quantity, demand, output.quantity, 'fromAmounts', undefined, h.id)
     ? demand
     : output.quantity; // Math.min(demand, inventario)
+  if (lastDecisionForced() && (output.quantity - quantity < 0 || demand - quantity < 0)) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R3: el inventario o la demanda quedarían negativos)
+    throw new Error(`hogar ${h.id}: rama forzada no portada (demanda ${demand}, inventario ${output.quantity}; inventario-decisiones H, R3)`);
+  }
   let totalAmount = quantity * price;
   const payable = firstAsset(L, c.id, 'deposit');
   if (!payable) throw new Error(`empresa de consumo ${c.id} sin depósito (JMAB: NullPointerException)`);
   const target = firstAsset(L, h.id, 'deposit');
   if (!target) throw new Error(`hogar ${h.id} sin depósito (JMAB: NullPointerException)`);
   const needed = totalAmount * MICRO_PER_UNIT;
-  if (batch.balance(target.id) < needed) {
-    const others = [...contractIds(L, h.id, 'assets', 'deposit'), ...contractIds(L, h.id, 'assets', 'cash')];
-    if (others.some((id) => id !== target.id && batch.balance(id) !== 0)) {
-      throw new Error(`hogar ${h.id}: reallocateLiquidity con otra cuenta con saldo (no portado; reglas-caiani.md, sec. 17)`);
-    }
+  // `reallocateLiquidity(totalAmount, paying, target)` con la lista del hogar (depósitos y después efectivo,
+  // `Households.getPayingStocks`): la condición del bucle es una decisión (B6 del inventario de decisiones). En el base el
+  // hogar tiene un solo depósito y efectivo 0: los traspasos son 0; una cuenta con saldo no está portada (sec. 17).
+  const paying = [...contractIds(L, h.id, 'assets', 'deposit'), ...contractIds(L, h.id, 'assets', 'cash')];
+  let raised = batch.balance(target.id);
+  for (let i = 0; i < paying.length && lt(`${SITE_REALLOCATE} reunido < monto`, raised, needed, 'amount', undefined, h.id); i++) {
+    const id = paying[i]!;
+    if (id === target.id) continue;
+    const thisAmount = batch.balance(id);
+    const transfer = thisAmount - Math.max(0, thisAmount + raised - needed);
+    if (transfer > 0) throw new Error(`hogar ${h.id}: reallocateLiquidity con otra cuenta con saldo (no portado; reglas-caiani.md, sec. 17)`);
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R1: con "reunido < monto" forzado y lo reunido ≥ el monto,
+    // el traspaso daría negativo; es 0)
   }
-  if (lt(`${SITE_AT_ONCE} depósito < monto`, batch.balance(target.id), needed, 'amount')) {
+  let forcedShort = false;
+  if (lt(`${SITE_AT_ONCE} depósito < monto`, batch.balance(target.id), needed, 'amount', undefined, h.id)) {
     h.active[MKT.CONSGOOD] = false;
-    quantity = flooring(`${SITE_AT_ONCE} cantidad con el depósito`, batch.balance(target.id) / MICRO_PER_UNIT / price, 'fromAmounts');
+    quantity = flooring(`${SITE_AT_ONCE} cantidad con el depósito`, batch.balance(target.id) / MICRO_PER_UNIT / price, 'fromAmounts', h.id);
+    forcedShort = lastDecisionForced();
     totalAmount = quantity * price;
+  } else {
+    forcedShort = lastDecisionForced();
   }
   if (quantity > 0) {
-    batch.pay(target.id, payable.id, totalAmount * MICRO_PER_UNIT, 'consumption');
+    let payment = totalAmount * MICRO_PER_UNIT;
+    if (forcedShort && payment > batch.balance(target.id)) {
+      // solo rama forzada (modo oráculo): inventario-decisiones H (R1: la rama forzada paga hasta el saldo; lo que falta es
+      // ≤ 2 µ, dentro de la tolerancia)
+      payment = batch.balance(target.id);
+    }
+    batch.pay(target.id, payable.id, payment, 'consumption');
     const good: ConsumptionGoodStock = {
       quantity,
       value: totalAmount,
@@ -1731,7 +1871,7 @@ function consumptionPurchase(s: CaianiState, h: HouseholdState, c: FirmState, ba
     h.consumptionGoods.push(good);
     output.quantity = output.quantity - quantity;
     h.demand = demand - quantity;
-    if (h.demand === 0 || record(`${SITE_AT_ONCE} depósito agotado`, batch.balance(target.id) === 0, batch.balance(target.id), 0, 'amount')) {
+    if (h.demand === 0 || record(`${SITE_AT_ONCE} depósito agotado`, batch.balance(target.id) === 0, batch.balance(target.id), 0, 'amount', undefined, h.id)) {
       h.active[MKT.CONSGOOD] = false;
     }
     if (output.quantity === 0) c.active[MKT.CONSGOOD] = false;
@@ -1790,13 +1930,14 @@ export function desiredCapacityGrowth(s: CaianiState, c: FirmState): number {
   for (const g of c.capitalGoods) capacity += g.quantity * g.productivity;
   const capitalValue = getLag(c.lags, LAG.CAPITALFINANCIALVALUE, s.round, 1);
   const cashFlowRate = getLag(c.lags, LAG.OPERATINGCASHFLOW, s.round, 1) / capitalValue;
-  const noCapacity = record(`${SITE_DESIRED_GROWTH} capacidad = 0`, capacity === 0, capacity, 0, 'pure');
-  if (noCapacity || record(`${SITE_DESIRED_GROWTH} K = 0`, capitalValue === 0, capitalValue, 0, 'pure')) return -1;
+  // Un double contra 0 sin escala solo es frágil si vale 0 exacto: estas dos no se pueden forzar (inventario-decisiones H.0).
+  const noCapacity = record(`${SITE_DESIRED_GROWTH} capacidad = 0`, capacity === 0, capacity, 0, 'pure', undefined, c.id);
+  if (noCapacity || record(`${SITE_DESIRED_GROWTH} K = 0`, capitalValue === 0, capitalValue, 0, 'pure', undefined, c.id)) return -1;
   const g =
     (r.investmentCashFlowWeight * (cashFlowRate - r.investmentTargetCashFlow)) / r.investmentTargetCashFlow +
     (r.investmentCapacityWeight * (c.desiredOutput / capacity - r.investmentTargetCapacityUtilization)) / r.investmentTargetCapacityUtilization;
   // Math.max(−1, g) de Java (NaN si g es NaN, igual que en JS).
-  return Number.isNaN(g) ? g : gt(`${SITE_DESIRED_GROWTH} max(−1, g)`, g, -1, 'fromAmounts') ? g : -1;
+  return Number.isNaN(g) ? g : gt(`${SITE_DESIRED_GROWTH} max(−1, g)`, g, -1, 'fromAmounts', undefined, c.id) ? g : -1;
 }
 
 /**
@@ -1845,7 +1986,12 @@ function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: Paym
     if (id === target) continue;
     const thisAmount = batch.balance(id);
     const remAmount = Math.max(0, thisAmount + raised - needed);
-    const transfer = thisAmount - remAmount;
+    let transfer = thisAmount - remAmount;
+    if (transfer < 0) {
+      // solo rama forzada (modo oráculo): inventario-decisiones H (R1: con "reunido < monto" forzado y lo reunido ≥ el
+      // monto, el traspaso daría negativo; es 0)
+      transfer = 0;
+    }
     raised += transfer;
     if (id === cash) {
       if (transfer !== 0) throw new Error(`empresa de consumo ${c.id}: reallocateLiquidity con efectivo (no portado; reglas-caiani.md, sec. 18)`);
@@ -1861,13 +2007,23 @@ function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: Paym
   // Las decisiones de la compra pasan la empresa: un vuelco por un residuo de JMAB (el depósito que `reallocateLiquidity`
   // deja exactamente en el monto en µ y apenas por debajo en JMAB; tick 133, empresa 8140) es una decisión frágil dada
   // vuelta respecto de JMAB (reglas-caiani.md, sec. 1).
+  let forcedShort = false;
   if (lt(`${SITE_AT_ONCE} capital: depósito < monto`, batch.balance(target), needed, 'amount', undefined, c.id)) {
     c.active[MKT.CAPGOOD] = false;
-    quantity = flooring(`${SITE_AT_ONCE} capital: cantidad con el depósito`, batch.balance(target) / MICRO_PER_UNIT / price, 'fromAmounts');
+    quantity = flooring(`${SITE_AT_ONCE} capital: cantidad con el depósito`, batch.balance(target) / MICRO_PER_UNIT / price, 'fromAmounts', c.id);
+    forcedShort = lastDecisionForced();
     totalAmount = quantity * price;
+  } else {
+    forcedShort = lastDecisionForced();
   }
   if (quantity > 0) {
-    batch.pay(target, payable.id, totalAmount * MICRO_PER_UNIT, 'investment');
+    let payment = totalAmount * MICRO_PER_UNIT;
+    if (forcedShort && payment > batch.balance(target)) {
+      // solo rama forzada (modo oráculo): inventario-decisiones H (R1: la rama forzada paga hasta el saldo; lo que falta es
+      // ≤ 2 µ; en el tick 133 fue 10⁻⁹ µ)
+      payment = batch.balance(target);
+    }
+    batch.pay(target, payable.id, payment, 'investment');
     c.capitalGoods.push({
       quantity,
       value: totalAmount,
@@ -1885,7 +2041,7 @@ function capitalPurchase(s: CaianiState, c: FirmState, k: FirmState, batch: Paym
     c.desiredRealCapitalDemand = demand - quantity;
     if (
       c.desiredRealCapitalDemand === 0 ||
-      record(`${SITE_AT_ONCE} capital: depósito agotado`, batch.balance(target) === 0, batch.balance(target), 0, 'amount')
+      record(`${SITE_AT_ONCE} capital: depósito agotado`, batch.balance(target) === 0, batch.balance(target), 0, 'amount', undefined, c.id)
     ) {
       c.active[MKT.CAPGOOD] = false;
     }
@@ -1995,12 +2151,31 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
   const debts = loans.map((id) => integerBalance(batch, id, `el préstamo ${id}`));
   let totalDebt = 0;
   for (const d of debts) totalDebt += d;
-  if (totalDebt === 0) return;
-  const coversDebt = ge(`${SITE_BANKRUPTCY} liquidez ≥ deuda`, liquidity, totalDebt, 'amount');
+  // B4 (inventario de decisiones): "deuda ≠ 0" en µ (con una deuda residual, JMAB entra al reparto y deja el depósito en 0).
+  if (!record(`${SITE_BANKRUPTCY} deuda ≠ 0`, totalDebt !== 0, totalDebt, 0, 'amount', undefined, f.id, decisionsActive() ? { inputs: { a: loans.map((contract) => ({ contract, coef: 1 })) } } : undefined)) return;
+  let coversDebt = ge(`${SITE_BANKRUPTCY} liquidez ≥ deuda`, liquidity, totalDebt, 'amount', undefined, f.id);
   /** Préstamos que recibieron aportes de los dueños (grupo del redondeo controlado: un redondeo). */
   const touched = loans.map(() => false);
   let paid: number[];
-  if (coversDebt) {
+  if (coversDebt && liquidity < totalDebt) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R1: "liquidez ≥ deuda" forzada con la liquidez por debajo
+    // por ≤ 2 µ; se paga cada préstamo hasta lo que queda de liquidez y el depósito termina en 0, como en JMAB)
+    let left = liquidity;
+    paid = debts.map((d) => {
+      const x = Math.min(d, left);
+      left -= x;
+      return x;
+    });
+    loans.forEach((loan, i) => batch.payLoan('repay', deposit, loan, paid[i]!));
+    coversDebt = false;
+  } else if (!coversDebt && liquidity >= totalDebt && liquidity > 0) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R1: "liquidez ≥ deuda" forzada a falso con la liquidez por
+    // encima por ≤ 2 µ, o con la deuda en 0 µ por B4: se pagan las deudas enteras y el excedente se da de baja; JMAB deja
+    // el depósito en 0 en las dos ramas)
+    paid = debts;
+    loans.forEach((loan, i) => batch.payLoan('repay', deposit, loan, paid[i]!));
+    coversDebt = true;
+  } else if (coversDebt) {
     paid = debts;
     loans.forEach((loan, i) => batch.payLoan('repay', deposit, loan, paid[i]!));
   } else if (liquidity === 0) {
@@ -2034,7 +2209,7 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
   if (s.consumptionFirms.includes(f)) {
     let capitalValue = 0;
     for (const g of f.capitalGoods) capitalValue += goodValue(g, f.id) * s.rules.creditSupplyHaircut;
-    const owners = gt(`${SITE_BANKRUPTCY} valor del capital > pérdida`, capitalValue, totalLoss, 'fromAmounts') ? totalLoss : capitalValue;
+    const owners = gt(`${SITE_BANKRUPTCY} valor del capital > pérdida`, capitalValue, totalLoss, 'fromAmounts', undefined, f.id) ? totalLoss : capitalValue;
     f.bailoutCost = toMicro(owners);
     const wealth = (h: HouseholdState) => householdNetWealth(s, h, (id) => batch.balance(id));
     // Lo que todavía puede bajar cada préstamo con los aportes (µ). Por el orden de JMAB (el patrimonio del hogar y
@@ -2090,21 +2265,35 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
       const target = firstAsset(L, h.id, 'deposit');
       if (!target) throw new Error(`hogar ${h.id} sin depósito (JMAB: NullPointerException)`);
       loans.forEach((loan, i) => {
-        const amount = (((owners * wealth(h)) / totalWealth) * losses[i]!) / totalLoss;
+        let amount = (((owners * wealth(h)) / totalWealth) * losses[i]!) / totalLoss;
+        if (totalLoss === 0 && oracleDecisions()) {
+          // solo rama forzada (modo oráculo): inventario-decisiones H (B4 forzado: la pérdida total es 0 µ y la de JMAB un
+          // residuo; los aportes de JMAB son residuos y los del port, 0; cada "aporte negativo" va por R2)
+          amount = 0;
+        }
         if (!Number.isFinite(amount)) throw new Error(`${SITE_BANKRUPTCY}: aporte ${amount} del hogar ${h.id} (pérdida total 0: no portado)`);
         // El signo del aporte es el de pérdida del préstamo / pérdida total (el patrimonio de los hogares es > 0).
         // Las dos bajan con cada aporte y, por el sobrepago, pueden cruzar el 0 (rareza de JMAB, caiani-referencia.md):
-        // la decisión se mide con la más cercana a 0, relativa a su valor al empezar el reparto.
-        const dLoss = Math.abs(losses[i]!) / initialLosses[i]!;
-        const dTotal = Math.abs(totalLoss) / initialTotalLoss;
+        // la decisión se mide con la más cercana a 0, relativa a su valor al empezar el reparto. Con una pérdida inicial en
+        // 0 µ, el operando es esa pérdida (aprobado por Nico, 2026-11-16): la distancia 0/0 no elige otro operando.
+        const ownZero = initialLosses[i] === 0;
+        const totalZero = initialTotalLoss === 0;
+        const dLoss = ownZero ? 0 : Math.abs(losses[i]!) / initialLosses[i]!;
+        const dTotal = totalZero ? 0 : Math.abs(totalLoss) / initialTotalLoss;
+        const useOwn = ownZero || (!totalZero && dLoss <= dTotal);
         const refund = record(
           `${SITE_BANKRUPTCY} aporte negativo`,
           amount < 0,
-          dLoss <= dTotal ? losses[i]! : totalLoss,
+          useOwn ? losses[i]! : totalLoss,
           0,
           'fromAmounts',
-          dLoss <= dTotal ? initialLosses[i]! : initialTotalLoss,
+          useOwn ? initialLosses[i]! : initialTotalLoss,
+          h.id,
         );
+        if (refund && !(amount < 0)) {
+          // solo rama forzada (modo oráculo): inventario-decisiones H (R1/R2: JMAB reembolsa un residuo; el port no paga nada)
+          return;
+        }
         if (refund) {
           // Aporte negativo (decisión de Nico, 2026-11-13): el hogar cobra y el préstamo sube (`bailoutRefund`).
           // JMAB: `depositHH.setValue(dep − amountToPay)` y `loan.setValue(loan − amountToPay)` con amountToPay < 0,
@@ -2198,13 +2387,36 @@ function payLoanInterests(s: CaianiState, f: FirmState, batch: PaymentBatch, aft
   if (cash === undefined) throw new Error(`empresa ${f.id} sin efectivo (JMAB: IndexOutOfBoundsException)`);
   if (batch.balance(cash) > 0) batch.pay(cash, deposit, batch.balance(cash), 'deposits');
   const liquidity = batch.balance(deposit);
-  if (ge(`${SITE_PAY_INTERESTS} liquidez ≥ servicio`, liquidity, burden, 'amount')) {
+  // Operando agregado (punto 3 de Nico, 2026-11-16): el servicio es la suma de las cuotas (tasa × saldo + monto inicial /
+  // plazo, o el saldo entero en la última); la liquidez, el depósito después de juntar las cuentas.
+  let inputs: DecisionOptions['inputs'];
+  if (decisionsActive()) {
     const raw = rawInstallments(L, f.id, 'loan');
+    const b: InputTerm[] = [];
+    contractIds(L, f.id, 'liabilities', 'loan').forEach((loan, i) => {
+      const c = contractOf(L, loan);
+      const due = raw[i]!;
+      b.push({ contract: loan, coef: c.rate });
+      if (c.amortization === 'fixedCapital' && c.length && due.principal !== c.amount) b.push({ contract: loan, field: 'initialAmount', coef: 1 / c.length });
+      else b.push({ contract: loan, coef: 1 });
+    });
+    inputs = { a: [...deposits, cash].map((contract) => ({ contract, coef: 1 })), b };
+  }
+  if (ge(`${SITE_PAY_INTERESTS} liquidez ≥ servicio`, liquidity, burden, 'amount', undefined, f.id, { inputs })) {
+    const raw = rawInstallments(L, f.id, 'loan');
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R1: forzada con la liquidez por debajo del servicio por
+    // ≤ 2 µ; cada pago, hasta lo que queda del depósito)
+    let left = liquidity < burden ? liquidity : Infinity;
+    const clamp = (x: number) => {
+      const y = Math.min(x, left);
+      left -= y;
+      return y;
+    };
     contractIds(L, f.id, 'liabilities', 'loan').forEach((loan, i) => {
       const due = raw[i]!;
       const c = contractOf(L, loan);
-      batch.payLoan('interest', deposit, loan, due.interest);
-      const principal = Math.min(due.principal, c.amount);
+      batch.payLoan('interest', deposit, loan, clamp(due.interest));
+      const principal = clamp(Math.min(due.principal, c.amount));
       batch.payLoan('repay', deposit, loan, principal);
       // Error de entrada (regla de la sec. 1, aplicada al evento 20 por decisión de Nico, 2026-11-14): el interés es
       // tasa × saldo (en µ); el capital, monto inicial (en µ) / plazo, salvo la última cuota o el tope en el saldo,
@@ -2272,7 +2484,12 @@ function payFirmWages(s: CaianiState, f: FirmState, site: string, batch: Payment
     if (!d) throw new Error(`hogar ${worker} sin depósito (JMAB: NullPointerException)`);
     return d.id;
   };
-  if (gt(`${site} masa salarial > depósito`, wageBill * MICRO_PER_UNIT, batch.balance(deposit), 'amount')) {
+  if (gt(`${site} masa salarial > depósito`, wageBill * MICRO_PER_UNIT, batch.balance(deposit), 'amount', undefined, f.id)) {
+    if (f.employees.length === 0) {
+      // solo rama forzada (modo oráculo): inventario-decisiones H (R3: sin empleados, JMAB divide por una masa salarial 0
+      // y paga NaN)
+      throw new Error(`empresa ${f.id}: rama forzada no portada (masa salarial 0 > depósito; inventario-decisiones H, R3)`);
+    }
     rng.shuffleEmployees(site, f.id, f.employees, ownId);
     const liquidity = integerBalance(batch, deposit, `el depósito de la empresa ${f.id}`);
     // Camino (a) (decisión de Nico, 2026-11-14; reemplaza los restos mayores del 2026-11-13): a cada empleado, en el
@@ -2296,7 +2513,11 @@ function payFirmWages(s: CaianiState, f: FirmState, site: string, batch: Payment
     rng.shuffleEmployees(site, f.id, f.employees, ownId);
     for (const worker of f.employees) {
       const wage = householdById(s, worker).wage * MICRO_PER_UNIT;
-      if (lt(`${site} salario < depósito`, wage, batch.balance(deposit), 'amount')) batch.pay(deposit, payable(worker), wage, 'wages');
+      if (lt(`${site} salario < depósito`, wage, batch.balance(deposit), 'amount', undefined, f.id)) {
+        // solo rama forzada (modo oráculo): inventario-decisiones H (R1: forzada con el salario ≥ el depósito por ≤ 2 µ; se
+        // paga hasta el depósito)
+        batch.pay(deposit, payable(worker), wage < batch.balance(deposit) ? wage : batch.balance(deposit), 'wages');
+      }
     }
   }
 }
@@ -2567,6 +2788,11 @@ function payFirmTaxes(s: CaianiState, f: FirmState, isConsumption: boolean, acco
     if (s.rules.firmWealthTaxRate !== 0) throw new Error(`${SITE_FIRM_TAXES}: alícuota del patrimonio de las empresas ≠ 0: no portado`);
     const due = s.rules.profitTaxRate * profits;
     taxes = gt(`${SITE_FIRM_TAXES} impuestos > depósito`, due * MICRO_PER_UNIT, batch.balance(deposit), 'amount', undefined, f.id) ? 0 : Math.max(due, 0);
+    if (taxes * MICRO_PER_UNIT > batch.balance(deposit)) {
+      // solo rama forzada (modo oráculo): inventario-decisiones H (R1: forzada con los impuestos por encima del depósito por
+      // ≤ 2 µ; se cobran hasta el depósito)
+      taxes = batch.balance(deposit) / MICRO_PER_UNIT;
+    }
     if (taxes > 0) taxTerms = scaleTerms(firmProfitTerms(f), s.rules.profitTaxRate);
   }
   firmAfterTaxProfits(s, f, taxes, taxTerms, isConsumption);
@@ -2780,6 +3006,11 @@ function payFirmDividends(s: CaianiState, f: FirmState, share: number, rc: Divid
   if (f.defaulted) return;
   let profits = getLag(f.lags, LAG.PROFITAFTERTAX, s.round, 0);
   if (!gt(`${SITE_DIVIDENDS} ganancia > 0`, profits * MICRO_PER_UNIT, 0, 'amount', undefined, f.id)) return;
+  if (!(profits > 0)) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R1: forzada con la ganancia ≤ 0; dividendos 0, nunca un
+    // pago negativo)
+    profits = 0;
+  }
   const deposit = contractIds(s.ledger, f.id, 'assets', 'deposit')[0];
   if (deposit === undefined) throw new Error(`empresa ${f.id} sin depósito (JMAB: NullPointerException)`);
   const dep = batch.balance(deposit);
@@ -2789,7 +3020,11 @@ function payFirmDividends(s: CaianiState, f: FirmState, share: number, rc: Divid
     profits = dep / MICRO_PER_UNIT;
     if (inputsActive()) dTerms = [{ contract: deposit, coef: share }];
   }
-  const D = profits * share;
+  let D = profits * share;
+  if (D * MICRO_PER_UNIT > dep) {
+    // solo rama forzada (modo oráculo): inventario-decisiones H (R1: los dividendos, hasta el depósito)
+    D = dep / MICRO_PER_UNIT;
+  }
   f.dividends = toMicro(D);
   derivedValue(f.id, 'dividends', dTerms);
   payDividendsTo(s, rc, batch, deposit, D, dTerms);
@@ -2806,11 +3041,13 @@ function payBankDividends(s: CaianiState, b: BankState, rc: DividendReceivers, b
   const profits = nw - getLag(b.lags, LAG.NETWEALTH, s.round, 1);
   setLag(b.lags, LAG.PROFITAFTERTAX, s.round, profits);
   derivedValue(b.id, `lag:${LAG.PROFITAFTERTAX}:${s.round}`, terms);
-  if (!gt(`${SITE_DIVIDENDS} ganancia > 0 (banco)`, profits * MICRO_PER_UNIT, 0, 'amount', undefined, b.id)) return;
+  // Mismo lugar que el de las empresas (una línea de JMAB, F2). Operando agregado (punto 3 de Nico): el patrimonio del banco.
+  if (!gt(`${SITE_DIVIDENDS} ganancia > 0`, profits * MICRO_PER_UNIT, 0, 'amount', undefined, b.id, decisionsActive() ? { inputs: { a: netWorthTerms(s.ledger, b.id) } } : undefined)) return;
   const reserves = contractIds(s.ledger, b.id, 'assets', 'reserves')[0];
   if (reserves === undefined) throw new Error(`banco ${b.id} sin reservas`);
   const share = s.rules.bankProfitShare;
-  const D = profits * share;
+  // solo rama forzada (modo oráculo): inventario-decisiones H (R1: forzada con la ganancia ≤ 0; dividendos 0)
+  const D = profits > 0 ? profits * share : 0;
   b.dividends = toMicro(D);
   const dTerms = inputsActive() ? scaleTerms(terms, share) : [];
   derivedValue(b.id, 'dividends', dTerms);
@@ -2895,7 +3132,7 @@ function selectDepositSupplier(s: CaianiState, depositor: HouseholdState | FirmS
   let maxRate = -Infinity;
   let maxBank = banks[0]!;
   for (const b of banks) {
-    if (gt(`${SITE_DEPOSIT_SUPPLIER} más alta`, b.depositInterestRate, maxRate, 'pure')) {
+    if (gt(`${SITE_DEPOSIT_SUPPLIER} más alta`, b.depositInterestRate, maxRate, 'pure', undefined, depositor.id)) {
       maxRate = b.depositInterestRate;
       maxBank = b;
     }
@@ -3070,7 +3307,8 @@ function bankBankruptcy(s: CaianiState, b: BankState, nw: Micro, rng: CaianiRng)
 export function bankBankruptcyEvent(s: CaianiState, rng: CaianiRng): void {
   for (const b of s.banks) {
     const nw = netFinancialWorth(s.ledger, b.id);
-    if (lt(`${SITE_BANK_BANKRUPTCY} patrimonio < 0`, nw, 0, 'amount', undefined, b.id)) {
+    // Operando agregado (punto 3 de Nico, 2026-11-16): el patrimonio del banco, con el error de entrada de cada contrato.
+    if (lt(`${SITE_BANK_BANKRUPTCY} patrimonio < 0`, nw, 0, 'amount', undefined, b.id, decisionsActive() ? { inputs: { a: netWorthTerms(s.ledger, b.id) } } : undefined)) {
       bankBankruptcy(s, b, nw, rng);
       b.defaulted = true;
     }
@@ -3119,8 +3357,9 @@ export function bondSupplyEvent(s: CaianiState): void {
   const price = s.rules.governmentBondPrice;
   const deficit = contractOf(L, account).amount;
   let quantity = 0;
-  if (lt(`${SITE_BOND_SUPPLY} déficit < 0`, deficit, 0, 'amount')) {
-    quantity = ceiling(`${SITE_BOND_SUPPLY} ⌈|déficit| / precio⌉`, -deficit / MICRO_PER_UNIT / price, 'amount', MICRO_PER_UNIT);
+  if (lt(`${SITE_BOND_SUPPLY} déficit < 0`, deficit, 0, 'amount', undefined, g.id)) {
+    // Forzada con el déficit en 0 µ (JMAB −residuo): ⌈0⌉ = 0 y el techo, frágil, se fuerza al 1 de JMAB (inventario H).
+    quantity = ceiling(`${SITE_BOND_SUPPLY} ⌈|déficit| / precio⌉`, -deficit / MICRO_PER_UNIT / price, 'amount', MICRO_PER_UNIT, g.id);
   }
   if (g.bondOffer !== null) {
     throw new Error('evento 29: el gobierno todavía tiene una emisión propia sin vender (no pasa en 7 semillas × 400 trimestres; no portado)');
@@ -3211,15 +3450,34 @@ export function bondDemandEvent(s: CaianiState): void {
   for (const b of s.banks) {
     const D = toUnits(sumContracts(L, b.id, 'liabilities', 'deposit'));
     let E = 0;
-    for (const id of s.populations.banks) E += Math.max(0, reservesOf(id) - l * D); // error de JMAB: D es la del banco que calcula
+    const positive: AgentId[] = [];
+    for (const id of s.populations.banks) {
+      const e = reservesOf(id) - l * D; // error de JMAB: D es la del banco que calcula
+      if (e > 0) positive.push(id);
+      E += Math.max(0, e);
+    }
     const own = Math.max(0, reservesOf(b.id) - l * D);
-    const x = ge(`${SITE_BOND_DEMAND} rama 1 (empleables ≥ oferta)`, (E / price) * MICRO_PER_UNIT, S * MICRO_PER_UNIT, 'amount', undefined, b.id)
-      ? (S * own) / E
-      : own / price;
-    b.bondDemand = javaRint(x);
-    // El redondeo se da vuelta solo si x está cerca de k + 0,5: distancia medida en µ.
+    // Operandos agregados (punto 3 de Nico, 2026-11-16): E suma las reservas empleables de los bancos (con la D del banco
+    // que calcula) y `own` las del banco; sus términos, a primer orden, para la rama 1 y para el redondeo.
+    const on = decisionsActive();
+    const resTerm = (id: AgentId, coef: number): InputTerm => ({ contract: contractIds(L, id, 'assets', 'reserves')[0]!, coef });
+    const depTerms = (coef: number): InputTerm[] => kindTerms(L, b.id, 'liabilities', 'deposit', coef);
+    const eTerms = (k: number): InputTerm[] => (on ? [...positive.map((id) => resTerm(id, k)), ...depTerms(-l * positive.length * k)] : []);
+    const ownTerms = (k: number): InputTerm[] => (on && own > 0 ? [resTerm(b.id, k), ...depTerms(-l * k)] : []);
+    const rama1 = ge(`${SITE_BOND_DEMAND} rama 1 (empleables ≥ oferta)`, (E / price) * MICRO_PER_UNIT, S * MICRO_PER_UNIT, 'amount', undefined, b.id, on ? { inputs: { a: eTerms(1 / price) } } : undefined);
+    if (rama1 && E === 0) {
+      // solo rama forzada (modo oráculo): inventario-decisiones H (R3: S·propias / 0)
+      throw new Error(`${SITE_BOND_DEMAND}: rama forzada no portada (empleables 0; inventario-decisiones H, R3)`);
+    }
+    const x = rama1 ? (S * own) / E : own / price;
+    // El redondeo se da vuelta solo si x está cerca de k + 0,5: distancia medida en µ. El resultado sale de la decisión
+    // (F3 del inventario de decisiones); sin registrador es `javaRint(x)`.
     const k = Math.floor(x);
-    record(`${SITE_BOND_DEMAND} rint`, b.bondDemand > k, x * MICRO_PER_UNIT, (k + 0.5) * MICRO_PER_UNIT, 'amount', undefined, b.id);
+    const xMicroTerms = rama1
+      ? [...ownTerms(S / E), ...eTerms((-S * own) / (E * E))]
+      : ownTerms(1 / price);
+    const up = record(`${SITE_BOND_DEMAND} rint`, javaRint(x) > k, x * MICRO_PER_UNIT, (k + 0.5) * MICRO_PER_UNIT, 'amount', undefined, b.id, on ? { inputs: { a: xMicroTerms } } : undefined);
+    b.bondDemand = up ? k + 1 : k;
     if (b.bondDemand > 0) b.active[MKT.BONDS] = true;
   }
 }
@@ -3371,6 +3629,17 @@ export function bondMarketSecondStepEvent(s: CaianiState, rng: CaianiRng): void 
     const amount = toMicro(q * offer.price);
     const reserves = contractIds(L, id, 'assets', 'reserves')[0];
     if (reserves === undefined) throw new Error(`banco ${id} sin reservas`);
+    // `reallocateLiquidity(totalAmount, payingStocks, targetStock)` de `BondMechanism` (88) con la lista del banco (sus
+    // reservas, `Bank.getPayingStocks`): la condición del bucle es una decisión (B6 del inventario de decisiones). En el base
+    // el banco tiene una sola cuenta de reservas: no hay traspasos; otra cuenta con saldo no está portada.
+    const paying = contractIds(L, id, 'assets', 'reserves');
+    const raised = contractOf(L, reserves).amount;
+    for (let i = 0; i < paying.length && lt(`${SITE_REALLOCATE} reunido < monto`, raised, amount, 'amount', undefined, id); i++) {
+      const other = paying[i]!;
+      if (other !== reserves && contractOf(L, other).amount > 0) {
+        throw new Error(`${SITE_BOND_MECHANISM}: reallocateLiquidity con otra cuenta de reservas con saldo (banco ${id}; no portado)`);
+      }
+    }
     if (lt(`${SITE_BOND_MECHANISM} reservas < monto`, contractOf(L, reserves).amount, amount, 'amount', undefined, id)) {
       throw new Error(
         `${SITE_BOND_MECHANISM}: el banco ${id} no tiene reservas para pagar ${q} bonos; no pasa en el base y no está portado ` +
@@ -3410,14 +3679,15 @@ export function reservesDemandBaselEvent(s: CaianiState): void {
     const D = sumContracts(L, b.id, 'liabilities', 'deposit');
     const R = sumContracts(L, b.id, 'assets', 'cash') + sumContracts(L, b.id, 'assets', 'reserves');
     b.advancesDemand = Math.round(ratio * D - R);
-    if (inputsActive()) {
-      derivedValue(b.id, 'advancesDemand', [
-        ...contractIds(L, b.id, 'liabilities', 'deposit').map((contract) => ({ contract, coef: ratio })),
-        ...contractIds(L, b.id, 'assets', 'cash').map((contract) => ({ contract, coef: -1 })),
-        ...contractIds(L, b.id, 'assets', 'reserves').map((contract) => ({ contract, coef: -1 })),
-      ]);
-    }
-    if (gt(`${SITE_BASEL} demanda > 0`, b.advancesDemand, 0, 'amount', undefined, b.id)) b.active[MKT.ADVANCES] = true;
+    const demandTerms = (): InputTerm[] => [
+      ...contractIds(L, b.id, 'liabilities', 'deposit').map((contract) => ({ contract, coef: ratio })),
+      ...contractIds(L, b.id, 'assets', 'cash').map((contract) => ({ contract, coef: -1 })),
+      ...contractIds(L, b.id, 'assets', 'reserves').map((contract) => ({ contract, coef: -1 })),
+    ];
+    if (inputsActive()) derivedValue(b.id, 'advancesDemand', demandTerms());
+    // Operando agregado (punto 3 de Nico, 2026-11-16): el pedido sale de los depósitos y las reservas del banco. Forzada con
+    // el pedido en 0 µ, el evento 37 tira su error explícito (C8 del inventario de decisiones, aprobado).
+    if (gt(`${SITE_BASEL} demanda > 0`, b.advancesDemand, 0, 'amount', undefined, b.id, decisionsActive() ? { inputs: { a: demandTerms() } } : undefined)) b.active[MKT.ADVANCES] = true;
   }
 }
 
@@ -3653,7 +3923,8 @@ export function updateExpectationsHouseholds(s: CaianiState): void {
     let qty = 0;
     for (const g of h.consumptionGoods) {
       price += g.price * g.quantity;
-      qty = Math.trunc(qty + g.quantity); // (int)(qty + cantidad)
+      // (int)(qty + cantidad): B5 del inventario de decisiones, un piso sobre una suma de cantidades de montos (≥ 0).
+      qty = flooring('Households.updateExpectations (int)(qty + cantidad)', qty + g.quantity, 'fromAmounts', h.id);
     }
     const exp = h.expectations[EXPECTATION.CONSPRICE];
     if (!exp) throw new Error(`hogar ${h.id} sin expectativa de precio`);

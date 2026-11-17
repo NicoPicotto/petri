@@ -13,7 +13,7 @@
  * - `V3_EVENTS=26,27`: solo el suelto de esos eventos (en modo completo, el encadenado corre hasta el último de ellos).
  *   `V3_TICKS=128`: solo esas corridas (en cualquier modo).
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import {
@@ -76,7 +76,7 @@ import {
 } from '../src/caiani';
 import { ChainScales } from './support/chain-scale';
 import { InputCarry } from './support/input-carry';
-import { INPUT_FIELDS, INPUT_VALUES, V3_CHAIN_RHO, chainedAmountTol, compareState, idMaps, readDump, stateFromDump, type CompareResult, type Dump, type ScaleSource } from './support/jmab-dump';
+import { INPUT_FIELDS, INPUT_VALUES, V3_CHAIN_RHO, chainedAmountTol, compareState, dumpExists, idMaps, readDump, stateFromDump, type CompareResult, type Dump, type ScaleSource } from './support/jmab-dump';
 
 /**
  * Tiempo máximo de cada test del V3: 5 minutos. Con la máquina cargada (otras corridas, el oráculo) un evento que
@@ -330,7 +330,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
   });
   const before = `tick-${tick}.jsonl`;
   const after = (e: number) => `tick-${tick}-ev-${END_DUMPS[e] ?? e}.jsonl`;
-  const available = existsSync(dir + after(LAST));
+  const available = dumpExists(dir + after(LAST));
   // Registro de sorteos: se lee al primer uso y se suelta al terminar la corrida (con 10 corridas, leerlos todos al
   // recolectar los tests llenaba el heap de 4 GB; 2026-11-14).
   let drawsCache: ReturnType<typeof parseDraws> | null = null;
@@ -515,7 +515,7 @@ describe.each(RUNS)('V3 por evento contra el oráculo, tick $tick (reference/, f
 
 describe('arnés del V3: términos de grupo del error de entrada (derived.ts)', () => {
   const dump = `${ORACLE}p3-t50/state/tick-50.jsonl`;
-  it.skipIf(!existsSync(dump))('un grupo da el mismo ε que expandirlo con los coeficientes multiplicados (también anidado)', () => {
+  it.skipIf(!dumpExists(dump))('un grupo da el mismo ε que expandirlo con los coeficientes multiplicados (también anidado)', () => {
     const s = stateFromDump(readDump(dump));
     const flat: InputTerm[] = Object.values(s.ledger.contracts)
       .slice(0, 2000)
@@ -538,7 +538,7 @@ describe('arnés del V3: términos de grupo del error de entrada (derived.ts)', 
 describe('arnés del V3: error de entrada de una operación fuera de un lote (derivedContract, evento 37)', () => {
   const run = `${ORACLE}p3-s102-t292/`;
   const dump = `${run}state/tick-292-ev-36.jsonl`;
-  it.skipIf(!existsSync(dump))('el adelanto del banco 8256 (tick 292, semilla 102) lleva el δ de advancesDemand a su saldo, su monto inicial y las reservas', () => {
+  it.skipIf(!dumpExists(dump))('el adelanto del banco 8256 (tick 292, semilla 102) lleva el δ de advancesDemand a su saldo, su monto inicial y las reservas', () => {
     const d = readDump(dump);
     const { toJ } = idMaps(d.meta);
     const s = stateFromDump(d);
@@ -575,7 +575,7 @@ describe('arnés del V3: error de entrada de una operación fuera de un lote (de
 describe('pedido residual de crédito redondeado a 1 µ: qué préstamo recibe la zombi (reglas-caiani.md, sec. 37)', () => {
   const run = `${ORACLE}p3-s102-t300/`;
   const dump = `${run}state/tick-300-ev-9.jsonl`;
-  it.skipIf(!existsSync(dump))('tick 300, semilla 102: 8204 y 8227 activadas con 1 µ reciben un préstamo de 0 y el evento 10 coincide con JMAB', () => {
+  it.skipIf(!dumpExists(dump))('tick 300, semilla 102: 8204 y 8227 activadas con 1 µ reciben un préstamo de 0 y el evento 10 coincide con JMAB', () => {
     const d = readDump(dump);
     const { toJ } = idMaps(d.meta);
     const s = stateFromDump(d);
