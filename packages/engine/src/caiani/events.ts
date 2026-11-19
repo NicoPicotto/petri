@@ -2159,8 +2159,12 @@ function integerBalance(batch: PaymentBatch, contract: number, what: string): Mi
  *    hogar recalculado en cada pago y las pérdidas actualizadas después de cada uno (como JMAB). Va al lote como
  *    `bailout` (categoría `ownersBailout`, redondeo controlado). Lo que supere el saldo de un préstamo va como
  *    sobrepago (`bailoutExcess`). Si la pérdida total cruza 0 por el sobrepago, el aporte da negativo y el hogar
- *    cobra (`bailoutRefund`: el préstamo sube; decisión de Nico, 2026-11-13). Un depósito de hogar que quedaría
- *    negativo es un error explícito (JMAB no lo chequea; no pasa en los 400 trimestres de la corrida base).
+ *    cobra (`bailoutRefund`: el préstamo sube; decisión de Nico, 2026-11-13). **El depósito del hogar puede quedar
+ *    negativo dentro del lote** (aprobado por Nico, 2026-11-18; reglas-caiani.md, sec. 19): en JMAB pasa (2 casos en 37
+ *    semillas, evento 21: el hogar paga el aporte antes de cobrar en el mismo evento su salario o su seguro) y no se
+ *    chequea. El saldo pendiente negativo entra así en el patrimonio que reparte las quiebras siguientes del mismo
+ *    evento (`getNetWealth`). El ledger no lo ve: el lote liquida el neto al cerrar. Si al cerrar el evento sigue
+ *    negativo, error explícito (`assertHouseholdDepositsNonNegative`; no visto en el base).
  * 6. Lo que queda de cada préstamo se condona (`writeOff`) y suma a `currentNonPerformingLoans` del prestamista,
  *    menos el sobrepago (la pérdida negativa de JMAB).
  * Si la deuda es 0, JMAB no hace nada más (ni pone el depósito en 0).
@@ -2338,12 +2342,12 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
           return;
         }
         const micro = amount * MICRO_PER_UNIT;
-        if (batch.balance(target.id) < micro) {
-          throw new Error(`${SITE_BANKRUPTCY}: el depósito del hogar ${h.id} quedaría negativo (JMAB no lo chequea; no portado, reglas-caiani.md, sec. 19)`);
-        }
+        // Sin control del saldo acá: el depósito puede quedar negativo dentro del lote, como en JMAB (aprobado por Nico,
+        // 2026-11-18); el control es al cerrar el evento (`assertHouseholdDepositsNonNegative`).
         // No se registra como decisión: el reparto entre el préstamo y el sobrepago es continuo (part + sobrepago =
         // aporte), así que un vuelco no cambia nada más allá de la diferencia que lo provoca.
         const part = micro <= room[i]! ? micro : room[i]!;
+        const balanceBefore = batch.balance(target.id);
         batch.payLoan('bailout', target.id, loan, part);
         if (own) {
           const w = wealth(h);
@@ -2362,6 +2366,13 @@ function firmBankruptcy(s: CaianiState, f: FirmState, batch: PaymentBatch, after
         if (micro > part) excess[i]!.push(batch.payLoan('bailoutExcess', target.id, loan, micro - part));
         losses[i] = losses[i]! - amount;
         totalLoss -= amount;
+        // Vigilancia de solo lectura (pedido de Nico, 2026-11-18): depósito de hogar negativo dentro del lote.
+        const balanceAfter = batch.balance(target.id);
+        if (balanceAfter < 0) {
+          const w = (s.watch ??= {});
+          if (balanceBefore >= 0) w.negativeHouseholdDeposits = (w.negativeHouseholdDeposits ?? 0) + 1;
+          w.minHouseholdDeposit = Math.min(w.minHouseholdDeposit ?? 0, balanceAfter);
+        }
       });
     }
   }
@@ -2463,6 +2474,23 @@ function payLoanInterests(s: CaianiState, f: FirmState, batch: PaymentBatch, aft
 }
 
 /**
+ * Control al cerrar los eventos 20 y 21 (aprobado por Nico, 2026-11-18; reglas-caiani.md, sec. 19): el aporte de los
+ * dueños puede dejar el depósito de un hogar negativo dentro del lote (como en JMAB, donde se recupera en el mismo evento
+ * 21 con el salario o el seguro), pero si al cerrar el evento sigue negativo es una rama que no se vio en el base: error
+ * explícito. Solo lee el lote.
+ */
+function assertHouseholdDepositsNonNegative(s: CaianiState, batch: PaymentBatch, event: number): void {
+  for (const h of s.households) {
+    for (const id of contractIds(s.ledger, h.id, 'assets', 'deposit')) {
+      const b = batch.balance(id);
+      if (b < 0) {
+        throw new Error(`${SITE_BANKRUPTCY}: el depósito del hogar ${h.id} queda negativo (${b} µ) al cerrar el evento ${event} (JMAB lo deja negativo; no visto en el base: no portado, reglas-caiani.md, sec. 19)`);
+      }
+    }
+  }
+}
+
+/**
  * Evento 20, `creditInterestsTic` (TIC_CREDINTERESTS): solo las empresas, en orden de creación (consumo, después
  * capital): `CopyOfConsumptionFirm2WagesEnd.onTicArrived` 88–89 y `CopyOfCapitalFirm2WagesEnd` 87–88 →
  * `payInterests`. Sin sorteos. La matriz `debtPayments` de JMAB es de trabajo y no se porta. Los pagos van a un
@@ -2472,6 +2500,7 @@ export function creditInterestsEvent(s: CaianiState): SettleReport {
   const batch = new PaymentBatch(s.ledger);
   const after: AfterSettle = [];
   for (const f of [...s.consumptionFirms, ...s.capitalFirms]) payLoanInterests(s, f, batch, after);
+  assertHouseholdDepositsNonNegative(s, batch, 20);
   const report = batch.settle();
   for (const fn of after) fn();
   return report;
@@ -2604,6 +2633,7 @@ export function wagePaymentEvent(s: CaianiState, rng: CaianiRng): SettleReport {
   for (const f of s.consumptionFirms) payFirmWages(s, f, SITE_PAY_WAGES_CONSUMPTION, batch, after, rng);
   for (const f of s.capitalFirms) payFirmWages(s, f, SITE_PAY_WAGES_CAPITAL, batch, after, rng);
   payGovernmentWagesAndDole(s, batch, rng);
+  assertHouseholdDepositsNonNegative(s, batch, 21);
   const report = batch.settle();
   for (const fn of after) fn();
   return report;
@@ -3271,14 +3301,35 @@ export const SITE_BANK_BANKRUPTCY = 'BankBankruptcyBailoutCAR.bankrupt';
  *   caiani-referencia.md).
  * - Expectativa de depósitos del banco: todas las filas de observaciones = [depósitos después, depósitos después]
  *   (`setPassedValues`; el valor de la expectativa no cambia).
- * Errores explícitos (ramas que JMAB no cubre): ratio u objetivo no finitos (un banco sin préstamos tiene ratio
- * infinito), quita negativa, banco sin depósitos o quita mayor que los depósitos.
+ * Adaptación donde JMAB no está definido (Nico, 2026-11-18): el promedio usa solo los ratios finitos de los otros bancos
+ * (un banco sin préstamos tiene ratio ±∞ en JMAB y NaN en el port); contador en `s.adaptations`.
+ * Errores explícitos (ramas que JMAB no cubre): ningún otro banco con ratio finito, objetivo no finito, quita negativa,
+ * banco sin depósitos o quita mayor que los depósitos.
  */
 function bankBankruptcy(s: CaianiState, b: BankState, nw: Micro, rng: CaianiRng): void {
   const L = s.ledger;
+  // Adaptación donde JMAB no está definido (aprobada por Nico, 2026-11-18; reglas-caiani.md, sec. 27): el promedio usa solo
+  // los ratios finitos de los otros bancos (como el evento 6 deja afuera a los bancos sin préstamos). En JMAB un ratio ±∞
+  // haría infinitos el objetivo y la quita; nunca le pasó en 107 corridas. El port, con "0 en µ es 0", tiene NaN (0/0).
+  // Con todos los ratios finitos, la suma y el divisor son los de JMAB (mismo orden, mismo double).
   let tot = 0;
-  for (const id of s.populations.banks) if (id !== b.id) tot += bankById(s, id).capitalRatio;
-  const car = tot / (s.populations.banks.length - 1) + rng.uniform01(SITE_BANK_BANKRUPTCY, 'bailoutCAR') * 0.1;
+  let n = 0;
+  let excluded = 0;
+  for (const id of s.populations.banks) {
+    if (id === b.id) continue;
+    const r = bankById(s, id).capitalRatio;
+    if (Number.isFinite(r)) {
+      tot += r;
+      n += 1;
+    } else excluded += 1;
+  }
+  if (n === 0) throw new Error(`${SITE_BANK_BANKRUPTCY}: banco ${b.id} sin ningún otro banco con ratio de capital finito: no portado`);
+  if (excluded > 0) {
+    const a = (s.adaptations ??= {});
+    a.bailoutNonFiniteRatios = (a.bailoutNonFiniteRatios ?? 0) + 1;
+    a.bailoutRatiosExcluded = (a.bailoutRatiosExcluded ?? 0) + excluded;
+  }
+  const car = tot / n + rng.uniform01(SITE_BANK_BANKRUPTCY, 'bailoutCAR') * 0.1;
   const loanIds = contractIds(L, b.id, 'assets', 'loan');
   const loans = sumContracts(L, b.id, 'assets', 'loan');
   const targetNW = car * toUnits(loans);

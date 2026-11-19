@@ -363,6 +363,37 @@ export interface CaianiState {
   centralBank: CentralBankState;
   /** Rezagos agregados de la simulación (`MacroSimulation.passedValues`). */
   aggregateLags: Lags;
+  /**
+   * Contadores de las adaptaciones donde JMAB no está definido (reglas-caiani.md, sec. 1). Se crea la primera vez que
+   * una se usa: ausente si no pasó ninguna (así el estado de una corrida sin adaptaciones no cambia).
+   */
+  adaptations?: Adaptations;
+  /**
+   * Vigilancias de solo lectura para V4 (no cambian nada del modelo). Se crean la primera vez que algo se cuenta: ausentes
+   * si no pasó (el estado de una corrida sin casos no cambia, ni su hash).
+   */
+  watch?: Watch;
+}
+
+/** Ver `CaianiState.watch`. */
+export interface Watch {
+  /**
+   * Eventos 20 y 21 (reglas-caiani.md, sec. 19; pedido de Nico, 2026-11-18, para comparar con la vigilancia de quiebras
+   * de JMAB): aportes de los dueños que dejan negativo, dentro del lote, el depósito de un hogar que no lo era, y el saldo
+   * más bajo que tuvo (µ, `double`).
+   */
+  negativeHouseholdDeposits?: number;
+  minHouseholdDeposit?: number;
+}
+
+/** Contadores de adaptaciones por corrida (ver `CaianiState.adaptations`). */
+export interface Adaptations {
+  /**
+   * Evento 28 (aprobado por Nico, 2026-11-18; reglas-caiani.md, sec. 27): rescates de bancos cuyo promedio de ratios de
+   * los otros bancos excluyó algún ratio no finito, y cuántos ratios excluyó en total.
+   */
+  bailoutNonFiniteRatios?: number;
+  bailoutRatiosExcluded?: number;
 }
 
 /**

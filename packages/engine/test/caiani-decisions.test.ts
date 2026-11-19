@@ -5,8 +5,10 @@ import { describe, expect, it } from 'vitest';
 import {
   DecisionRecorder,
   adaptiveInterestRate,
+  ceiling,
   compareOutcomes,
   decisionDistance,
+  flooring,
   gt,
   record,
   rounding,
@@ -135,6 +137,100 @@ describe('decisiones discretas: casos a mano', () => {
     // Fuera de withDecisions no se registra nada más.
     gt('x', 3, 1, 'pure');
     expect(rec.log[3]!['x']!.comparisons).toBe(2);
+  });
+
+  it('flooring y ceiling sin registrador: Math.floor y Math.ceil, sin nada más', () => {
+    expect([flooring('f', 2.9999999, 'pure'), flooring('f', 3, 'pure'), flooring('f', -0.5, 'pure')]).toEqual([2, 3, -1]);
+    expect([ceiling('c', 3.0000001, 'amount', 1_000_000), ceiling('c', 3, 'amount'), ceiling('c', 0, 'amount')]).toEqual([4, 3, 0]);
+  });
+
+  it('flooring: el umbral es el entero más cercano; frágil si x está a ≤ la tolerancia de él (relativa a max(|x|, |k|))', () => {
+    const rec = new DecisionRecorder();
+    withDecisions(rec, 18, () => {
+      // pure (10⁻⁹ relativo)
+      expect(flooring('p', 3 - 3e-12, 'pure')).toBe(2); // a 10⁻¹² relativo de 3, por debajo: frágil
+      expect(flooring('p', 3 + 3e-12, 'pure')).toBe(3); // por encima: frágil
+      expect(flooring('p', 2.5, 'pure')).toBe(2); // a 0,5 / 2,5 = 0,2 del 3 (y del 2): no frágil
+      expect(flooring('p', 3, 'pure')).toBe(3); // en el entero exacto: distancia 0, frágil
+      // fromAmounts (10⁻⁶ relativo): unidades que compra un hogar con su depósito (eventos 18 y 19)
+      expect(flooring('m', 7 + 3.5e-6, 'fromAmounts')).toBe(7); // 3,5·10⁻⁶ / 7 = 5·10⁻⁷: frágil
+      expect(flooring('m', 7 + 1.4e-5, 'fromAmounts')).toBe(7); // 2·10⁻⁶: no frágil
+      expect(flooring('m', 0.4, 'fromAmounts')).toBe(0); // el más cercano es 0: |0,4 − 0| / 0,4 = 1, no frágil
+    });
+    const p = rec.log[18]!['p']!;
+    expect([p.comparisons, p.fragile, p.outcomes]).toEqual([4, 3, [2, 3, 2, 3]]);
+    expect(p.examples.map((e) => e.index)).toEqual([0, 1, 3]);
+    expect(p.examples[0]!.b).toBe(3); // el umbral registrado es el entero más cercano, no el piso
+    expect(p.examples[0]!.distance).toBeCloseTo(1e-12, 15); // 3·10⁻¹² / 3 (salvo la representación de 3 − 3·10⁻¹²)
+    const m = rec.log[18]!['m']!;
+    expect([m.comparisons, m.fragile, m.outcomes]).toEqual([3, 1, [7, 7, 0]]);
+  });
+
+  it('ceiling: con unit la distancia se mide en µ (evento 29: bonos = ⌈déficit en unidades⌉); sin unit sería en unidades', () => {
+    const rec = new DecisionRecorder();
+    withDecisions(rec, 29, () => {
+      expect(ceiling('u', 3 + 1e-6, 'amount', 1_000_000)).toBe(4); // 1 µ por encima de 3: frágil (≤ 2 µ)
+      expect(ceiling('u', 3 - 1.5e-6, 'amount', 1_000_000)).toBe(3); // 1,5 µ por debajo: frágil
+      expect(ceiling('u', 3 + 3e-6, 'amount', 1_000_000)).toBe(4); // 3 µ: no frágil
+      expect(ceiling('u', 2.5, 'amount', 1_000_000)).toBe(3); // 500.000 µ: no frágil
+      // Sin unit, la distancia de 3 + 3·10⁻⁶ (unidades) al 3 sería 3·10⁻⁶ "µ": frágil por error de escala.
+      expect(ceiling('sin unit', 3 + 3e-6, 'amount')).toBe(4);
+    });
+    const u = rec.log[29]!['u']!;
+    expect([u.comparisons, u.fragile, u.outcomes]).toEqual([4, 2, [4, 3, 4, 3]]);
+    expect(u.examples.map((e) => [e.index, e.b])).toEqual([
+      [0, 3_000_000],
+      [1, 3_000_000],
+    ]);
+    expect(u.examples[0]!.distance).toBeCloseTo(1, 6); // en µ
+    expect(u.examples[1]!.distance).toBeCloseTo(1.5, 6);
+    expect(rec.log[29]!['sin unit']!.fragile).toBe(1);
+  });
+
+  it('flooring y ceiling en modo oráculo: rama de JMAB (k ± 1) si es frágil de los dos lados; k ± 2 o no frágil, error', () => {
+    const rec = new DecisionRecorder();
+    rec.oracle = new Map([
+      [
+        18,
+        [
+          // Piso: port 3 − 3·10⁻¹² → 2; JMAB 3 + 3·10⁻¹² → 3 (los operandos de JMAB: x y el entero más cercano).
+          { site: 'f', agent: -1, outcome: 3, a: 3 + 3e-12, b: 3 },
+          // Piso igual en los dos: no se fuerza.
+          { site: 'f', agent: -1, outcome: 2, a: 2.5, b: 3 },
+        ],
+      ],
+      [
+        29,
+        [
+          // Techo en µ: port 3 + 1 µ → 4; JMAB 3 − 0,5 µ → 3 (operandos de JMAB en unidades; el arnés los pasa a µ).
+          { site: 'c', agent: -1, outcome: 3, a: 3 - 5e-7, b: 3 },
+        ],
+      ],
+    ]);
+    withDecisions(rec, 18, () => {
+      expect(flooring('f', 3 - 3e-12, 'pure')).toBe(3); // k + 1: la de JMAB
+      expect(flooring('f', 2.5, 'pure')).toBe(2);
+    });
+    withDecisions(rec, 29, () => expect(ceiling('c', 3 + 1e-6, 'amount', 1_000_000)).toBe(3)); // k − 1: la de JMAB
+    expect(rec.forced.map((f) => [f.event, f.site, f.kind, f.port, f.jmab, f.alarm])).toEqual([
+      [18, 'f', 'frágil', 2, 3, false],
+      [29, 'c', 'frágil', 4, 3, false],
+    ]);
+    expect(rec.forced[1]!.distancePort).toBeCloseTo(1, 6);
+    expect(rec.forced[1]!.distanceJmab).toBeCloseTo(0.5, 6);
+
+    // k ± 2: aunque las dos sean frágiles, no se fuerza (solo un paso de 1): error.
+    const r2 = new DecisionRecorder();
+    r2.oracle = new Map([[18, [{ site: 'f', agent: -1, outcome: 4, a: 3 + 3e-12, b: 3 }]]]);
+    expect(() => withDecisions(r2, 18, () => flooring('f', 3 - 3e-12, 'pure'))).toThrow(/no frágil/);
+    // JMAB lejos del umbral (no frágil): error.
+    const r3 = new DecisionRecorder();
+    r3.oracle = new Map([[18, [{ site: 'f', agent: -1, outcome: 3, a: 3.4, b: 3 }]]]);
+    expect(() => withDecisions(r3, 18, () => flooring('f', 3 - 3e-12, 'pure'))).toThrow(/no frágil/);
+    // Port lejos del umbral (no frágil): error, aunque JMAB lo sea.
+    const r4 = new DecisionRecorder();
+    r4.oracle = new Map([[29, [{ site: 'c', agent: -1, outcome: 3, a: 3 - 5e-7, b: 3 }]]]);
+    expect(() => withDecisions(r4, 29, () => ceiling('c', 3 + 3e-6, 'amount', 1_000_000))).toThrow(/no frágil/);
   });
 
   it('el piso de la producción deseada se mide contra la escala de los términos', () => {

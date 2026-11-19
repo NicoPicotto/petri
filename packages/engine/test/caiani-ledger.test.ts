@@ -22,6 +22,7 @@ import {
   open,
   pay,
   payTo,
+  rawInstallments,
   serviceLoan,
   writeDown,
   type Ledger,
@@ -199,6 +200,22 @@ describe('préstamos (ConstrainedCreditMechanism, computeDebtPayments, payIntere
       tick(L, f);
       expect(Math.abs(contractOf(L, id).amount - (A - (a * A) / 20))).toBeLessThan(2);
     }
+    expect(contractOf(L, id).amount).toBe(0);
+  });
+
+  it('préstamo de menos de 1 µ por cuota: la corrección del desvío no deja el capital negativo (semilla 70 de V4)', () => {
+    // A = 16 µ, L = 20 (A/L = 0,8 µ), edad 16, saldo 3 µ. Desvío d = (16 − 3) − 16·15/20 = 13 − 12 = 1 → c = 1, y
+    // A/L − c = −0,2 µ: antes, el evento 20 lo pagaba crudo y el lote tiraba "monto inválido". Ahora 0 en las dos
+    // funciones (aprobado por Nico, 2026-11-19). Después: edad 17, d = 13 − 12,8 = 0,2 → c = 0, cuota 0,8 → 1 µ; edades 18 y
+    // 19, lo mismo (d = 0,4 y 0,6): el saldo llega a 0 en la edad 19 y la última cuota (edad 20) paga el saldo, 0.
+    const L = createLedger();
+    const b = addAgent(L, 'bank');
+    const f = addAgent(L, 'consumptionFirm');
+    const id = open(L, 'loan', b, f, 3, { rate: 0, length: 20, amortization: 'fixedCapital', age: 16, initialAmount: 16 }, 'loans');
+    expect(rawInstallments(L, f, 'loan')[0]).toEqual({ interest: 0, principal: 0, exactPrincipal: false });
+    expect(installmentOf(L, id)).toEqual({ interest: 0, principal: 0 });
+    const paid = [16, 17, 18, 19, 20].map(() => tick(L, f)[0]);
+    expect(paid).toEqual([0, 1, 1, 1, 0]);
     expect(contractOf(L, id).amount).toBe(0);
   });
 

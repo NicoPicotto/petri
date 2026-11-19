@@ -133,9 +133,10 @@ export class PaymentBatch {
 
   /**
    * Reparte un total entero (µ) que paga la cuenta `from` en `double`, en proporción a `weights` (decisión de Nico,
-   * 2026-11-14, "camino (a)"; reglas-caiani.md, sec. 1 y 27): la parte i, para i < n, es (total × wᵢ) / W, como en JMAB,
-   * y la última es total − S, con S la suma en `double` de las anteriores **acumulada como la acumula el lote** (desde 0
-   * y en el mismo orden). `payOne(i, monto)` anota cada pago en el lote, en orden y sin otros pagos de `from` en el
+   * 2026-11-14, "camino (a)"; reglas-caiani.md, sec. 1 y 27): la parte i es (total × wᵢ) / W, como en JMAB, salvo la del
+   * último peso > 0 (k), que es total − S, con S la suma en `double` de las anteriores **acumulada como la acumula el lote**
+   * (desde 0 y en el mismo orden); los pesos 0 después de k reciben 0, como en JMAB (cambio aprobado por Nico, 2026-11-17:
+   * antes "el último" era el último de la lista, y con un peso 0 al final la última parte podía quedar en −ε). `payOne(i, monto)` anota cada pago en el lote, en orden y sin otros pagos de `from` en el
    * medio. Garantía (escrita en la sec. 1): la suma que el lote hace para el grupo de `from` da exactamente `total`, así
    * que el redondeo controlado reparte exactamente `total` en µ (piso = techo). Se verifica al terminar. Errores: `from`
    * ya pagó algo en el lote, total no entero o ≥ 2⁵², pesos inválidos, o S > total.
@@ -154,15 +155,19 @@ export class PaymentBatch {
       W += w;
     }
     if (!(W > 0)) throw new Error('PaymentBatch.paySplit: pesos en 0');
-    const x: number[] = [];
+    // "El último" es el último con peso > 0 (aprobado por Nico, 2026-11-17): un peso 0 recibe 0, como en JMAB (total × 0 / W),
+    // también al final de la lista (un préstamo de saldo 0 en la quiebra del evento 20; semilla 1, tick 134).
+    let last = n - 1;
+    while (weights[last] === 0) last--;
+    const x: number[] = new Array<number>(n).fill(0);
     let S = 0;
-    for (let i = 0; i < n - 1; i++) {
+    for (let i = 0; i < last; i++) {
       const xi = (total * weights[i]!) / W;
-      x.push(xi);
+      x[i] = xi;
       S += xi;
     }
     if (!(S <= total)) throw new Error(`PaymentBatch.paySplit: las primeras partes suman ${S} > ${total}`);
-    x.push(total - S);
+    x[last] = total - S;
     x.forEach((xi, i) => payOne(i, xi));
     if ((this.paidBy.get(from) ?? 0) !== total) throw new Error(`PaymentBatch.paySplit: el lote suma ${this.paidBy.get(from)} para ${from}, no ${total}`);
     return x;

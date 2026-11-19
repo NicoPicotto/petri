@@ -668,7 +668,7 @@ export function installments(ledger: Ledger, debtor: AgentId, kind: 'loan' | 'ad
 export interface RawInstallment {
   /** Tasa × saldo (µ, `double`). */
   interest: number;
-  /** A/L − c, o el saldo entero en la última cuota y en `onlyInterest` (µ). */
+  /** max(0, A/L − c), o el saldo entero en la última cuota y en `onlyInterest` (µ). */
   principal: number;
   /** El capital ya es un entero que no pasa por el redondeo (última cuota, `onlyInterest`). */
   exactPrincipal: boolean;
@@ -694,7 +694,9 @@ export function rawInstallments(ledger: Ledger, debtor: AgentId, kind: 'loan' | 
     if (loan.age <= L) {
       const drift = A - loan.amount - (A * (loan.age - 1)) / L;
       const correction = Math.abs(drift) >= 1 && Math.abs(drift) < 2 ? Math.trunc(drift) : 0;
-      return { interest, principal: A / L - correction, exactPrincipal: false };
+      // Con A/L < 1 µ, la corrección c = 1 daría un capital negativo (semilla 70 de V4, tick 71: A = 16 µ, L = 20,
+      // A/L − c = −0,2 µ): se recorta a 0, como ya hacía `installments` (aprobado por Nico, 2026-11-19).
+      return { interest, principal: Math.max(0, A / L - correction), exactPrincipal: false };
     }
     return { interest, principal: 0, exactPrincipal: true };
   });

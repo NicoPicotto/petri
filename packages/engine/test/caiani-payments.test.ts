@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { Rng } from '../src/rng';
 import { addAgent, applyPayments, assertLedger, contractOf, createLedger, open, pay, type Ledger } from '../src/caiani/ledger';
 import { assertFlows, beginPeriod } from '../src/caiani/flows';
-import { PaymentBatch, controlledRound, type PaymentGroups } from '../src/caiani/payments';
+import { PaymentBatch, RELAXED_EPSILON, controlledRound, type PaymentGroups } from '../src/caiani/payments';
 
 /** Grupos de una lista de pagos dados como [banco que paga, cuenta que paga, cuenta que cobra, banco que cobra]. */
 function groups(rows: [number, number, number, number][]): PaymentGroups {
@@ -81,6 +81,40 @@ describe('controlledRound: casos a mano', () => {
 
   it('una cuenta en dos bancos (familias no laminares) es un error', () => {
     expect(() => controlledRound([1.5, 1.5], groups([[1, 10, 20, 2], [3, 10, 21, 2]]))).toThrow(/dos bancos/);
+  });
+
+  it('cotas relajadas: las estrictas no tienen solución porque la suma en double cae del otro lado; el reintento la encuentra a ≤ 1 µ', () => {
+    // Pagador P1 (banco 1) paga 0,5 µ dos veces y P2 (banco 2) paga 2⁵² µ, todo al cobrador Q (banco 3), en el orden
+    // P1, P2, P1. Sumas en double, en el orden de los pagos:
+    // - P1 (y el banco 1): 0,5 + 0,5 = 1 exacto → cotas [1, 1];
+    // - P2 (y el banco 2): 2⁵² exacto → [2⁵², 2⁵²];
+    // - Q (y el banco 3): fl(fl(0,5 + 2⁵²) + 0,5) = 2⁵² (cada suma es un empate a la mitad de un ulp de 1 y se redondea
+    //   al par), cuando la exacta es 2⁵² + 1 → [2⁵², 2⁵²].
+    // Lo que cobra Q tiene que ser lo que pagan P1 y P2 (1 + 2⁵²): con las cotas estrictas no hay solución. El reintento
+    // relaja todas las cotas de grupo a [⌊s − 10⁻³⌋, ⌈s + 10⁻³⌉]: P1 a [0, 2], P2 a [2⁵² − 1, 2⁵² + 1], Q a [2⁵² − 1, 2⁵² + 1]
+    // (las de cada pago no cambian: [⌊x⌋, ⌈x⌉]). La circulación que encuentra (determinista) es m = [0, 2⁵², 0]: Q cobra
+    // exactamente su suma en double y P1 paga 0 contra 1, a 1 µ (≤ 1, no < 1). Solo pasa con sumas cerca de 2⁵² µ (4,5·10⁹ unidades de Caiani, ~3.600 veces el agregado más grande del .jar):
+    // en una búsqueda de 200.000 lotes al azar por escala (reference/tools/relaxed-search.test.ts), 0 relajados con montos
+    // chicos y con montos realistas (hasta 10¹² µ).
+    const B = 4_503_599_627_370_496; // 2⁵²
+    const x = [0.5, B, 0.5];
+    expect(x[0]! + x[1]! + x[2]!).toBe(B); // la suma en double de Q
+    expect(x[0]! + x[2]!).toBe(1); // la de P1
+    const g = groups([
+      [1, 10, 30, 3],
+      [2, 20, 30, 3],
+      [1, 10, 30, 3],
+    ]);
+    const r = controlledRound(x, g);
+    expect(r.relaxed).toBe(true);
+    expect(r.m).toEqual([0, B, 0]);
+    r.m.forEach((m, i) => expect(Math.abs(m - x[i]!)).toBeLessThan(1)); // cada pago, la garantía de siempre
+    expect(r.maxPaymentDiff).toBeLessThan(1);
+    expect(r.maxGroupDiff).toBe(1); // P1 y el banco 1: 0 contra 1 en double (≤ 1 µ)
+    // Sin relajar habría sido infactible: ninguna asignación de los pagos (cada uno en {⌊x⌋, ⌈x⌉}) cumple P1 = 1, P2 = 2⁵²
+    // y Q = 2⁵² a la vez.
+    for (const m0 of [0, 1]) for (const m2 of [0, 1]) expect(m0 + m2 === 1 && m0 + B + m2 === B).toBe(false);
+    expect(RELAXED_EPSILON).toBe(1e-3);
   });
 });
 
@@ -458,6 +492,66 @@ describe('PaymentBatch: cota del lote por mecanismo (bordes redondeados por cont
       expect(amt(w.L, w.d2) + amt(w.L, w.d3) + amt(w.L, w.fd)).toBe(900);
       assertLedger(w.L);
       assertFlows(w.L, w.cp);
+    }
+  });
+
+  it('paySplit: 10 préstamos con el último de saldo 0 (semilla 1, tick 134, evento 20): recibe 0 y el resto va al último con saldo', () => {
+    // Liquidez 3.113.277 µ de una empresa quebrada y los saldos de sus 10 préstamos (el último en 0), tal cual el corte de la
+    // corrida en PRNG (reference/p0/runs/oracle/paysplit-diag-s1.txt). Con "el último" = el último de la lista, las 9 partes
+    // anteriores sumaban en exacto toda la liquidez y en double 3.113.277,000000001: la décima quedaba en −9·10⁻¹⁰ µ.
+    const total = 3_113_277;
+    const weights = [107376234, 4764620, 1914010, 1952775, 1944065, 2159664, 1870580, 3119973, 3893288, 0];
+    let W = 0;
+    for (const v of weights) W += v;
+    let old = 0;
+    for (let i = 0; i < 9; i++) old += (total * weights[i]!) / W;
+    expect(old).toBeGreaterThan(total); // la precondición del algoritmo anterior fallaba
+    const L = createLedger();
+    const cb = addAgent(L, 'centralBank');
+    const b1 = addAgent(L, 'bank');
+    const b2 = addAgent(L, 'bank');
+    const f = addAgent(L, 'consumptionFirm');
+    const hs = [addAgent(L, 'household'), addAgent(L, 'household')];
+    open(L, 'reserves', b1, cb, 10_000_000, {}, 'deposits');
+    open(L, 'reserves', b2, cb, 10_000_000, {}, 'deposits');
+    const fd = open(L, 'deposit', f, b1, total, {}, 'deposits');
+    const to = [open(L, 'deposit', hs[0]!, b1, 0, {}, 'deposits'), open(L, 'deposit', hs[1]!, b2, 0, {}, 'deposits')];
+    const cp = beginPeriod(L);
+    const batch = new PaymentBatch(L);
+    const calls: number[] = [];
+    const x = batch.paySplit(fd, total, weights, (i, amount) => {
+      calls.push(i);
+      batch.pay(fd, to[i % 2]!, amount, 'wages'); // en el evento 20 son pagos a préstamos (payLoan); acá, a depósitos
+    });
+    expect(calls).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]); // payOne para todos, en orden
+    expect(x[9]).toBe(0); // saldo 0: recibe 0, como JMAB (total × 0 / W)
+    let S = 0;
+    for (let i = 0; i < 8; i++) {
+      expect(x[i]).toBe((total * weights[i]!) / W);
+      S += x[i]!;
+    }
+    expect(x[8]).toBe(total - S); // el último con saldo > 0 se lleva lo que queda
+    expect(x[8]).toBeGreaterThan(0);
+    expect(S + x[8]!).toBe(total); // la suma que hace el lote es exactamente el total
+    batch.settle();
+    expect(contractOf(L, fd).amount).toBe(0);
+    expect(contractOf(L, to[0]!).amount + contractOf(L, to[1]!).amount).toBe(total);
+    assertLedger(L);
+    assertFlows(L, cp);
+  });
+
+  it('paySplit: pesos 0 en el medio y al final reciben 0; si solo el primero tiene peso, se lleva todo', () => {
+    for (const [weights, expected] of [
+      [[5, 0, 3, 0, 0], [62.5, 0, 37.5, 0, 0]],
+      [[7, 0, 0], [100, 0, 0]],
+    ] as [number[], number[]][]) {
+      const w = world();
+      const batch = new PaymentBatch(w.L);
+      const x = batch.paySplit(w.d1, 100, weights, (i, amount) => batch.pay(w.d1, [w.d2, w.d3][i % 2]!, amount, 'wages'));
+      expect(x).toEqual(expected);
+      batch.settle();
+      expect(amt(w.L, w.d1)).toBe(200);
+      assertLedger(w.L);
     }
   });
 

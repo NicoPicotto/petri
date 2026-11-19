@@ -51,6 +51,7 @@ import {
   updateExpectationsGovernment,
   updateExpectationsHouseholds,
   firmNetWealth,
+  householdNetWealth,
   reservesMarketEvent,
   javaRint,
   writeDown,
@@ -1400,11 +1401,12 @@ describe('evento 20 (servicio de la deuda): casos a mano', () => {
     expect(Math.abs(bankB.currentNonPerformingLoans - nplB - losses[1]! * 1e6)).toBeLessThan(2);
   });
 
-  it('quiebra con el depósito de un hogar que no alcanza para su aporte: error explícito (JMAB no lo chequea)', () => {
+  it('quiebra con el depósito de un hogar que no alcanza para su aporte y nada que cobrar en el evento: queda negativo al cerrar el evento 20, error explícito (no visto en el base)', () => {
+    // Aprobado por Nico (2026-11-18; reglas-caiani.md, sec. 19): el negativo se permite dentro del lote, no al cerrar.
     const { s } = bankruptConsumptionFirm(200); // D = min(100, 38,1) = 38,1
     const h = s.households[0]!;
     h.consumptionGoods = [{ quantity: 1, value: 1e9, price: 1e9, unitCost: 0, age: 0, producer: s.consumptionFirms[2]!.id, duration: 1 }];
-    expect(() => creditInterestsEvent(s)).toThrow(/depósito del hogar .* quedaría negativo/);
+    expect(() => creditInterestsEvent(s)).toThrow(new RegExp(`depósito del hogar ${h.id} queda negativo .* al cerrar el evento 20`));
   });
 
   it('quiebra de una empresa de capital con liquidez mayor que la deuda: paga todo y el excedente se borra (writeOff)', () => {
@@ -1516,6 +1518,39 @@ describe('evento 21 (salarios y seguro de desempleo): casos a mano', () => {
     expect(Math.abs(a0 - contractOf(L, account).amount - (12_000_000 + 0.4 * average * nUnemployed * 1e6))).toBeLessThan(1);
     const dole = L.flowLog.filter((r) => r.category === 'unemploymentBenefits');
     expect(dole.length).toBe(nUnemployed);
+  });
+
+  it('quiebra en el evento 21: el aporte deja negativo el depósito de un desocupado dentro del lote y el seguro (que el gobierno paga al final) lo repone; sin error, como en JMAB', () => {
+    // Caso de JMAB (semilla 128, tick 82; pendientes.md, 2026-11-18): el hogar paga el aporte de una empresa de consumo antes
+    // de cobrar su seguro en el mismo evento. Aprobado por Nico (2026-11-18): el negativo solo dentro del lote.
+    const { s, L, c } = setup(10); // la empresa no paga la masa salarial y quiebra en el evento 21
+    c.capitalGoods = [{ ...c.capitalGoods[0]!, quantity: 20, value: 20 }]; // aporte de los dueños = min(20, pérdida)
+    const h = s.households.find((x) => x.employer === null)!;
+    const dep = firstAsset(L, h.id, 'deposit')!;
+    const other = firstAsset(L, s.households.find((x) => x.id !== h.id)!.id, 'deposit')!;
+    pay(L, dep.id, other.id, dep.amount - 1_000, 'deposits'); // depósito del hogar: 1.000 µ
+    // Bienes G = W / 19: su parte del aporte es aporte × G / (W + G) ≈ aporte / 20 (0,5 a 1 unidad), más que su depósito
+    // y menos que su seguro (0,4 × salario medio ≈ 2).
+    const W = s.households.reduce((a, x) => a + householdNetWealth(s, x), 0);
+    h.consumptionGoods = [{ quantity: 1, value: W / 19, price: W / 19, unitCost: 0, age: 0, producer: s.consumptionFirms[2]!.id, duration: 1 }];
+    const cp = beginPeriod(L);
+    wagePaymentEvent(s, new PrngCaianiRng(Rng.fromSeed(2)));
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(c.defaulted).toBe(true);
+    const cost = c.bailoutCost; // en µ: el aporte de los dueños (la pérdida de la empresa, < 20)
+    expect(cost).toBeGreaterThan(10_000_000 - 1);
+    const paid = L.flowLog.filter((r) => r.category === 'ownersBailout' && r.payer === h.id).reduce((a, r) => a + r.amount, 0);
+    const dole = L.flowLog.filter((r) => r.category === 'unemploymentBenefits' && r.payee === h.id).reduce((a, r) => a + r.amount, 0);
+    expect(paid).toBeGreaterThan(1_000); // dentro del lote, el depósito quedó negativo
+    // ≈ cost / 20 (a menos de 1%: el patrimonio total del reparto es el del momento de la quiebra, no el de antes del evento)
+    expect(Math.abs(paid - cost / 20)).toBeLessThan((cost / 20) * 0.01);
+    expect(dole).toBeGreaterThan(paid);
+    expect(dep.amount).toBe(1_000 - paid + dole); // al cerrar el evento, positivo
+    // Vigilancia de solo lectura: un aporte dejó negativo un depósito que no lo era; el saldo más bajo, el del lote.
+    expect(s.watch?.negativeHouseholdDeposits).toBe(1);
+    expect(s.watch!.minHouseholdDeposit!).toBeLessThan(0);
+    expect(Math.abs(s.watch!.minHouseholdDeposit! - (1_000 - paid))).toBeLessThan(1);
   });
 });
 
@@ -2185,10 +2220,35 @@ describe('evento 28 (quiebra de los bancos): casos a mano', () => {
     expect(contractOf(L, orphan).amount).toBe(2_000_000);
   });
 
-  it('errores explícitos: ratio de otro banco infinito (sin préstamos) y quita mayor que los depósitos', () => {
+  it('adaptación donde JMAB no está definido: el promedio usa solo los ratios finitos de los otros bancos (NaN y +∞ afuera), con contador', () => {
+    // Aprobado por Nico (2026-11-18; reglas-caiani.md, sec. 27). Con dos ratios no finitos y los otros siete en 0,1, el
+    // objetivo es el mismo del caso de arriba: (0,1 × 7) / 7 + 0,5 × 0,1 = 0,15 × préstamos.
+    const { s, L, b } = setup();
+    expect(s.adaptations).toBeUndefined();
+    s.banks[1]!.capitalRatio = Number.NaN; // banco zombi del port (0/0)
+    s.banks[2]!.capitalRatio = Infinity; // patrimonio > 0 y sin préstamos
+    const loans = contractIds(L, b.id, 'assets', 'loan').reduce((a, id) => a + contractOf(L, id).amount, 0);
+    const car = (0.1 * 7) / 7 + 0.5 * 0.1;
+    const target = toMicro(car * toUnits(loans));
+    const cp = beginPeriod(L);
+    bankBankruptcyEvent(s, fixedUniform(0.5));
+    expect(assertFlows(L, cp)).toBeUndefined();
+    expect(assertLedger(L)).toBeUndefined();
+    expect(netFinancialWorth(L, b.id)).toBe(target);
+    expect(b.bailoutCost).toBe(target + 1_000_000);
+    expect(s.adaptations).toEqual({ bailoutNonFiniteRatios: 1, bailoutRatiosExcluded: 2 });
+  });
+
+  it('sin ratios no finitos el contador no aparece (el estado de una corrida sin adaptaciones no cambia)', () => {
+    const { s } = setup();
+    bankBankruptcyEvent(s, fixedUniform(0.5));
+    expect('adaptations' in s).toBe(false);
+  });
+
+  it('errores explícitos: ningún otro banco con ratio finito y quita mayor que los depósitos', () => {
     const t1 = setup();
-    t1.s.banks[1]!.capitalRatio = Infinity;
-    expect(() => bankBankruptcyEvent(t1.s, fixedUniform(0.5))).toThrow(/no portado/);
+    for (const o of t1.s.banks.slice(1)) o.capitalRatio = Number.NaN;
+    expect(() => bankBankruptcyEvent(t1.s, fixedUniform(0.5))).toThrow(/sin ningún otro banco con ratio de capital finito: no portado/);
     const t2 = setup();
     for (const b of t2.s.banks) b.capitalRatio = 1e6; // objetivo enorme: la quita supera los depósitos
     expect(() => bankBankruptcyEvent(t2.s, fixedUniform(0.5))).toThrow(/no portado/);
