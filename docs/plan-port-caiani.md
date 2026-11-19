@@ -112,7 +112,8 @@ Hay tres versiones distintas, y no son iguales:
     - Con **100 réplicas por lado** (las que dice el paper), la probabilidad de falla por azar en cada estadístico de medias es ~0,04%, y un port perfecto pasa ~99% de las veces.
     - **Decisión (Nico, 2026-11-12): 100 réplicas del `.jar` y 100 del port.** La tabla de arriba ya es la de las 100 del `.jar` (2026-11-13).
     - Prueba empírica con las 100 (`v4_compare.py --split`, 50 contra 50): **0 fallas de 43**; el tamaño más grande fue 0,34 desvíos (ccf+1 de la inversión). Con 100 contra 100 el margen es mayor todavía.
-- **V5, sensibilidades.** Los experimentos del paper (aversión al riesgo de los bancos, depósitos precautorios, pesos de la inversión) en la misma dirección y orden de magnitud.
+- **Resultado de V4 (2026-11-19): cumplido** (Nico). 100 réplicas del port (94 de las semillas 1–100 y los reemplazos 101–106 de las 6 que alcanzan una rama del base que no se porta; reglas-caiani.md, sec. 1) contra las 100 del `.jar`: 1 falla en 43, `cycSD:netIncomeGrowth`, por tamaño (1,05; Welch p = 0,37). Se investigó como pide el criterio: es un artefacto del estadístico en una réplica (tendencia HP de la tasa cerca de 0 al borde de la ventana; el mismo mecanismo aparece en el `.jar`; sin diferencia con medidas robustas). Con las 94 originales, lo mismo. Salidas: `reference/p0/runs/v4-compare-100.txt`, `v4-compare-94.txt`; detalle en pendientes.md.
+- **V5, sensibilidades.** **No se corrió:** P4 se cerró con V4 (Nico, 2026-11-19); a preguntar al arrancar P5 (pendientes.md). Los experimentos del paper (aversión al riesgo de los bancos, depósitos precautorios, pesos de la inversión) en la misma dirección y orden de magnitud.
 - **Después:** volver a correr el criterio de la Fase 0 (emisión ⇒ inflación) y el de G = 0 sobre el port.
 
 ## 5. Unidad de tiempo
@@ -140,8 +141,8 @@ Hay tres versiones distintas, y no son iguales:
 2. **P1, infraestructura:** ledger de contratos con varios bancos, escala monetaria, normal determinista, invariante de flujos, módulo nuevo. **Hecho (2026-11-13):** `packages/engine/src/caiani/`; diseño y registro en [ledger-contratos.md](ledger-contratos.md).
 3. **P2, inicialización** (V1). **Hecho (2026-11-13):** `caiani/init.ts`, con V1 verificado contra el volcado del oráculo; registro en [inicializacion.md](inicializacion.md).
 4. **P3, reglas en el orden del tick de JMAB** (en curso desde el 2026-11-13; método de V3 por evento y registro en [reglas-caiani.md](reglas-caiani.md)): expectativas → precios → inversión → crédito y depósitos → trabajo → producción → consumo → pagos (salarios, intereses, impuestos, dividendos) → quiebras → bonos y reservas. Cada una con V2 y V3.
-5. **P4, reproducción** (V4, V5).
-6. **P5:** criterio de la Fase 0 y G = 0 sobre el port; costo por tick en el navegador con 8.000 hogares.
+5. **P4, reproducción** (V4, V5). **Cerrado el 2026-11-19 (Nico)** con V4 cumplido; V5 no se corrió (pendientes.md, P5).
+6. **P5 (próximo):** criterio de la Fase 0 y G = 0 sobre el port; costo por tick en el navegador con 8.000 hogares, primero el evento 25 sin cambiar un bit. Arranque y orden en pendientes.md ("P5").
 7. **P6:** conectar la app (ticks trimestrales) y archivar las reglas viejas.
 
 Después: extensiones (período mensual, particularidades argentinas, perillas).
